@@ -48,15 +48,18 @@ def build_ssh_command(
     db_host: str,
     db_port: int,
     jump_hosts: list[str],
+    ssh_options: list[str] | None = None,
 ) -> list[str]:
     """构造 ssh 命令 argv。纯函数，便于单测。
 
     jump_hosts 非空；最后一跳作为 ssh 目标，其余作为 -J 链。
+    ssh_options 原样插入（如 -i key、-o UserKnownHostsFile=...），供非默认凭证场景。
     """
     if not jump_hosts:
         raise ValueError("build_ssh_command 要求至少一个跳板")
     *proxy_chain, target = jump_hosts
-    cmd = ["ssh", *_SSH_BASE_OPTS, "-L", f"127.0.0.1:{local_port}:{db_host}:{db_port}"]
+    cmd = ["ssh", *_SSH_BASE_OPTS, *(ssh_options or []),
+           "-L", f"127.0.0.1:{local_port}:{db_host}:{db_port}"]
     if proxy_chain:
         cmd += ["-J", ",".join(proxy_chain)]
     cmd.append(target)
@@ -66,17 +69,26 @@ def build_ssh_command(
 class SSHTunnel:
     """一条到数据库的本地转发隧道。线程安全的 close。"""
 
-    def __init__(self, db_host: str, db_port: int, jump_hosts: list[str]):
+    def __init__(
+        self,
+        db_host: str,
+        db_port: int,
+        jump_hosts: list[str],
+        ssh_options: list[str] | None = None,
+    ):
         self._db_host = db_host
         self._db_port = db_port
         self._jump_hosts = jump_hosts
+        self._ssh_options = ssh_options or []
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self.local_port: int = 0
 
     def start(self) -> "SSHTunnel":
         self.local_port = _find_free_port()
-        cmd = build_ssh_command(self.local_port, self._db_host, self._db_port, self._jump_hosts)
+        cmd = build_ssh_command(
+            self.local_port, self._db_host, self._db_port, self._jump_hosts, self._ssh_options
+        )
         # stderr 捕获用于失败诊断；不捕获 stdout（-N 无输出）
         try:
             self._proc = subprocess.Popen(
@@ -146,5 +158,7 @@ class SSHTunnel:
             proc.stderr.close()
 
 
-def open_tunnel(db_host: str, db_port: int, jump_hosts: list[str]) -> SSHTunnel:
-    return SSHTunnel(db_host, db_port, jump_hosts).start()
+def open_tunnel(
+    db_host: str, db_port: int, jump_hosts: list[str], ssh_options: list[str] | None = None
+) -> SSHTunnel:
+    return SSHTunnel(db_host, db_port, jump_hosts, ssh_options).start()

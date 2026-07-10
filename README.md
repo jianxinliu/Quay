@@ -47,6 +47,15 @@ claude mcp add --transport http dbm http://127.0.0.1:8100/mcp
 
 无论哪种通道，审批单都会创建并留痕（谁批的、何时、备注）。
 
+## 资源与数据治理
+
+- **连接/隧道空闲回收**：引擎与 SSH 隧道空闲 10 分钟自动回收，断开的隧道按需重建
+- **审计保留期**：审计记录与终态审批单默认保留 30 天（`--retention-days` / `DBM_RETENTION_DAYS` 可配），后台每分钟清理一轮
+- **大单元格截断**：超过 `policy.max_cell_chars`（默认 4096 字符）的单元格截断并标注原始长度，防止大 TEXT/BLOB 撑爆 agent 上下文
+- **分页交给 agent**：查询结果超出 `max_rows` 时返回 `truncated: true` + 提示，agent 用 LIMIT/OFFSET 自行翻页；管理后台审计页支持 offset/limit 翻页
+- **EXPLAIN 进审批单**：写操作的执行计划（不带 ANALYZE）自动附进风险报告，供审批人参考
+- **SSH 多跳**：`jump_hosts` 按序多级跳板；自定义密钥/known_hosts 用 `ssh_options: ["-F", "/path/ssh_config"]`（注意 `-o` 不会传递给跳板连接）；真实两跳验证脚本 `scripts/e2e_ssh_multihop.sh`
+
 ## 敏感字段脱敏
 
 查询结果按列名自动脱敏：内置模式（password/passwd/secret/token/api_key/credit_card 等子串匹配，`policy.mask_default_patterns: false` 可关）+ `policy.mask_columns` 业务自定义列，命中的值替换为 `***MASKED***`，响应带 `masked_columns` 说明。

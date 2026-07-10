@@ -166,6 +166,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
  <div class='row'><div><b>影响范围</b><br>{impact}</div></div>
  <b>判定依据</b><ul>{reasons}</ul>
  {'<b>告警</b><ul>' + warnings + '</ul>' if warnings else ''}
+ {'<b>执行计划（EXPLAIN）</b><pre>' + _esc(risk.get('explain')) + '</pre>' if risk.get('explain') else ''}
 </div>
 {actions}
 <p><a href='/admin/approvals'>← 返回列表</a></p>"""
@@ -197,7 +198,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
 
     @mcp.custom_route("/admin/audit", methods=["GET"])
     async def _audit(req: Request) -> HTMLResponse:
-        rows = service.store.recent(200)
+        try:
+            limit = min(max(int(req.query_params.get("limit", "200")), 1), 1000)
+            offset = max(int(req.query_params.get("offset", "0")), 0)
+        except ValueError:
+            limit, offset = 200, 0
+        total = service.store.count()
+        rows = service.store.recent(limit, offset)
         f_status = req.query_params.get("status")
         f_conn = req.query_params.get("connection")
         if f_status:
@@ -218,6 +225,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
                 f"<td class='muted'>{_esc(r['row_count'])} 行 / {_esc(r['duration_ms'])}ms<br>{_esc((r['detail'] or '')[:60])}</td></tr>"
             )
         table_rows = "".join(trs) or '<tr><td colspan="7" class="muted">（无记录）</td></tr>'
+        status_q = f"&status={_esc(f_status)}" if f_status else ""
         filters = (
             "<div class='filters'>筛选状态: "
             "<a href='/admin/audit'>全部</a>"
@@ -225,9 +233,19 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
             "<a href='/admin/audit?status=rejected'>被拒</a>"
             "<a href='/admin/audit?status=error'>出错</a></div>"
         )
+        pager_parts = []
+        if offset > 0:
+            prev_off = max(offset - limit, 0)
+            pager_parts.append(f"<a href='/admin/audit?limit={limit}&offset={prev_off}{status_q}'>← 较新</a>")
+        if offset + limit < total:
+            pager_parts.append(f"<a href='/admin/audit?limit={limit}&offset={offset + limit}{status_q}'>较旧 →</a>")
+        pager = (
+            f"<div class='filters'>共 {total} 条 · 第 {offset + 1}–{min(offset + limit, total)} 条 "
+            + " · ".join(pager_parts) + "</div>"
+        )
         body = (
-            f"<div class='card'><h2>操作审计（最近 200 条）</h2>{filters}"
+            f"<div class='card'><h2>操作审计</h2>{filters}"
             f"<table><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th><th>SQL</th><th>状态</th><th>结果</th></tr>"
-            f"{table_rows}</table></div>"
+            f"{table_rows}</table>{pager}</div>"
         )
         return HTMLResponse(_page("操作审计", body))

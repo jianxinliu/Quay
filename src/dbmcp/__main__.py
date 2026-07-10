@@ -45,6 +45,9 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--stdio", action="store_true", help="以 stdio 传输运行（默认 HTTP daemon）")
     serve.add_argument("--host", default=DEFAULT_HOST)
     serve.add_argument("--port", type=int, default=DEFAULT_PORT)
+    serve.add_argument("--retention-days", type=int,
+                       default=int(os.environ.get("DBM_RETENTION_DAYS", "30")),
+                       help="审计记录与终态审批单保留天数（默认 30）")
 
     approvals = sub.add_parser("approvals", help="列出审批单")
     _add_data_dir(approvals)
@@ -74,6 +77,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     approvals = ApprovalStore(db_path)
     service = DbmService(config, store, approvals)
     service.metadata = MetadataCache(db_path, service.pool)
+    service.start_housekeeping(retention_days=args.retention_days)
     mcp = build_mcp(service)
 
     try:

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass
 
 from .approvals import ApprovalError, ApprovalStore
@@ -17,6 +19,11 @@ from .config import AppConfig, ConnectionConfig
 from .masking import apply_mask
 from .metadata import MetadataCache
 from . import engines, redis_engine
+
+logger = logging.getLogger(__name__)
+
+HOUSEKEEPING_INTERVAL_S = 60
+DEFAULT_RETENTION_DAYS = 30
 
 
 class QueryRejected(Exception):
@@ -43,6 +50,7 @@ class DbmService:
         self.redis_pool = redis_engine.RedisPool()
         self.approvals = approvals
         self.metadata = metadata
+        self._housekeeping_stop: threading.Event | None = None
 
     # ---------- 元信息 ----------
 
@@ -86,7 +94,8 @@ class DbmService:
 
         try:
             engine = self.pool.get(project, connection, cfg)
-            result = engines.run_query(engine, sql, cfg.policy.max_rows)
+            result = engines.run_query(engine, sql, cfg.policy.max_rows,
+                                        max_cell_chars=cfg.policy.max_cell_chars)
         except QueryRejected:
             raise
         except Exception as e:
@@ -110,6 +119,11 @@ class DbmService:
         }
         if masked:
             out["masked_columns"] = masked
+        if result.truncated:
+            out["hint"] = (
+                f"结果已截断到 {cfg.policy.max_rows} 行（连接策略 max_rows）。"
+                "如需后续数据，请在 SQL 中用 LIMIT/OFFSET（或 WHERE 条件缩小范围）自行分页。"
+            )
         return out
 
     # ---------- 写操作（拒绝—重提 + change_id 放行）----------
@@ -151,6 +165,10 @@ class DbmService:
         caller: CallerInfo,
     ) -> dict:
         report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
+        report_dict = report.to_dict()
+        plan = self._try_explain(project, connection, cfg, sql)
+        if plan:
+            report_dict["explain"] = plan
         change = self.approvals.create(
             project=project,
             connection=connection,
@@ -160,7 +178,7 @@ class DbmService:
             fingerprint=fingerprint(sql, cfg.engine),
             reason=reason,
             risk_level=report.level,
-            risk_report=report.to_dict(),
+            risk_report=report_dict,
             agent=caller.agent,
             session_id=caller.session_id,
         )
@@ -171,7 +189,7 @@ class DbmService:
         return {
             "status": "approval_required",
             "change_id": change.id,
-            "risk": report.to_dict(),
+            "risk": report_dict,
             "message": (
                 f"该操作被评估为需人工授权（风险等级 {report.level}）。"
                 f"已生成审批单 #{change.id}，请通知用户在管理后台审批；"
@@ -222,6 +240,26 @@ class DbmService:
             "duration_ms": result.duration_ms,
         }
 
+    def _try_explain(
+        self, project: str, connection: str, cfg: ConnectionConfig, sql: str
+    ) -> str | None:
+        """对写语句取执行计划（不带 ANALYZE，不执行）供审批人参考。
+
+        reader 会话可能因只读事务拒绝 EXPLAIN DML（PG 会），失败则退回 writer；
+        全部失败返回 None，不阻断审批单生成。计划文本截断到 4000 字符。
+        """
+        for role in ("reader", "writer"):
+            if role == "writer" and cfg.writer is None:
+                break
+            try:
+                engine = self.pool.get(project, connection, cfg, role=role)
+            except Exception:
+                continue
+            plan = engines.explain(engine, sql, cfg.engine)
+            if plan:
+                return plan[:4000]
+        return None
+
     def _meta_provider(self, project: str, connection: str, cfg: ConnectionConfig):
         """给风险引擎注入"按表取元数据"的能力；无缓存或取不到时返回 None。"""
         if self.metadata is None:
@@ -260,7 +298,8 @@ class DbmService:
         if verdict.readonly:
             try:
                 client = self.redis_pool.get(project, connection, cfg)
-                result = redis_engine.run_command(client, parse_command(command))
+                result = redis_engine.run_command(client, parse_command(command),
+                                                  max_cell_chars=cfg.policy.max_cell_chars)
             except Exception as e:
                 rec.status = "error"
                 rec.detail = f"{type(e).__name__}: {e}"
@@ -322,7 +361,8 @@ class DbmService:
             # 执行审批单存储的命令；配置了 writer（Redis ACL）则用 writer
             role = "writer" if cfg.writer is not None else "reader"
             client = self.redis_pool.get(project, connection, cfg, role=role)
-            result = redis_engine.run_command(client, parse_command(change.sql))
+            result = redis_engine.run_command(client, parse_command(change.sql),
+                                              max_cell_chars=cfg.policy.max_cell_chars)
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
@@ -377,7 +417,8 @@ class DbmService:
         engine = self.pool.get(project, connection, cfg)
 
         def _run() -> dict:
-            result = engines.sample_rows(engine, table, limit)
+            result = engines.sample_rows(engine, table, limit,
+                                         max_cell_chars=cfg.policy.max_cell_chars)
             rows, masked = apply_mask(result.columns, result.rows, cfg.policy)
             out = {
                 "columns": result.columns,
@@ -438,7 +479,47 @@ class DbmService:
         self.store.record(rec)
         return result
 
+    # ---------- 后台维护（serve 时启动）----------
+
+    def start_housekeeping(
+        self,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
+        interval_s: int = HOUSEKEEPING_INTERVAL_S,
+    ) -> None:
+        """周期任务：空闲引擎/隧道回收 + 审计与终态审批单按保留期清理。"""
+        if self._housekeeping_stop is not None:
+            return
+        stop = threading.Event()
+        self._housekeeping_stop = stop
+
+        def _loop() -> None:
+            while not stop.wait(interval_s):
+                self.housekeep_once(retention_days)
+
+        threading.Thread(target=_loop, name="dbm-housekeeping", daemon=True).start()
+
+    def housekeep_once(self, retention_days: int = DEFAULT_RETENTION_DAYS) -> dict:
+        """执行一轮维护，返回统计（供测试与日志）。单项失败不影响其他项。"""
+        stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0, "changes_purged": 0}
+        for key, fn in (
+            ("engines_reaped", self.pool.reap_idle),
+            ("redis_reaped", self.redis_pool.reap_idle),
+            ("audit_purged", lambda: self.store.purge_old(retention_days)),
+            ("changes_purged",
+             (lambda: self.approvals.purge_old(retention_days)) if self.approvals else (lambda: 0)),
+        ):
+            try:
+                stats[key] = fn()
+            except Exception:
+                logger.exception("housekeeping %s 失败", key)
+        if any(stats.values()):
+            logger.info("housekeeping: %s", stats)
+        return stats
+
     def close(self) -> None:
+        if self._housekeeping_stop is not None:
+            self._housekeeping_stop.set()
+            self._housekeeping_stop = None
         self.pool.dispose()
         self.redis_pool.dispose()
         self.store.close()

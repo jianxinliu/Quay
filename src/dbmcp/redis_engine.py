@@ -85,7 +85,7 @@ def _build_client(cfg: ConnectionConfig, role: Role) -> _PooledRedis:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host or "127.0.0.1", cfg.port or 6379
     if cfg.jump_hosts:
-        tunnel = open_tunnel(host, port, cfg.jump_hosts)
+        tunnel = open_tunnel(host, port, cfg.jump_hosts, cfg.ssh_options)
         host, port = "127.0.0.1", tunnel.local_port
 
     user, password = None, None
@@ -115,12 +115,24 @@ def _build_client(cfg: ConnectionConfig, role: Role) -> _PooledRedis:
     return _PooledRedis(client=client, tunnel=tunnel, last_used=time.monotonic())
 
 
-def run_command(client: redis.Redis, parts: list[str]) -> RedisResult:
+def run_command(
+    client: redis.Redis, parts: list[str], max_cell_chars: int = 4096
+) -> RedisResult:
     """执行已通过分类/审批的命令。调用方负责传入 parse_command 的结果。"""
     start = dt.datetime.now()
     value = client.execute_command(*parts)
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
-    return RedisResult(value=_jsonable(value), duration_ms=duration_ms)
+    return RedisResult(value=_truncate(_jsonable(value), max_cell_chars), duration_ms=duration_ms)
+
+
+def _truncate(v: Any, max_chars: int) -> Any:
+    if isinstance(v, str) and len(v) > max_chars:
+        return v[:max_chars] + f"…[已截断，原 {len(v)} 字符]"
+    if isinstance(v, list):
+        return [_truncate(x, max_chars) for x in v]
+    if isinstance(v, dict):
+        return {k: _truncate(val, max_chars) for k, val in v.items()}
+    return v
 
 
 def _jsonable(v: Any) -> Any:

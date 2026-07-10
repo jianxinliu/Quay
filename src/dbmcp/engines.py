@@ -110,7 +110,7 @@ def _build_pooled_engine(cfg: ConnectionConfig, role: Role) -> _PooledEngine:
     # SQLite 无网络，跳板不适用
     if cfg.engine != "sqlite" and cfg.jump_hosts:
         default_port = 3306 if cfg.engine == "mysql" else 5432
-        tunnel = open_tunnel(cfg.host, cfg.port or default_port, cfg.jump_hosts)
+        tunnel = open_tunnel(cfg.host, cfg.port or default_port, cfg.jump_hosts, cfg.ssh_options)
         host, port = "127.0.0.1", tunnel.local_port
 
     try:
@@ -225,8 +225,10 @@ def _create_readonly_engine(
     raise UnsupportedEngineError(f"引擎 {cfg.engine!r} 暂不支持直连查询（Redis 适配在 M4）")
 
 
-def run_query(engine: SAEngine, sql: str, max_rows: int) -> QueryResult:
-    """执行只读 SQL（调用方必须先通过 classify 判定），结果集截断到 max_rows。"""
+def run_query(
+    engine: SAEngine, sql: str, max_rows: int, max_cell_chars: int = 4096
+) -> QueryResult:
+    """执行只读 SQL（调用方必须先通过 classify 判定），行数截到 max_rows，单元格截到 max_cell_chars。"""
     start = dt.datetime.now()
     with engine.connect() as conn:
         result = conn.execute(text(sql))
@@ -234,11 +236,25 @@ def run_query(engine: SAEngine, sql: str, max_rows: int) -> QueryResult:
             columns = list(result.keys())
             fetched = result.fetchmany(max_rows + 1)
             truncated = len(fetched) > max_rows
-            rows = [[_jsonable(v) for v in row] for row in fetched[:max_rows]]
+            rows = [
+                [truncate_cell(_jsonable(v), max_cell_chars) for v in row]
+                for row in fetched[:max_rows]
+            ]
         else:
             columns, rows, truncated = [], [], False
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
     return QueryResult(columns, rows, len(rows), truncated, duration_ms)
+
+
+def truncate_cell(value: Any, max_chars: int) -> Any:
+    """超长字符串单元格截断并标注原始长度（含 bytes 的 base64 包装形式）。"""
+    if isinstance(value, str) and len(value) > max_chars:
+        return value[:max_chars] + f"…[已截断，原 {len(value)} 字符]"
+    if isinstance(value, dict) and "__bytes_base64__" in value:
+        b64 = value["__bytes_base64__"]
+        if isinstance(b64, str) and len(b64) > max_chars:
+            return {"__bytes_base64__": b64[:max_chars] + f"…[已截断，原 {len(b64)} 字符]"}
+    return value
 
 
 def estimate_row_count(engine: SAEngine, engine_kind: str, table: str) -> int | None:
@@ -330,13 +346,15 @@ def describe_table(engine: SAEngine, table: str) -> dict:
     return {"table": table, "columns": columns, "indexes": indexes, "primary_key": pk.get("constrained_columns", [])}
 
 
-def sample_rows(engine: SAEngine, table: str, limit: int) -> QueryResult:
+def sample_rows(
+    engine: SAEngine, table: str, limit: int, max_cell_chars: int = 4096
+) -> QueryResult:
     insp = inspect(engine)
     _ensure_table_exists(insp, table)
     # 表名经存在性校验后再用方言引用符包裹，杜绝注入
     preparer = engine.dialect.identifier_preparer
     quoted = preparer.quote(table)
-    return run_query(engine, f"SELECT * FROM {quoted}", max_rows=limit)
+    return run_query(engine, f"SELECT * FROM {quoted}", max_rows=limit, max_cell_chars=max_cell_chars)
 
 
 def _ensure_table_exists(insp, table: str) -> None:  # noqa: ANN001

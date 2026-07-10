@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _SCHEMA = """
@@ -90,12 +90,27 @@ class AuditStore:
             self._conn.commit()
             return int(cur.lastrowid or 0)
 
-    def recent(self, limit: int = 100) -> list[dict]:
+    def recent(self, limit: int = 100, offset: int = 0) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT count(*) FROM audit_log").fetchone()
+        return int(row[0])
+
+    def purge_old(self, retention_days: int) -> int:
+        """删除超过保留期的审计记录，返回删除条数。"""
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat(
+            timespec="milliseconds"
+        )
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+            self._conn.commit()
+        return cur.rowcount or 0
 
     def close(self) -> None:
         with self._lock:

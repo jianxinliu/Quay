@@ -23,6 +23,8 @@ class Policy(BaseModel):
     max_rows: int = DEFAULT_MAX_ROWS
     statement_timeout_s: int = DEFAULT_STATEMENT_TIMEOUT_S
     auto_approve_low_risk_write: bool = False
+    # 单元格最大字符数：超长 TEXT/BLOB 截断，防止撑爆 agent 上下文
+    max_cell_chars: int = 4096
     # 敏感字段脱敏：内置模式（password/token/secret 等）+ 自定义列名（不区分大小写）
     mask_default_patterns: bool = True
     mask_columns: list[str] = Field(default_factory=list)
@@ -45,6 +47,8 @@ class ConnectionConfig(BaseModel):
     password: str | None = None  # 密钥引用
     writer: WriterAccount | None = None
     jump_hosts: list[str] = Field(default_factory=list)
+    # 额外 ssh 参数（如 -i /path/key、-o UserKnownHostsFile=...），原样插入 ssh 命令
+    ssh_options: list[str] = Field(default_factory=list)
     policy: Policy = Field(default_factory=Policy)
 
     @model_validator(mode="after")

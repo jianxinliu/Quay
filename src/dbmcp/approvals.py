@@ -221,6 +221,22 @@ class ApprovalStore:
             self._conn.commit()
         return self.get(change_id)
 
+    def purge_old(self, retention_days: int) -> int:
+        """删除超过保留期的**终态**审批单（consumed/rejected/expired 及已过期的 pending/approved）。
+
+        未过期的 pending/approved 无论多老都保留（虽然 TTL 30 分钟意味着这不会发生）。
+        """
+        now = datetime.now(UTC)
+        cutoff = (now - timedelta(days=retention_days)).isoformat(timespec="seconds")
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM change_request WHERE created_at < ?"
+                " AND (status IN (?, ?) OR expires_at < ?)",
+                (cutoff, STATUS_CONSUMED, STATUS_REJECTED, now.isoformat(timespec="seconds")),
+            )
+            self._conn.commit()
+        return cur.rowcount or 0
+
     def _row_to_change(self, row: sqlite3.Row) -> ChangeRequest:
         return ChangeRequest(
             id=row["id"],
