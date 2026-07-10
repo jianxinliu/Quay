@@ -1,0 +1,35 @@
+# 连接配置示例。复制为 connections.yaml 后按需修改（connections.yaml 已被 gitignore）。
+# 密码只能写引用，不能写明文：
+#   env://VAR_NAME              环境变量（Docker 部署推荐，经 docker secret/env 注入）
+#   keyring://service/account   系统钥匙串（裸机 stdio 模式）
+#   plain://xxx                 字面量，仅限本地调试
+projects:
+  demo:
+    connections:
+      local-sqlite:
+        engine: sqlite
+        database: ./data/demo.sqlite3
+        environment: local
+
+      dev-mysql:
+        engine: mysql
+        host: 127.0.0.1
+        port: 3306
+        database: demo
+        environment: dev
+        user: demo_reader
+        password: env://DEMO_MYSQL_PW
+        policy:
+          max_rows: 1000
+          statement_timeout_s: 30
+
+      prod-postgres:
+        engine: postgres
+        host: 10.0.3.12
+        port: 5432
+        database: shop
+        environment: prod
+        user: shop_reader
+        password: env://SHOP_PG_READER_PW
+        # 多层跳板（M2 支持），按序经过
+        jump_hosts: [bastion1.corp, bastion2.corp]

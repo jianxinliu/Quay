@@ -1,0 +1,14 @@
+services:
+  dbm:
+    build: .
+    container_name: db-manage-mcp
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8100:8100"   # 只暴露给本机
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ~/.ssh:/root/.ssh:ro     # M2 SSH 多跳隧道复用宿主的 ssh 配置与密钥
+    env_file:
+      - path: .env               # 数据库密码经 env:// 引用注入，示例见 .env.example
+        required: false
