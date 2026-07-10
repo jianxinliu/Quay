@@ -43,6 +43,8 @@ docker compose up -d --build
 - **本机测本地服务要绕过代理**：这台机器 shell 有 SOCKS 代理环境变量，不绕过会把 127.0.0.1 请求发进代理得到 502。curl 用 `--noproxy '*'`；fastmcp Client（底层 httpx）用 `env NO_PROXY='*' no_proxy='*'`（单纯 `-u ALL_PROXY` 不够，httpx 还会读其他代理变量，NO_PROXY 最稳）。
 - **写 sqlglot 相关逻辑前先跑实验脚本验证解析行为**：已验证的坑——PG 方言 `EXPLAIN`/`SHOW` 退化为不透明 `Command` 节点需特判；`WITH x AS (INSERT ...) SELECT` 顶层是 `Select`，必须遍历整棵树找写节点。
 - fastmcp 3.x 装的是 `fastmcp` + `fastmcp-slim`，其依赖 `uncalled-for` 是正常的依赖注入库（已核实非投毒包）。
+- **MySQL 会话设置的多条语句不能逗号拼接**：`SET SESSION max_execution_time=X, SESSION TRANSACTION READ ONLY` 是非法语法（1064）——`SET TRANSACTION READ ONLY` 是独立语句、不是变量赋值。必须用 connect 事件监听器逐条 execute。此 bug 只有真实 MySQL e2e 才暴露，SQLite 单测发现不了；已抽 `mysql_session_statements()` 纯函数 + 回归测试（test_engines.py）。**教训：DB 方言相关代码，SQLite 单测不够，必须对目标 DB 跑真实 e2e。**
+- 真实 MySQL 9.5 e2e 已验证通过：reader 只读防线报 1792、writer 双账号写入、information_schema 行数估算、索引命中风险判定、完整拒绝—重提审批闭环、管理后台批准。
 
 ## 模块地图（src/dbmcp/）
 

@@ -131,6 +131,20 @@ def _resolve_account(cfg: ConnectionConfig, role: Role) -> tuple[str, str]:
     return cfg.user or "", cfg.password or ""
 
 
+def mysql_session_statements(timeout_s: int, readonly: bool) -> list[str]:
+    """MySQL 建连后要逐条执行的会话设置语句。
+
+    关键：max_execution_time（变量赋值）与 SET TRANSACTION READ ONLY 是两条
+    互不兼容的独立语句，绝不能用逗号拼进一条 SET —— 真实 MySQL 会报 1064 语法错误
+    （SQLite 单测发现不了，需要真实 MySQL e2e 才暴露）。
+    """
+    statements = [f"SET SESSION max_execution_time = {timeout_s * 1000}"]
+    if readonly:
+        # 会话默认只读，作为数据库层第二道防线（写操作报 1792）
+        statements.append("SET SESSION TRANSACTION READ ONLY")
+    return statements
+
+
 def _create_readonly_engine(
     cfg: ConnectionConfig,
     role: Role,
@@ -165,19 +179,28 @@ def _create_readonly_engine(
             port=port or 3306,
             database=cfg.database,
         )
-        init_command = f"SET SESSION max_execution_time={timeout_s * 1000}"
-        if readonly:
-            init_command += ", SESSION TRANSACTION READ ONLY"
-        return create_engine(
+        engine = create_engine(
             url,
             pool_pre_ping=True,
             connect_args={
                 "connect_timeout": 5,
                 "read_timeout": timeout_s,
                 "write_timeout": timeout_s,
-                "init_command": init_command,
             },
         )
+
+        statements = mysql_session_statements(timeout_s, readonly)
+
+        @event.listens_for(engine, "connect")
+        def _mysql_session_setup(dbapi_conn, _record):  # noqa: ANN001
+            cursor = dbapi_conn.cursor()
+            try:
+                for stmt in statements:
+                    cursor.execute(stmt)
+            finally:
+                cursor.close()
+
+        return engine
 
     if cfg.engine == "postgres":
         from sqlalchemy.engine import URL
