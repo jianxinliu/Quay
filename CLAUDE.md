@@ -6,14 +6,14 @@
 
 - Python 3.12 + FastMCP（官方 MCP SDK）+ FastAPI（MCP 与管理后台共用一个 ASGI 应用）
 - sqlglot 做 SQL AST 解析与审计；SQLAlchemy Core（不用 ORM）+ redis-py
-- SQLite 存审计/审批单/元数据缓存；Jinja2 + HTMX 做管理后台
+- SQLite 存审计/审批单/元数据缓存；管理后台服务端渲染 HTML（未用 Jinja2/HTMX）
 - SSH 多跳复用系统 OpenSSH（`ssh -J jump1,jump2`），不自己实现隧道协议
-- 部署形态：本地 Docker 常驻 daemon（streamable HTTP），stdio 作兼容模式
+- 部署形态：**本地进程模式**（`uv run dbm serve`），macOS 用 launchd 常驻（scripts/install-launchd.sh）；stdio 作单 agent 直连模式。**已弃用 Docker**——本地单机场景 Docker 只带麻烦（连宿主库绕网络、无 keyring 后端、SSH key 变容器内路径）
 
 ## 安全设计红线（实现时必须遵守）
 
 1. **默认拒绝**：SQL 解析失败、多语句、无法分类的一律按写操作处理，进审批流。
-2. **密钥不落明文**：配置文件只存 `env://` / `keyring://` / `agefile://` 引用；密码永不出现在日志、审计记录、工具返回值中。Docker 内不可用 macOS Keychain，容器部署走 env/加密文件。
+2. **密钥不落明文**：配置文件只存 `env://` / `keyring://` 引用；密码永不出现在日志、审计记录、工具返回值中。本地进程模式下管理后台可把页面输入的密码写 keyring；`env://` 引用的值由常驻服务从 `~/.config/db-manage-mcp/env`（600）注入。
 3. **拒绝—重提 + change_id 放行**：写操作先被明确拒绝并生成审批单（含风险报告），人在后台批准后 agent 带 change_id 重提才放行；**执行的永远是审批单里存储的 SQL**，重提文本只作指纹校验（不一致即拒），指纹匹配仅作无 id 时的兜底。审批单一次性核销、有 TTL（30 分钟）。prod 环境强制审批。
 4. **双账号**：日常查询走只读账号，仅审批通过的执行切换 writer 账号。
 5. **连接与密钥管理不暴露为 MCP 工具**（agent 碰不到）；人可通过 CLI 或**已登录的管理后台**操作。后台需认证（DBM_ADMIN_TOKEN），页面输入的密码一律进 keyring、配置只存引用。
@@ -30,9 +30,9 @@
 ```bash
 uv sync --extra keyring    # 安装依赖
 uv run pytest              # 全量测试（改动后必须全过）
-uv run dbm                 # HTTP daemon（127.0.0.1:8100）
-uv run dbm --stdio         # stdio 模式
-docker compose up -d --build
+DBM_MYSQL_PW=... DBM_ADMIN_TOKEN=... uv run dbm serve   # HTTP（127.0.0.1:8100）
+uv run dbm serve --stdio                                # stdio 模式
+bash scripts/install-launchd.sh                         # macOS 常驻（幂等，改配置后重跑即热重启）
 ```
 
 - 代码在 `src/dbmcp/`，分层：`server.py`（MCP 接口）→ `service.py`（核心逻辑，与传输解耦、可直接单测）→ `engines.py` / `audit/`（分类器 + 审计日志）。新增工具时逻辑写在 service 层，server 层只做注册和 ToolError 转换。
@@ -62,7 +62,7 @@ docker compose up -d --build
 ## 当前状态
 
 - [x] 设计定稿（DESIGN.md）
-- [x] M1 骨架：daemon（Docker）+ SecretProvider + MySQL/PG/SQLite 只读 query + schema + 操作审计
+- [x] M1 骨架：daemon + SecretProvider + MySQL/PG/SQLite 只读 query + schema + 操作审计
 - [x] M2 连接：SSH 多跳隧道 + 引擎池（隧道托管/空闲回收）+ 元数据缓存
 - [x] M3 管控：风险审计引擎 + 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台
 - [x] M4 增强：elicitation 快捷审批（local/dev 默认开，审批单始终留痕）+ Redis 适配（命令分类 + 同一套审批流，真实 Redis 7 e2e 通过）+ 敏感字段脱敏 + CLI 审批兜底（dbm approvals/approve/reject）。130 个测试全过。

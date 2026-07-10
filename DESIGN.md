@@ -1,6 +1,6 @@
 # db-manage-mcp 设计文档
 
-> 状态：已确认技术选型（Python + FastMCP / MySQL + PG + Redis / elicitation + CLI 审批，Web 后台 / Docker daemon 部署）
+> 状态：已确认技术选型（Python + FastMCP / MySQL + PG + Redis / elicitation + CLI 审批，Web 后台 / 本地进程 + launchd 常驻部署）
 
 ## 一、目标
 
@@ -20,7 +20,7 @@ Agent A / B / C ...（Claude Code 等 MCP 客户端）
         │  MCP streamable HTTP（stdio 作兼容模式）
         ▼
 ┌───────────────────────────────────────────────┐
-│ db-manage-mcp daemon（Docker 容器，本机部署）     │
+│ db-manage-mcp 服务（本地进程，launchd 常驻）        │
 │                                               │
 │  FastAPI 应用，三个面：                          │
 │   /mcp    MCP 接口（FastMCP streamable HTTP）   │
@@ -49,7 +49,7 @@ Agent A / B / C ...（Claude Code 等 MCP 客户端）
 | SQL 解析 | **sqlglot** | AST 级解析：语句分类、提取涉及表/列、识别多语句与 CTE 内写操作 |
 | SQL 审计 | sqlglot 规则引擎 + `EXPLAIN` + information_schema 统计（自建核心）；**goInception** 作为可选增强（Docker sidecar，仅 MySQL，提供成熟的审核规则与影响行数估算） | 说明：Python 生态中"解析"有成熟库（sqlglot），"安全审计"没有开箱即用的成熟库，业界通行做法即 AST 规则 + EXPLAIN；goInception 是独立服务形态的成熟审计组件 |
 | 多数据库 | SQLAlchemy Core（不用 ORM）+ redis-py | 统一 MySQL/PG 方言；Redis 走命令分类模型 |
-| SSH 多跳 | 子进程调用系统 OpenSSH：`ssh -N -L 本地端口:db:port -J jump1,jump2 target` | 天然多跳、复用 `~/.ssh/config`；容器内挂载 `~/.ssh`（只读）或转发 `SSH_AUTH_SOCK` |
+| SSH 多跳 | 子进程调用系统 OpenSSH：`ssh -N -L 本地端口:db:port -J jump1,jump2 target` | 天然多跳、复用 `~/.ssh/config`；本地进程直接读 `~/.ssh` 与真实 key 路径 |
 | 密钥 | SecretProvider 抽象：`env://`（Docker 推荐，经 docker secret/env 注入）、`file+age`（加密配置文件）、`keyring://`（裸机运行时用 macOS Keychain） | **Docker 内无法访问宿主 Keychain**，故容器部署默认 env/加密文件 |
 | 存储 | SQLite（volume 持久化） | 审计、审批单、元数据缓存 |
 | 管理后台 | FastMCP custom_route（Starlette）+ 服务端渲染 HTML | 与 MCP 同进程；实现时未引入 Jinja2/HTMX，用无外部依赖的 f-string 渲染（YAGNI，规避 CSP/静态资源），够用即可 |
@@ -164,11 +164,13 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 
 ## 十、部署
 
-- Docker 容器常驻 daemon，`docker compose` 管理；暴露 127.0.0.1 端口（MCP + admin）
-- volume：SQLite 数据、配置文件
-- 挂载：`~/.ssh`（只读）或 SSH agent socket 转发（macOS Docker Desktop：`/run/host-services/ssh-auth.sock`）
-- 密钥经 env / docker secret 注入
-- stdio 模式保留：`python -m dbm --stdio`，供单 agent 裸机直连场景
+**本地进程模式**（不用 Docker——本地单机场景 Docker 只带麻烦：连宿主库绕网络、容器内无 keyring 后端使连接管理页残废、SSH key 变容器内路径）。
+
+- 前台：`uv run dbm serve`，监听 127.0.0.1:8100（MCP + admin 同端口）
+- macOS 常驻：`scripts/install-launchd.sh` 装为 launchd LaunchAgent，开机自启 + 崩溃自动拉起（约 10s 重启节流）
+- 密钥：`~/.config/db-manage-mcp/env`（600）注入 `env://` 引用值 + `DBM_ADMIN_TOKEN`；页面新建连接的密码进系统 keyring
+- SSH：直接读 `~/.ssh` 与真实 key 路径（本地进程,无容器路径映射问题）
+- stdio 模式：`uv run dbm serve --stdio`，供单 agent 直连
 
 ## 十一、相关工作与现成工具对比（调研于 2026-07）
 

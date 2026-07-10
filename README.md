@@ -2,24 +2,33 @@
 
 为所有 agent 提供数据库访问的 MCP 服务：按项目管理连接与账密、SSH 多层跳板、SQL 审计与人工授权、操作审计与管理后台。设计文档见 [DESIGN.md](DESIGN.md)。
 
-当前进度：**M4 完成**。只读查询、schema 探索、SSH 多跳、元数据缓存、SQL/Redis 风险审计、拒绝—重提人工授权（管理后台 / elicitation 会话内确认 / CLI 三种审批通道）、敏感字段脱敏、操作审计。goInception 集成为可选后续项（需实例才能联调）。
+功能：只读查询、schema 探索、SSH 多跳、元数据缓存、SQL/Redis 风险审计、拒绝—重提人工授权（管理后台 / elicitation 会话内确认 / CLI 三种审批通道）、敏感字段脱敏、操作审计、连接管理后台。**本地进程模式部署**（不用 Docker——本地单机场景 Docker 只带来麻烦：连宿主库要绕网络、keyring 用不了导致连接管理页残废、SSH key 变容器内路径）。
 
 ## 快速开始
 
 ```bash
-# 1. 准备配置
-cp config/connections.example.yaml config/connections.yaml   # 按需修改
-cp .env.example .env                                          # 填写密码（env:// 引用）
-
-# 2a. Docker 部署（推荐，daemon 常驻）
-docker compose up -d --build
-# MCP 端点: http://127.0.0.1:8100/mcp （streamable HTTP）
-
-# 2b. 本地开发运行
 uv sync --extra keyring
-uv run dbm                 # HTTP daemon，默认 127.0.0.1:8100
-uv run dbm --stdio         # stdio 模式，供单 agent 直连
+cp config/connections.example.yaml config/connections.yaml   # 按需修改
+
+# 前台运行（开发/调试）
+DBM_MYSQL_PW=... DBM_ADMIN_TOKEN=你的token uv run dbm serve
+# stdio 模式（单 agent 直连）
+uv run dbm serve --stdio
 ```
+
+MCP 端点 `http://127.0.0.1:8100/mcp`，管理后台 `http://127.0.0.1:8100/admin/login`。
+
+### 常驻服务（macOS launchd，开机自启 + 崩溃自动拉起）
+
+```bash
+bash scripts/install-launchd.sh          # 安装并启动，首次会生成管理 token
+# 密钥写在 ~/.config/db-manage-mcp/env（600 权限），按需补 DBM_MYSQL_PW=...
+bash scripts/install-launchd.sh          # 改配置/密钥后重跑即热重启（幂等）
+bash scripts/install-launchd.sh --uninstall   # 卸载
+tail -f ~/Library/Logs/db-manage-mcp.log      # 看日志
+```
+
+> 崩溃后 launchd 自动拉起，但有约 10 秒重启节流（正常行为）。
 
 Claude Code 中注册：
 
