@@ -137,6 +137,8 @@ def _page(title: str, body: str) -> str:
  tr:last-child td{{border-bottom:none}}
  tbody tr{{transition:background .1s}} tbody tr:hover{{background:#fafbfc}}
  td code{{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border-radius:5px}}
+ .cell-sql{{display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}}
+ .cell-detail{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;margin-top:2px}}
  /* 徽章 / pill / tag */
  .badge{{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
    font-family:var(--mono);letter-spacing:.3px}}
@@ -640,56 +642,92 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @mcp.custom_route("/admin/audit", methods=["GET"])
     @guard
     async def _audit(req: Request) -> HTMLResponse:
+        qp = req.query_params
         try:
-            limit = min(max(int(req.query_params.get("limit", "200")), 1), 1000)
-            offset = max(int(req.query_params.get("offset", "0")), 0)
+            limit = min(max(int(qp.get("limit", "200")), 1), 1000)
+            offset = max(int(qp.get("offset", "0")), 0)
         except ValueError:
             limit, offset = 200, 0
-        total = service.store.count()
-        rows = service.store.recent(limit, offset)
-        f_status = req.query_params.get("status")
-        f_conn = req.query_params.get("connection")
-        if f_status:
-            rows = [r for r in rows if r["status"] == f_status]
-        if f_conn:
-            rows = [r for r in rows if r["connection"] == f_conn]
+        # 服务端筛选（下推到 SQL）
+        filters = {k: qp.get(k) for k in ("project", "connection", "agent", "status") if qp.get(k)}
+        total = service.store.count(filters)
+        rows = service.store.recent(limit, offset, filters)
 
         trs = []
         for r in rows:
-            sql = _esc((r["sql"] or "")[:80])
+            sql = _esc((r["sql"] or "")[:90])
+            # 结果列：有行数/耗时才显示；detail 截断 + 完整值放 title 悬浮
+            stat = []
+            if r["row_count"] is not None:
+                stat.append(f"{r['row_count']} 行")
+            if r["duration_ms"] is not None:
+                stat.append(f"{r['duration_ms']}ms")
+            statline = f"<span class='mono'>{' · '.join(stat)}</span>" if stat else ""
+            detail = r["detail"] or ""
+            dline = (f"<div class='cell-detail' title='{_esc(detail)}'>{_esc(detail[:70])}"
+                     f"{'…' if len(detail) > 70 else ''}</div>") if detail else ""
+            sqlcell = (f"<code class='cell-sql' title='{_esc(r['sql'] or '')}'>{sql}"
+                       f"{'…' if r['sql'] and len(r['sql']) > 90 else ''}</code>") if r["sql"] else "<span class='muted'>—</span>"
             trs.append(
-                f"<tr><td class='muted'>{_esc(r['ts'])}</td>"
-                f"<td>{_esc(r['agent'])}</td>"
-                f"<td>{_esc(r['project'])}/{_esc(r['connection'])}<br><span class='muted'>{_esc(r['environment'])}</span></td>"
-                f"<td>{_esc(r['tool'])}</td>"
-                f"<td><code>{sql}</code></td>"
+                f"<tr><td class='muted mono' style='white-space:nowrap'>{_esc(r['ts'])}</td>"
+                f"<td class='mono'>{_esc(r['agent'])}</td>"
+                f"<td><code>{_esc(r['project'])}/{_esc(r['connection'])}</code>"
+                f"{(' ' + _env_badge(r['environment'])) if r['environment'] else ''}</td>"
+                f"<td class='mono muted'>{_esc(r['tool'])}</td>"
+                f"<td>{sqlcell}</td>"
                 f"<td>{_badge(r['status'], _STATUS_COLOR)}</td>"
-                f"<td class='muted'>{_esc(r['row_count'])} 行 / {_esc(r['duration_ms'])}ms<br>{_esc((r['detail'] or '')[:60])}</td></tr>"
+                f"<td class='muted'>{statline}{dline}</td></tr>"
             )
-        table_rows = "".join(trs) or '<tr><td colspan="7" class="muted">（无记录）</td></tr>'
-        status_q = f"&status={_esc(f_status)}" if f_status else ""
-        filters = (
-            "<div class='filters'>筛选状态: "
-            "<a href='/admin/audit'>全部</a>"
-            "<a href='/admin/audit?status=ok'>成功</a>"
-            "<a href='/admin/audit?status=rejected'>被拒</a>"
-            "<a href='/admin/audit?status=error'>出错</a></div>"
+        table_rows = "".join(trs) or '<tr><td colspan="7" class="muted">（无匹配记录）</td></tr>'
+
+        # 筛选下拉
+        def _sel(name: str, label: str, values: list[str]) -> str:
+            cur = filters.get(name, "")
+            opts = "<option value=''>全部" + _esc(label) + "</option>" + "".join(
+                f"<option value='{_esc(v)}'{' selected' if v == cur else ''}>{_esc(v)}</option>"
+                for v in values)
+            return f"<select name='{name}' onchange='this.form.submit()'>{opts}</select>"
+
+        status_opts = ["ok", "rejected", "error"]
+        filter_bar = (
+            "<form method='get' class='filters' style='gap:8px'>"
+            + _sel("project", "项目", service.store.distinct_values("project"))
+            + _sel("connection", "连接", service.store.distinct_values("connection"))
+            + _sel("agent", "agent", service.store.distinct_values("agent"))
+            + _sel("status", "状态", status_opts)
+            + f"<input type='hidden' name='limit' value='{limit}'>"
+            + "<a href='/admin/audit' style='margin-left:4px'>清除</a>"
+            + "<label style='margin:0 0 0 auto;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)'>"
+            "<input type='checkbox' id='auto-refresh' style='width:auto'>自动刷新（5s）</label>"
+            "</form>"
         )
+
+        # 分页保留筛选参数
+        def _url(off: int) -> str:
+            parts = [f"limit={limit}", f"offset={off}"] + [f"{k}={_esc(v)}" for k, v in filters.items()]
+            return "/admin/audit?" + "&".join(parts)
         pager_parts = []
         if offset > 0:
-            prev_off = max(offset - limit, 0)
-            pager_parts.append(f"<a href='/admin/audit?limit={limit}&offset={prev_off}{status_q}'>← 较新</a>")
+            pager_parts.append(f"<a href='{_url(max(offset - limit, 0))}'>← 较新</a>")
         if offset + limit < total:
-            pager_parts.append(f"<a href='/admin/audit?limit={limit}&offset={offset + limit}{status_q}'>较旧 →</a>")
-        pager = (
-            f"<div class='filters'>共 {total} 条 · 第 {offset + 1}–{min(offset + limit, total)} 条 "
-            + " · ".join(pager_parts) + "</div>"
-        )
+            pager_parts.append(f"<a href='{_url(offset + limit)}'>较旧 →</a>")
+        shown = f"第 {offset + 1}–{min(offset + limit, total)} 条" if total else "无记录"
+        pager = (f"<div class='filters' style='margin-top:12px'>共 {total} 条 · {shown} "
+                 + " · ".join(pager_parts) + "</div>")
+
         body = (
             _pagehead("Audit Log", "操作审计", "每次数据库操作的完整留痕：谁、何时、在哪个库、跑了什么、结果如何")
-            + f"<div class='card'>{filters}"
-            f"<table><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th><th>SQL</th><th>状态</th><th>结果</th></tr>"
-            f"{table_rows}</table>{pager}</div>"
+            + f"<div class='card'>{filter_bar}"
+            f"<table class='audit'><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th>"
+            f"<th>SQL</th><th>状态</th><th>结果</th></tr>{table_rows}</table>{pager}</div>"
+            "<script>(function(){"
+            "var box=document.getElementById('auto-refresh');if(!box)return;"
+            "var on=localStorage.getItem('dbm-audit-refresh')==='1';box.checked=on;"
+            "var t=on?setTimeout(function(){location.reload();},5000):null;"
+            "box.addEventListener('change',function(){"
+            "localStorage.setItem('dbm-audit-refresh',box.checked?'1':'0');"
+            "if(box.checked)location.reload();else if(t)clearTimeout(t);});"
+            "})();</script>"
         )
         return HTMLResponse(_page("操作审计", body))
 

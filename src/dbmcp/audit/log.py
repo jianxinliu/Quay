@@ -90,17 +90,44 @@ class AuditStore:
             self._conn.commit()
             return int(cur.lastrowid or 0)
 
-    def recent(self, limit: int = 100, offset: int = 0) -> list[dict]:
+    # 可筛选列（等值匹配），下推到 SQL 而非内存过滤
+    _FILTERABLE = ("project", "connection", "agent", "status")
+
+    def _where(self, filters: dict | None) -> tuple[str, list]:
+        clauses, params = [], []
+        for col in self._FILTERABLE:
+            val = (filters or {}).get(col)
+            if val:
+                clauses.append(f"{col} = ?")
+                params.append(val)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def recent(self, limit: int = 100, offset: int = 0, filters: dict | None = None) -> list[dict]:
+        where, params = self._where(filters)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
+                f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def count(self) -> int:
+    def count(self, filters: dict | None = None) -> int:
+        where, params = self._where(filters)
         with self._lock:
-            row = self._conn.execute("SELECT count(*) FROM audit_log").fetchone()
+            row = self._conn.execute(f"SELECT count(*) FROM audit_log{where}", params).fetchone()
         return int(row[0])
+
+    def distinct_values(self, column: str, limit: int = 200) -> list[str]:
+        """某列的去重值（供筛选下拉）。列名白名单校验，防注入。"""
+        if column not in self._FILTERABLE:
+            raise ValueError(f"不可筛选的列: {column}")
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT DISTINCT {column} FROM audit_log"
+                f" WHERE {column} IS NOT NULL AND {column} <> '' ORDER BY {column} LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def purge_old(self, retention_days: int) -> int:
         """删除超过保留期的审计记录，返回删除条数。"""
