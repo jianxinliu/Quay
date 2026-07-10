@@ -96,6 +96,12 @@ class EnginePool:
                     reaped += 1
         return reaped
 
+    def dispose_connection(self, project: str, connection: str) -> None:
+        """回收某连接的所有角色引擎与隧道（配置变更后强制重建）。"""
+        with self._lock:
+            for key in [k for k in self._entries if k[0] == project and k[1] == connection]:
+                self._entries.pop(key).dispose()
+
     def dispose(self) -> None:
         with self._lock:
             for entry in self._entries.values():

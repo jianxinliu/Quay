@@ -1,17 +1,23 @@
-"""管理后台：审计查询 + 审批中心。
+"""管理后台：审计查询 + 审批中心 + 连接管理。
 
 挂在 MCP 应用同一 ASGI 服务下（custom_route），默认只随 daemon 监听 127.0.0.1。
 服务端渲染，无外部依赖/资源，避免引入前端框架与 CSP 问题。
-后续可加登录；当前审批人身份由表单字段 `by` 提供（默认 admin@localhost）。
+
+认证：所有 /admin/* 路由需登录（/admin/login 除外）。token 由 DBM_ADMIN_TOKEN 注入，
+登录后下发签名 cookie（hmac(token)，不暴露 token 原文），httponly + samesite=lax。
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from .approvals import ApprovalError
 
@@ -19,6 +25,18 @@ if TYPE_CHECKING:
     from fastmcp import FastMCP
 
     from .service import DbmService
+
+_COOKIE_NAME = "dbm_admin"
+
+
+def _session_value(token: str) -> str:
+    """cookie 值：hmac(token) 十六进制，cookie 泄露也不直接暴露 token 原文。"""
+    return hmac.new(token.encode("utf-8"), b"dbm-admin-session", hashlib.sha256).hexdigest()
+
+
+def _authed(req: Request, expected_cookie: str) -> bool:
+    got = req.cookies.get(_COOKIE_NAME, "")
+    return bool(got) and hmac.compare_digest(got, expected_cookie)
 
 _LEVEL_COLOR = {
     "CRITICAL": "#b00020",
@@ -69,8 +87,27 @@ def _page(title: str, body: str) -> str:
  <span class="brand">db-manage-mcp</span>
  <a href="/admin/approvals">审批中心</a>
  <a href="/admin/audit">操作审计</a>
+ <a href="/admin/connections">连接管理</a>
+ <a href="/admin/logout" style="margin-left:auto">退出</a>
 </header>
 <main>{body}</main></body></html>"""
+
+
+def _login_page(error: str = "") -> str:
+    err = f"<p style='color:#b00020'>{_esc(error)}</p>" if error else ""
+    body = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · db-manage-mcp</title>
+<style>body{{font-family:-apple-system,system-ui,sans-serif;background:#f5f6f8;display:flex;
+ justify-content:center;align-items:center;height:100vh;margin:0}}
+ .box{{background:#fff;padding:32px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.1);width:320px}}
+ h1{{font-size:18px;margin:0 0 16px}} input{{width:100%;box-sizing:border-box;padding:10px;
+ border:1px solid #cbd5e1;border-radius:6px;font-size:14px}} button{{width:100%;margin-top:12px;
+ padding:10px;background:#1e293b;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}}</style>
+</head><body><form class="box" method="post" action="/admin/login">
+ <h1>db-manage-mcp 管理后台</h1>{err}
+ <input type="password" name="token" placeholder="管理 token" autofocus>
+ <button type="submit">登录</button></form></body></html>"""
+    return body
 
 
 def _badge(text: str, color_map: dict) -> str:
@@ -78,12 +115,128 @@ def _badge(text: str, color_map: dict) -> str:
     return f'<span class="badge" style="background:{color}">{_esc(text)}</span>'
 
 
-def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
+def _keyring_available() -> bool:
+    try:
+        import keyring  # noqa: PLC0415, F401
+        return True
+    except ImportError:
+        return False
+
+
+def _field(label: str, name: str, value: object = "", *, ph: str = "", typ: str = "text",
+           width: str = "260px") -> str:
+    return (f"<label>{_esc(label)}</label>"
+            f"<input type='{typ}' name='{name}' value='{_esc(value)}' placeholder='{_esc(ph)}' "
+            f"style='width:{width}'>")
+
+
+def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
+    """连接增删改表单。编辑时锁定 project/connection，密码留空表示不改。"""
+    is_edit = cfg is not None
+    ro = "readonly" if is_edit else ""
+    engines_opts = "".join(
+        f"<option value='{e}'{' selected' if cfg and cfg.engine == e else ''}>{e}</option>"
+        for e in ("mysql", "postgres", "redis", "sqlite")
+    )
+    envs_opts = "".join(
+        f"<option value='{e}'{' selected' if cfg and cfg.environment == e else ''}>{e}</option>"
+        for e in ("local", "dev", "staging", "prod")
+    )
+    key_path = ""
+    ssh_extra = ""
+    if cfg and cfg.ssh_options:
+        opts = list(cfg.ssh_options)
+        if "-i" in opts:
+            i = opts.index("-i")
+            if i + 1 < len(opts):
+                key_path = opts[i + 1]
+                opts = opts[:i] + opts[i + 2:]
+        ssh_extra = " ".join(opts)
+    jump = ", ".join(cfg.jump_hosts) if cfg else ""
+    masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
+    pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
+    writer_user = cfg.writer.user if cfg and cfg.writer else ""
+    return f"""<form method="post" action="/admin/connections/save">
+ <div class="row">
+  <div>{_field("项目", "project", project, ph="local")}</div>
+  <div><label>连接名</label><input name="connection" value="{_esc(connection)}" {ro} style="width:260px"></div>
+ </div>
+ <div class="row">
+  <div><label>引擎</label><br><select name="engine" style="padding:6px">{engines_opts}</select></div>
+  <div><label>环境</label><br><select name="environment" style="padding:6px">{envs_opts}</select></div>
+ </div>
+ <div class="row">
+  <div>{_field("host", "host", cfg.host if cfg else "", ph="127.0.0.1")}</div>
+  <div>{_field("port", "port", cfg.port if cfg else "", ph="3306", typ="number", width="120px")}</div>
+  <div>{_field("database", "database", cfg.database if cfg else "")}</div>
+ </div>
+ <div class="row">
+  <div>{_field("user", "user", cfg.user if cfg else "")}</div>
+  <div>{_field("password", "password", "", ph=pw_ph, typ="password")}</div>
+ </div>
+ <div class="row">
+  <div>{_field("writer user（可选，写操作用）", "writer_user", writer_user)}</div>
+  <div>{_field("writer password", "writer_password", "", ph=pw_ph, typ="password")}</div>
+ </div>
+ <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
+ <div class="row">
+  <div>{_field("SSH 跳板（逗号分隔，按序）", "jump_hosts", jump, ph="bastion1, bastion2", width="340px")}</div>
+ </div>
+ <div class="row">
+  <div>{_field("SSH key 文件路径", "ssh_key_path", key_path, ph="/Users/you/.ssh/prod_key", width="340px")}</div>
+  <div>{_field("其它 ssh 选项（空格分隔）", "ssh_options_extra", ssh_extra, ph="-o ConnectTimeout=5", width="280px")}</div>
+ </div>
+ <div class="row">
+  <div>{_field("max_rows", "max_rows", cfg.policy.max_rows if cfg else 500, typ="number", width="120px")}</div>
+  <div>{_field("脱敏列（逗号分隔）", "mask_columns", masks, ph="email, phone")}</div>
+ </div>
+ <br><button class="btn btn-approve" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
+ {"<a href='/admin/connections' style='margin-left:12px'>取消编辑</a>" if is_edit else ""}
+</form>"""
+
+
+def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None:
+    expected_cookie = _session_value(admin_token)
+
+    def guard(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
+        """未认证访问受保护路由 → 重定向登录页。"""
+        @wraps(handler)
+        async def _wrapped(req: Request) -> Response:
+            if not _authed(req, expected_cookie):
+                return RedirectResponse(url="/admin/login", status_code=303)
+            return await handler(req)
+        return _wrapped
+
+    @mcp.custom_route("/admin/login", methods=["GET"])
+    async def _login_form(req: Request) -> HTMLResponse:
+        if _authed(req, expected_cookie):
+            return RedirectResponse(url="/admin/approvals", status_code=303)
+        return HTMLResponse(_login_page())
+
+    @mcp.custom_route("/admin/login", methods=["POST"])
+    async def _login_submit(req: Request) -> Response:
+        form = await req.form()
+        token = str(form.get("token") or "")
+        if token and hmac.compare_digest(token, admin_token):
+            resp = RedirectResponse(url="/admin/approvals", status_code=303)
+            resp.set_cookie(_COOKIE_NAME, expected_cookie, httponly=True,
+                            samesite="lax", max_age=86400, path="/admin")
+            return resp
+        return HTMLResponse(_login_page("token 错误"), status_code=401)
+
+    @mcp.custom_route("/admin/logout", methods=["GET"])
+    async def _logout(_req: Request) -> Response:
+        resp = RedirectResponse(url="/admin/login", status_code=303)
+        resp.delete_cookie(_COOKIE_NAME, path="/admin")
+        return resp
+
     @mcp.custom_route("/admin", methods=["GET"])
+    @guard
     async def _index(_req: Request) -> RedirectResponse:
         return RedirectResponse(url="/admin/approvals")
 
     @mcp.custom_route("/admin/approvals", methods=["GET"])
+    @guard
     async def _approvals(_req: Request) -> HTMLResponse:
         pending = service.list_changes("pending")
         recent = [c for c in service.list_changes() if c.effective_status() != "pending"][:30]
@@ -115,6 +268,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
         return HTMLResponse(_page("审批中心", body))
 
     @mcp.custom_route("/admin/approvals/{change_id:int}", methods=["GET"])
+    @guard
     async def _approval_detail(req: Request) -> HTMLResponse:
         change_id = req.path_params["change_id"]
         try:
@@ -173,6 +327,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
         return HTMLResponse(_page(f"审批单 #{c.id}", body))
 
     @mcp.custom_route("/admin/approvals/{change_id:int}/approve", methods=["POST"])
+    @guard
     async def _approve(req: Request) -> RedirectResponse:
         change_id = req.path_params["change_id"]
         form = await req.form()
@@ -185,6 +340,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
         return RedirectResponse(url=f"/admin/approvals/{change_id}", status_code=303)
 
     @mcp.custom_route("/admin/approvals/{change_id:int}/reject", methods=["POST"])
+    @guard
     async def _reject(req: Request) -> RedirectResponse:
         change_id = req.path_params["change_id"]
         form = await req.form()
@@ -197,6 +353,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
         return RedirectResponse(url=f"/admin/approvals/{change_id}", status_code=303)
 
     @mcp.custom_route("/admin/audit", methods=["GET"])
+    @guard
     async def _audit(req: Request) -> HTMLResponse:
         try:
             limit = min(max(int(req.query_params.get("limit", "200")), 1), 1000)
@@ -249,3 +406,97 @@ def mount_admin(mcp: "FastMCP", service: "DbmService") -> None:
             f"{table_rows}</table>{pager}</div>"
         )
         return HTMLResponse(_page("操作审计", body))
+
+    def _caller(req: Request) -> "CallerInfo":
+        from .service import CallerInfo
+        return CallerInfo(agent="admin-ui", session_id=req.cookies.get(_COOKIE_NAME, "")[:12])
+
+    @mcp.custom_route("/admin/connections", methods=["GET"])
+    @guard
+    async def _connections(req: Request) -> HTMLResponse:
+        editing = req.query_params.get("edit")  # "project/connection"
+        edit_cfg = None
+        e_project = e_conn = ""
+        if editing and "/" in editing:
+            e_project, e_conn = editing.split("/", 1)
+            proj = service.config.projects.get(e_project)
+            edit_cfg = proj.connections.get(e_conn) if proj else None
+
+        rows = []
+        for pname, proj in sorted(service.config.projects.items()):
+            for cname, c in sorted(proj.connections.items()):
+                jump = " → ".join(c.jump_hosts) if c.jump_hosts else "—"
+                rows.append(
+                    f"<tr><td>{_esc(pname)}/{_esc(cname)}</td><td>{_esc(c.engine)}</td>"
+                    f"<td>{_esc(c.environment)}</td><td>{_esc(c.host)}:{_esc(c.port)}</td>"
+                    f"<td>{_esc(c.database)}</td><td class='muted'>{_esc(jump)}</td>"
+                    f"<td><a href='/admin/connections?edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
+                    f"<form method='post' action='/admin/connections/delete' style='display:inline' "
+                    f"onsubmit='return confirm(\"删除连接 {_esc(pname)}/{_esc(cname)}？\")'>"
+                    f"<input type='hidden' name='project' value='{_esc(pname)}'>"
+                    f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
+                    f"<button class='btn btn-reject' style='padding:2px 10px'>删除</button></form></td></tr>"
+                )
+        table = "".join(rows) or '<tr><td colspan="7" class="muted">（无连接）</td></tr>'
+
+        keyring_note = "" if _keyring_available() else (
+            "<p style='color:#b00020'>⚠️ 未安装 keyring，无法安全存储密码。"
+            "请 <code>pip install 'db-manage-mcp[keyring]'</code> 后重启。</p>"
+        )
+        form = _connection_form(e_project, e_conn, edit_cfg)
+        body = (
+            f"<div class='card'><h2>连接列表</h2>"
+            f"<table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
+            f"<th>跳板</th><th>操作</th></tr>{table}</table></div>"
+            f"<div class='card'><h2>{'编辑' if edit_cfg else '新增'}连接</h2>{keyring_note}{form}</div>"
+        )
+        return HTMLResponse(_page("连接管理", body))
+
+    @mcp.custom_route("/admin/connections/save", methods=["POST"])
+    @guard
+    async def _connection_save(req: Request) -> Response:
+        from .connections import ConnectionAdminError
+        from .service import QueryRejected
+        f = await req.form()
+
+        def _list(v: str, sep: str) -> list[str]:
+            return [x.strip() for x in str(f.get(v) or "").split(sep) if x.strip()]
+
+        try:
+            port_raw = str(f.get("port") or "").strip()
+            service.upsert_connection(
+                str(f.get("project") or "").strip(),
+                str(f.get("connection") or "").strip(),
+                _caller(req),
+                engine=str(f.get("engine") or "").strip(),
+                environment=str(f.get("environment") or "dev").strip(),
+                host=str(f.get("host") or "").strip() or None,
+                port=int(port_raw) if port_raw else None,
+                database=str(f.get("database") or "").strip() or None,
+                user=str(f.get("user") or "").strip() or None,
+                password=str(f.get("password") or "") or None,
+                writer_user=str(f.get("writer_user") or "").strip() or None,
+                writer_password=str(f.get("writer_password") or "") or None,
+                jump_hosts=_list("jump_hosts", ","),
+                ssh_key_path=str(f.get("ssh_key_path") or "").strip() or None,
+                ssh_options_extra=_list("ssh_options_extra", " "),
+                max_rows=int(str(f.get("max_rows") or "500")),
+                mask_columns=_list("mask_columns", ","),
+            )
+        except (ConnectionAdminError, QueryRejected, ValueError) as e:
+            body = f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>" \
+                   f"<a href='/admin/connections'>← 返回</a></div>"
+            return HTMLResponse(_page("保存失败", body), status_code=400)
+        return RedirectResponse(url="/admin/connections", status_code=303)
+
+    @mcp.custom_route("/admin/connections/delete", methods=["POST"])
+    @guard
+    async def _connection_delete(req: Request) -> Response:
+        from .connections import ConnectionAdminError
+        from .service import QueryRejected
+        f = await req.form()
+        try:
+            service.delete_connection(str(f.get("project")), str(f.get("connection")), _caller(req))
+        except (ConnectionAdminError, QueryRejected) as e:
+            return HTMLResponse(_page("删除失败", f"<div class='card'>{_esc(e)}</div>"), status_code=400)
+        return RedirectResponse(url="/admin/connections", status_code=303)

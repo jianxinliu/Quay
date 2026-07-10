@@ -62,10 +62,14 @@ claude mcp add --transport http dbm http://127.0.0.1:8100/mcp
 
 ## 管理后台
 
-daemon 运行时同端口提供（默认 http://127.0.0.1:8100）：
+daemon 运行时同端口提供（默认 http://127.0.0.1:8100），**需登录**：
 
-- `/admin/approvals` — 审批中心：待审列表 + 详情页（SQL、风险报告、批准/拒绝）
-- `/admin/audit` — 操作审计：按状态/连接筛选
+- 登录 token 由 `DBM_ADMIN_TOKEN` 注入；未设置则启动时生成随机 token 打印到 stderr
+- `/admin/approvals` — 审批中心：待审列表 + 详情页（SQL、风险报告、EXPLAIN、批准/拒绝）
+- `/admin/audit` — 操作审计：按状态筛选 + 翻页
+- `/admin/connections` — 连接管理：增删改连接（含 SSH 跳板、key 路径），密码写入系统 keyring、配置只存 `keyring://` 引用，保存即热加载无需重启
+
+> 连接管理页写入的密码进 keyring；SSH key 用路径填写（本地进程模式下为宿主真实路径），保存时校验文件存在且权限不过宽（需 chmod 600）。用页面管理连接后，配置文件由 UI 维护（会丢失手写注释）。
 
 ## 写操作授权流程
 

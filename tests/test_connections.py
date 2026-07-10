@@ -1,0 +1,187 @@
+"""连接管理测试：配置写回 + keyring 引用 + SSH key 校验 + 热加载/池回收。"""
+
+import sys
+import types
+
+import pytest
+
+from dbmcp.config import AppConfig, load_config
+from dbmcp.connections import ConnectionAdminError, ConnectionManager, validate_ssh_key_path
+
+
+@pytest.fixture
+def fake_keyring(monkeypatch):
+    """内存版 keyring，避免污染真实钥匙串。"""
+    store = {}
+    mod = types.ModuleType("keyring")
+    errmod = types.ModuleType("keyring.errors")
+
+    class PasswordDeleteError(Exception):
+        pass
+
+    errmod.PasswordDeleteError = PasswordDeleteError
+    mod.errors = errmod
+    mod.set_password = lambda s, a, v: store.__setitem__((s, a), v)
+    mod.get_password = lambda s, a: store.get((s, a))
+
+    def _del(s, a):
+        if (s, a) not in store:
+            raise PasswordDeleteError()
+        del store[(s, a)]
+
+    mod.delete_password = _del
+    monkeypatch.setitem(sys.modules, "keyring", mod)
+    monkeypatch.setitem(sys.modules, "keyring.errors", errmod)
+    return store
+
+
+@pytest.fixture
+def empty_config(tmp_path):
+    path = tmp_path / "conn.yaml"
+    path.write_text("projects: {}\n", encoding="utf-8")
+    return load_config(path), path
+
+
+class TestUpsert:
+    def test_create_writes_yaml_and_keyring(self, empty_config, fake_keyring):
+        cfg, path = empty_config
+        mgr = ConnectionManager(cfg, path)
+        mgr.upsert(
+            "local", "db1", engine="mysql", environment="dev",
+            host="127.0.0.1", port=3306, database="app", user="root",
+            password="s3cret", writer_user=None, writer_password=None,
+            jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
+            max_rows=500, mask_columns=["email"],
+        )
+        # 密码写进了 keyring，不落明文
+        assert "s3cret" in fake_keyring.values()
+        reloaded = load_config(path)
+        conn = reloaded.get_connection("local", "db1")
+        assert conn.host == "127.0.0.1"
+        assert conn.password.startswith("keyring://")
+        assert "s3cret" not in path.read_text(encoding="utf-8")  # 文件里没有明文
+        assert conn.policy.mask_columns == ["email"]
+
+    def test_edit_keep_password_when_blank(self, empty_config, fake_keyring):
+        cfg, path = empty_config
+        mgr = ConnectionManager(cfg, path)
+        common = dict(engine="mysql", environment="dev", host="h", port=3306,
+                      database="d", user="u", writer_user=None, writer_password=None,
+                      jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
+                      max_rows=100, mask_columns=[])
+        mgr.upsert("local", "db1", password="orig", **common)
+        ref1 = cfg.get_connection("local", "db1").password
+        # 编辑时密码留空 → 沿用旧引用
+        mgr.upsert("local", "db1", password=None, **{**common, "max_rows": 200})
+        conn = cfg.get_connection("local", "db1")
+        assert conn.password == ref1
+        assert conn.policy.max_rows == 200
+
+    def test_writer_account(self, empty_config, fake_keyring):
+        cfg, path = empty_config
+        mgr = ConnectionManager(cfg, path)
+        mgr.upsert("local", "db1", engine="mysql", environment="dev", host="h",
+                   port=3306, database="d", user="u", password="p",
+                   writer_user="writer", writer_password="wp",
+                   jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
+                   max_rows=500, mask_columns=[])
+        conn = cfg.get_connection("local", "db1")
+        assert conn.writer.user == "writer"
+        assert conn.writer.password.startswith("keyring://")
+
+    def test_writer_user_without_password_fails(self, empty_config, fake_keyring):
+        cfg, path = empty_config
+        mgr = ConnectionManager(cfg, path)
+        with pytest.raises(ConnectionAdminError, match="writer 密码"):
+            mgr.upsert("local", "db1", engine="mysql", environment="dev", host="h",
+                       port=3306, database="d", user="u", password="p",
+                       writer_user="writer", writer_password=None,
+                       jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
+                       max_rows=500, mask_columns=[])
+
+    def test_invalid_engine_config_rejected(self, empty_config, fake_keyring):
+        cfg, path = empty_config
+        mgr = ConnectionManager(cfg, path)
+        # mysql 缺 host → ConnectionConfig 校验失败
+        with pytest.raises(ConnectionAdminError, match="连接配置无效|缺少必填"):
+            mgr.upsert("local", "db1", engine="mysql", environment="dev", host=None,
+                       port=None, database="d", user="u", password="p",
+                       writer_user=None, writer_password=None,
+                       jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
+                       max_rows=500, mask_columns=[])
+
+
+class TestSSHKey:
+    def test_ssh_key_path_composed(self, empty_config, fake_keyring, tmp_path):
+        key = tmp_path / "id_key"
+        key.write_text("KEY")
+        key.chmod(0o600)
+        cfg, path = empty_config
+        ConnectionManager(cfg, path).upsert(
+            "local", "db1", engine="mysql", environment="prod", host="h", port=3306,
+            database="d", user="u", password="p", writer_user=None, writer_password=None,
+            jump_hosts=["bastion"], ssh_key_path=str(key), ssh_options_extra=["-o", "X=1"],
+            max_rows=500, mask_columns=[],
+        )
+        conn = cfg.get_connection("local", "db1")
+        assert conn.ssh_options[:2] == ["-i", str(key)]
+        assert conn.jump_hosts == ["bastion"]
+
+    def test_missing_key_rejected(self):
+        with pytest.raises(ConnectionAdminError, match="不存在"):
+            validate_ssh_key_path("/no/such/key")
+
+    def test_overly_open_key_rejected(self, tmp_path):
+        key = tmp_path / "bad_key"
+        key.write_text("K")
+        key.chmod(0o644)
+        with pytest.raises(ConnectionAdminError, match="权限过宽"):
+            validate_ssh_key_path(str(key))
+
+
+class TestDelete:
+    def test_delete_removes_and_purges_keyring(self, empty_config, fake_keyring):
+        cfg, path = empty_config
+        mgr = ConnectionManager(cfg, path)
+        mgr.upsert("local", "db1", engine="mysql", environment="dev", host="h", port=3306,
+                   database="d", user="u", password="p", writer_user=None, writer_password=None,
+                   jump_hosts=[], ssh_key_path=None, ssh_options_extra=[], max_rows=500, mask_columns=[])
+        assert len(fake_keyring) == 1
+        mgr.delete("local", "db1")
+        assert len(fake_keyring) == 0  # keyring 清理
+        assert "local" not in load_config(path).projects  # 空项目一并移除
+
+    def test_delete_missing(self, empty_config):
+        cfg, path = empty_config
+        with pytest.raises(ConnectionAdminError, match="不存在"):
+            ConnectionManager(cfg, path).delete("x", "y")
+
+
+class TestServiceHotReload:
+    def test_upsert_evicts_pool(self, empty_config, fake_keyring, tmp_path):
+        from dbmcp.audit.log import AuditStore
+        from dbmcp.service import CallerInfo, DbmService
+        cfg, path = empty_config
+        # 预置一个 sqlite 连接并用一次，占住引擎池
+        import sqlite3
+        db = tmp_path / "x.sqlite3"
+        sqlite3.connect(db).close()
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), config_path=str(path))
+        svc.upsert_connection("local", "s", CallerInfo(agent="t"),
+                              engine="sqlite", environment="local", host=None, port=None,
+                              database=str(db), user=None, password=None, writer_user=None,
+                              writer_password=None, jump_hosts=[], ssh_key_path=None,
+                              ssh_options_extra=[], max_rows=10, mask_columns=[])
+        svc.query("local", "s", "SELECT 1", CallerInfo(agent="t"))
+        assert ("local", "s", "reader") in svc.pool._entries
+        # 改配置 → 池应被回收
+        svc.upsert_connection("local", "s", CallerInfo(agent="t"),
+                              engine="sqlite", environment="local", host=None, port=None,
+                              database=str(db), user=None, password=None, writer_user=None,
+                              writer_password=None, jump_hosts=[], ssh_key_path=None,
+                              ssh_options_extra=[], max_rows=99, mask_columns=[])
+        assert ("local", "s", "reader") not in svc.pool._entries
+        assert svc.config.get_connection("local", "s").policy.max_rows == 99
+        # 审计留痕
+        assert any(r["tool"] == "upsert_connection" for r in svc.store.recent())
+        svc.close()

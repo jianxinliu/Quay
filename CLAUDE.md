@@ -16,7 +16,7 @@
 2. **密钥不落明文**：配置文件只存 `env://` / `keyring://` / `agefile://` 引用；密码永不出现在日志、审计记录、工具返回值中。Docker 内不可用 macOS Keychain，容器部署走 env/加密文件。
 3. **拒绝—重提 + change_id 放行**：写操作先被明确拒绝并生成审批单（含风险报告），人在后台批准后 agent 带 change_id 重提才放行；**执行的永远是审批单里存储的 SQL**，重提文本只作指纹校验（不一致即拒），指纹匹配仅作无 id 时的兜底。审批单一次性核销、有 TTL（30 分钟）。prod 环境强制审批。
 4. **双账号**：日常查询走只读账号，仅审批通过的执行切换 writer 账号。
-5. **连接与密钥管理只走 CLI**（人操作），不暴露为 MCP 工具。
+5. **连接与密钥管理不暴露为 MCP 工具**（agent 碰不到）；人可通过 CLI 或**已登录的管理后台**操作。后台需认证（DBM_ADMIN_TOKEN），页面输入的密码一律进 keyring、配置只存引用。
 6. 通知遵循"安静即正常"：不主动推送，审批挂起由 agent 在会话中告知用户。
 
 ## 约定
@@ -55,6 +55,8 @@ docker compose up -d --build
 - `audit/classify.py` 只读判定 + 指纹；`audit/risk.py` 风险评估；`audit/log.py` 操作审计
 - `approvals.py` 审批单存储与生命周期；`admin.py` 管理后台（Starlette custom_route，服务端渲染）
 - `redis_engine.py` Redis 池；`audit/redis_rules.py` 命令分类；`masking.py` 脱敏；`__main__.py` serve/approvals/approve/reject 子命令
+- `connections.py` 连接管理（写回 YAML + 密码进 keyring + SSH key 校验）；admin.py 后台认证（token→hmac cookie，@guard 保护路由）+ 连接管理页
+- 连接热加载：ConnectionManager 直接改 service 持有的 AppConfig 对象（同一引用），并 dispose_connection 回收旧引擎/隧道，无需重启或重新 load_config
 - elicitation 快捷审批在 `server.py::_maybe_elicit_approval`：审批单先创建（审计完整），elicitation 只是把批准动作搬进会话；客户端不支持时异常被吞、自然回退审批单流程
 
 ## 当前状态

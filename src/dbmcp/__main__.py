@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -75,7 +76,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     db_path = Path(args.data_dir) / "dbm.sqlite3"
     store = AuditStore(db_path)
     approvals = ApprovalStore(db_path)
-    service = DbmService(config, store, approvals)
+    service = DbmService(config, store, approvals, config_path=args.config)
     service.metadata = MetadataCache(db_path, service.pool)
     service.start_housekeeping(retention_days=args.retention_days)
     mcp = build_mcp(service)
@@ -86,7 +87,13 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         else:
             from .admin import mount_admin
 
-            mount_admin(mcp, service)
+            admin_token = os.environ.get("DBM_ADMIN_TOKEN") or secrets.token_urlsafe(24)
+            if not os.environ.get("DBM_ADMIN_TOKEN"):
+                # 未设置则一次性生成，打印到 stderr 方便本地登录；生产应显式注入
+                print(f"\n[db-manage-mcp] 未设置 DBM_ADMIN_TOKEN，本次生成管理 token：\n"
+                      f"    {admin_token}\n"
+                      f"    登录 http://{args.host}:{args.port}/admin/login\n", file=sys.stderr)
+            mount_admin(mcp, service, admin_token)
             mcp.run(transport="http", host=args.host, port=args.port)
     finally:
         service.close()

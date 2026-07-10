@@ -74,6 +74,11 @@ class RedisPool:
                     reaped += 1
         return reaped
 
+    def dispose_connection(self, project: str, connection: str) -> None:
+        with self._lock:
+            for key in [k for k in self._entries if k[0] == project and k[1] == connection]:
+                self._entries.pop(key).dispose()
+
     def dispose(self) -> None:
         with self._lock:
             for entry in self._entries.values():

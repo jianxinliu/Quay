@@ -99,3 +99,17 @@ def load_config(path: str | Path) -> AppConfig:
         raise FileNotFoundError(f"配置文件不存在: {path}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return AppConfig.model_validate(raw)
+
+
+def save_config(config: AppConfig, path: str | Path) -> None:
+    """把配置写回 YAML（原子替换）。
+
+    只序列化非默认字段保持文件精简；password 字段存的是引用（keyring:// 等），
+    非明文，因此写回安全。注意：会丢失原文件的注释——UI 管理后文件即由 UI 维护。
+    """
+    path = Path(path)
+    data = config.model_dump(mode="json", exclude_defaults=True, exclude_none=True)
+    text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)

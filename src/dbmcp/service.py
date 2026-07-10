@@ -43,6 +43,7 @@ class DbmService:
         store: AuditStore,
         approvals: ApprovalStore | None = None,
         metadata: MetadataCache | None = None,
+        config_path: str | None = None,
     ):
         self.config = config
         self.store = store
@@ -50,6 +51,7 @@ class DbmService:
         self.redis_pool = redis_engine.RedisPool()
         self.approvals = approvals
         self.metadata = metadata
+        self.config_path = config_path
         self._housekeeping_stop: threading.Event | None = None
 
     # ---------- 元信息 ----------
@@ -478,6 +480,38 @@ class DbmService:
         rec.status = "ok"
         self.store.record(rec)
         return result
+
+    # ---------- 连接管理（管理后台，需已配置 config_path）----------
+
+    def _require_config_path(self) -> str:
+        if not self.config_path:
+            raise QueryRejected("未设置配置文件路径，无法在线管理连接")
+        return self.config_path
+
+    def upsert_connection(self, project: str, connection: str, caller: CallerInfo, **fields) -> None:
+        from .connections import ConnectionManager
+
+        mgr = ConnectionManager(self.config, self._require_config_path())
+        mgr.upsert(project, connection, **fields)
+        self._after_connection_change(project, connection, caller, "upsert_connection",
+                                      f"引擎 {fields.get('engine')}")
+
+    def delete_connection(self, project: str, connection: str, caller: CallerInfo) -> None:
+        from .connections import ConnectionManager
+
+        mgr = ConnectionManager(self.config, self._require_config_path())
+        mgr.delete(project, connection)
+        self._after_connection_change(project, connection, caller, "delete_connection", "已删除")
+
+    def _after_connection_change(
+        self, project: str, connection: str, caller: CallerInfo, tool: str, detail: str
+    ) -> None:
+        # 回收旧引擎/隧道，下次访问用新配置重建
+        self.pool.dispose_connection(project, connection)
+        self.redis_pool.dispose_connection(project, connection)
+        rec = AuditRecord(project=project, connection=connection, tool=tool, status="ok",
+                          agent=caller.agent, session_id=caller.session_id, detail=detail)
+        self.store.record(rec)
 
     # ---------- 后台维护（serve 时启动）----------
 

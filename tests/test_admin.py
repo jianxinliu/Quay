@@ -13,6 +13,7 @@ from dbmcp.server import build_mcp
 from dbmcp.service import CallerInfo, DbmService
 
 CALLER = CallerInfo(agent="pytest/1.0", session_id="s1")
+TOKEN = "test-admin-token"
 
 
 @pytest.fixture
@@ -34,9 +35,11 @@ def client(tmp_path):
     )
     svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3"))
     mcp = build_mcp(svc)
-    mount_admin(mcp, svc)
+    mount_admin(mcp, svc, admin_token=TOKEN)
     app = mcp.http_app()
     with TestClient(app) as tc:
+        # 登录拿 cookie（TestClient 会话保留 cookie）
+        tc.post("/admin/login", data={"token": TOKEN})
         yield tc, svc
     svc.close()
 
@@ -101,5 +104,123 @@ def test_unknown_change_404(client):
 def test_index_redirects(client):
     tc, _ = client
     resp = tc.get("/admin", follow_redirects=False)
-    assert resp.status_code in (307, 302)
+    assert resp.status_code in (307, 302, 303)
     assert "/admin/approvals" in resp.headers["location"]
+
+
+class TestAuth:
+    def _fresh_app(self, tmp_path):
+        import sqlite3
+        db = tmp_path / "biz.sqlite3"
+        c = sqlite3.connect(db); c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)"); c.commit(); c.close()
+        cfg = AppConfig.model_validate(
+            {"projects": {"demo": {"connections": {"main": {
+                "engine": "sqlite", "database": str(db), "environment": "dev"}}}}}
+        )
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3"))
+        mcp = build_mcp(svc)
+        mount_admin(mcp, svc, admin_token=TOKEN)
+        return svc, mcp
+
+    def test_unauthenticated_redirects_to_login(self, tmp_path):
+        svc, mcp = self._fresh_app(tmp_path)
+        with TestClient(mcp.http_app()) as tc:
+            for path in ("/admin/approvals", "/admin/audit", "/admin"):
+                r = tc.get(path, follow_redirects=False)
+                assert r.status_code == 303, path
+                assert r.headers["location"] == "/admin/login"
+        svc.close()
+
+    def test_wrong_token_rejected(self, tmp_path):
+        svc, mcp = self._fresh_app(tmp_path)
+        with TestClient(mcp.http_app()) as tc:
+            r = tc.post("/admin/login", data={"token": "wrong"})
+            assert r.status_code == 401
+            # 没拿到 cookie，仍然被挡
+            assert tc.get("/admin/approvals", follow_redirects=False).status_code == 303
+        svc.close()
+
+    def test_login_then_access_then_logout(self, tmp_path):
+        svc, mcp = self._fresh_app(tmp_path)
+        with TestClient(mcp.http_app()) as tc:
+            tc.post("/admin/login", data={"token": TOKEN})
+            assert tc.get("/admin/approvals").status_code == 200
+            tc.get("/admin/logout")
+            assert tc.get("/admin/approvals", follow_redirects=False).status_code == 303
+        svc.close()
+
+    def test_login_page_accessible_without_auth(self, tmp_path):
+        svc, mcp = self._fresh_app(tmp_path)
+        with TestClient(mcp.http_app()) as tc:
+            r = tc.get("/admin/login")
+            assert r.status_code == 200
+            assert "管理 token" in r.text
+        svc.close()
+
+
+class TestConnectionAdminUI:
+    def _app(self, tmp_path, monkeypatch):
+        # 内存 keyring
+        import sys, types
+        store = {}
+        mod = types.ModuleType("keyring"); errmod = types.ModuleType("keyring.errors")
+        errmod.PasswordDeleteError = type("E", (Exception,), {})
+        mod.errors = errmod
+        mod.set_password = lambda s, a, v: store.__setitem__((s, a), v)
+        mod.get_password = lambda s, a: store.get((s, a))
+        mod.delete_password = lambda s, a: store.pop((s, a), None)
+        monkeypatch.setitem(sys.modules, "keyring", mod)
+        monkeypatch.setitem(sys.modules, "keyring.errors", errmod)
+
+        cfg_path = tmp_path / "conn.yaml"
+        cfg_path.write_text("projects: {}\n")
+        cfg = AppConfig.model_validate({"projects": {}})
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"),
+                         ApprovalStore(tmp_path / "a.sqlite3"), config_path=str(cfg_path))
+        mcp = build_mcp(svc)
+        mount_admin(mcp, svc, admin_token=TOKEN)
+        return svc, mcp, cfg_path, store
+
+    def test_create_connection_via_form(self, tmp_path, monkeypatch):
+        svc, mcp, cfg_path, store = self._app(tmp_path, monkeypatch)
+        with TestClient(mcp.http_app()) as tc:
+            tc.post("/admin/login", data={"token": TOKEN})
+            r = tc.post("/admin/connections/save", data={
+                "project": "local", "connection": "db1", "engine": "mysql",
+                "environment": "dev", "host": "127.0.0.1", "port": "3306",
+                "database": "app", "user": "root", "password": "secret123",
+                "max_rows": "500", "jump_hosts": "", "ssh_options_extra": "",
+            }, follow_redirects=False)
+            assert r.status_code == 303
+            # 落库、密码进 keyring、文件无明文
+            assert svc.config.get_connection("local", "db1").host == "127.0.0.1"
+            assert "secret123" in store.values()
+            assert "secret123" not in cfg_path.read_text()
+            # 列表页可见
+            page = tc.get("/admin/connections")
+            assert "local/db1" in page.text
+        svc.close()
+
+    def test_delete_connection_via_form(self, tmp_path, monkeypatch):
+        svc, mcp, cfg_path, store = self._app(tmp_path, monkeypatch)
+        with TestClient(mcp.http_app()) as tc:
+            tc.post("/admin/login", data={"token": TOKEN})
+            tc.post("/admin/connections/save", data={
+                "project": "local", "connection": "db1", "engine": "sqlite",
+                "environment": "local", "database": "/tmp/x.db", "max_rows": "10",
+            })
+            tc.post("/admin/connections/delete", data={"project": "local", "connection": "db1"})
+            assert "local" not in svc.config.projects
+        svc.close()
+
+    def test_bad_config_shows_error(self, tmp_path, monkeypatch):
+        svc, mcp, cfg_path, store = self._app(tmp_path, monkeypatch)
+        with TestClient(mcp.http_app()) as tc:
+            tc.post("/admin/login", data={"token": TOKEN})
+            r = tc.post("/admin/connections/save", data={
+                "project": "local", "connection": "db1", "engine": "mysql",
+                "environment": "dev", "max_rows": "500",  # mysql 缺 host
+            })
+            assert r.status_code == 400
+            assert "失败" in r.text
+        svc.close()

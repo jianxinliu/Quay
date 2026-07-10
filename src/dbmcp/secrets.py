@@ -12,8 +12,46 @@ from __future__ import annotations
 import os
 
 
+KEYRING_SERVICE = "db-manage-mcp"
+
+
 class SecretResolveError(Exception):
     """密钥引用无法解析。异常信息中不得包含密钥内容。"""
+
+
+def store_keyring_secret(account: str, value: str) -> str:
+    """把密码写入系统钥匙串，返回可写进配置的 keyring:// 引用。
+
+    account 不能含 '/'（resolve_secret 按首个 '/' 切分 service/account）。
+    """
+    if "/" in account:
+        raise SecretResolveError(f"keyring account 不能包含 '/': {account!r}")
+    try:
+        import keyring  # noqa: PLC0415
+    except ImportError as e:
+        raise SecretResolveError(
+            "未安装 keyring，无法安全存储密码：pip install 'db-manage-mcp[keyring]'"
+        ) from e
+    keyring.set_password(KEYRING_SERVICE, account, value)
+    return f"keyring://{KEYRING_SERVICE}/{account}"
+
+
+def delete_keyring_secret(ref: str) -> None:
+    """删除 keyring 引用对应的密钥（非 keyring:// 引用则忽略）。"""
+    if not ref.startswith("keyring://"):
+        return
+    service, _, account = ref.removeprefix("keyring://").partition("/")
+    if not account:
+        return
+    try:
+        import keyring  # noqa: PLC0415
+        import keyring.errors  # noqa: PLC0415
+    except ImportError:
+        return
+    try:
+        keyring.delete_password(service, account)
+    except keyring.errors.PasswordDeleteError:
+        pass
 
 
 def resolve_secret(ref: str) -> str:
