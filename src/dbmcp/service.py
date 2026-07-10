@@ -496,6 +496,41 @@ class DbmService:
         self._after_connection_change(project, connection, caller, "upsert_connection",
                                       f"引擎 {fields.get('engine')}")
 
+    def probe_connection_fields(self, fields: dict, existing_password: str | None = None):
+        """用表单值临时探测连通性与账号权限（测试按钮）。不保存、不入池。"""
+        from .config import ConnectionConfig, Policy
+        from .probe import probe_connection
+
+        password = fields.get("password") or None
+        eff_pw = f"plain://{password}" if password else existing_password
+        if eff_pw is None and fields.get("engine") not in ("sqlite",):
+            from .probe import ProbeResult
+            return ProbeResult(ok=False, message="请填写密码后再测试")
+        cfg = ConnectionConfig(
+            engine=fields["engine"], environment=fields.get("environment", "dev"),
+            host=fields.get("host") or None, port=fields.get("port"),
+            database=fields.get("database") or None, user=fields.get("user") or None,
+            password=eff_pw or "plain://", jump_hosts=fields.get("jump_hosts", []),
+            ssh_options=fields.get("ssh_options", []),
+            policy=Policy(max_rows=fields.get("max_rows", 500)),
+        )
+        return probe_connection(cfg, None)
+
+    def probe_ssh_fields(self, fields: dict):
+        """用表单值只测 SSH 跳板链是否可建隧道。"""
+        from .config import ConnectionConfig
+        from .probe import probe_ssh
+
+        # SSH 测试只用 host/port/跳板，user/password 填占位满足校验
+        cfg = ConnectionConfig(
+            engine=fields["engine"], environment=fields.get("environment", "dev"),
+            host=fields.get("host") or "127.0.0.1", port=fields.get("port"),
+            database=fields.get("database") or None, user="_probe",
+            password="plain://_", jump_hosts=fields.get("jump_hosts", []),
+            ssh_options=fields.get("ssh_options", []),
+        )
+        return probe_ssh(cfg)
+
     def delete_connection(self, project: str, connection: str, caller: CallerInfo) -> None:
         from .connections import ConnectionManager
 

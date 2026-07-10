@@ -51,7 +51,7 @@ class TestUpsert:
             host="127.0.0.1", port=3306, database="app", user="root",
             password="s3cret", writer_user=None, writer_password=None,
             jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
-            max_rows=500, mask_columns=["email"],
+            max_rows=500, mask_columns=["email"], force_privileged=True,
         )
         # 密码写进了 keyring，不落明文
         assert "s3cret" in fake_keyring.values()
@@ -68,7 +68,7 @@ class TestUpsert:
         common = dict(engine="mysql", environment="dev", host="h", port=3306,
                       database="d", user="u", writer_user=None, writer_password=None,
                       jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
-                      max_rows=100, mask_columns=[])
+                      max_rows=100, mask_columns=[], force_privileged=True)
         mgr.upsert("local", "db1", password="orig", **common)
         ref1 = cfg.get_connection("local", "db1").password
         # 编辑时密码留空 → 沿用旧引用
@@ -84,7 +84,7 @@ class TestUpsert:
                    port=3306, database="d", user="u", password="p",
                    writer_user="writer", writer_password="wp",
                    jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
-                   max_rows=500, mask_columns=[])
+                   max_rows=500, mask_columns=[], force_privileged=True)
         conn = cfg.get_connection("local", "db1")
         assert conn.writer.user == "writer"
         assert conn.writer.password.startswith("keyring://")
@@ -97,7 +97,7 @@ class TestUpsert:
                        port=3306, database="d", user="u", password="p",
                        writer_user="writer", writer_password=None,
                        jump_hosts=[], ssh_key_path=None, ssh_options_extra=[],
-                       max_rows=500, mask_columns=[])
+                       max_rows=500, mask_columns=[], force_privileged=True)
 
     def test_invalid_engine_config_rejected(self, empty_config, fake_keyring):
         cfg, path = empty_config
@@ -111,6 +111,72 @@ class TestUpsert:
                        max_rows=500, mask_columns=[])
 
 
+class TestPrivilegeGate:
+    """保存时的账号权限校验门（monkeypatch 探测，不真连库）。"""
+
+    def _upsert(self, mgr, **over):
+        base = dict(engine="mysql", environment="dev", host="db", port=3306,
+                    database="app", user="reader", password="p", writer_user=None,
+                    writer_password=None, jump_hosts=[], ssh_key_path=None,
+                    ssh_options_extra=[], max_rows=500, mask_columns=[])
+        base.update(over)
+        mgr.upsert("local", "c", **base)
+
+    def test_readonly_account_saves(self, empty_config, fake_keyring, monkeypatch):
+        from dbmcp.probe import ProbeResult
+        monkeypatch.setattr("dbmcp.probe.probe_connection",
+                            lambda cfg, pw: ProbeResult(ok=True, has_write=False, is_superuser=False))
+        cfg, path = empty_config
+        self._upsert(ConnectionManager(cfg, path))
+        assert cfg.get_connection("local", "c").host == "db"
+
+    def test_write_account_blocked(self, empty_config, fake_keyring, monkeypatch):
+        from dbmcp.probe import ProbeResult
+        monkeypatch.setattr("dbmcp.probe.probe_connection",
+                            lambda cfg, pw: ProbeResult(ok=True, has_write=True, is_superuser=False))
+        cfg, path = empty_config
+        with pytest.raises(ConnectionAdminError, match="写权限"):
+            self._upsert(ConnectionManager(cfg, path))
+
+    def test_superuser_blocked(self, empty_config, fake_keyring, monkeypatch):
+        from dbmcp.probe import ProbeResult
+        monkeypatch.setattr("dbmcp.probe.probe_connection",
+                            lambda cfg, pw: ProbeResult(ok=True, has_write=True, is_superuser=True))
+        cfg, path = empty_config
+        with pytest.raises(ConnectionAdminError, match="超级用户"):
+            self._upsert(ConnectionManager(cfg, path))
+
+    def test_force_bypasses_gate(self, empty_config, fake_keyring, monkeypatch):
+        from dbmcp.probe import ProbeResult
+        called = []
+        monkeypatch.setattr("dbmcp.probe.probe_connection",
+                            lambda cfg, pw: called.append(1) or ProbeResult(ok=True, has_write=True))
+        cfg, path = empty_config
+        self._upsert(ConnectionManager(cfg, path), force_privileged=True)
+        assert called == []  # 强制时根本不探测
+        assert cfg.get_connection("local", "c").host == "db"
+
+    def test_unreachable_blocked(self, empty_config, fake_keyring, monkeypatch):
+        from dbmcp.probe import ProbeResult
+        monkeypatch.setattr("dbmcp.probe.probe_connection",
+                            lambda cfg, pw: ProbeResult(ok=False, message="连接超时"))
+        cfg, path = empty_config
+        with pytest.raises(ConnectionAdminError, match="无法连接"):
+            self._upsert(ConnectionManager(cfg, path))
+
+    def test_sqlite_skips_gate(self, empty_config, fake_keyring, tmp_path):
+        cfg, path = empty_config
+        db = tmp_path / "x.sqlite3"
+        import sqlite3
+        sqlite3.connect(db).close()
+        # sqlite 无账号模型，不触发探测（若触发会因 monkeypatch 缺失而真连，这里不 patch 也应通过）
+        ConnectionManager(cfg, path).upsert(
+            "local", "s", engine="sqlite", environment="local", host=None, port=None,
+            database=str(db), user=None, password=None, writer_user=None, writer_password=None,
+            jump_hosts=[], ssh_key_path=None, ssh_options_extra=[], max_rows=10, mask_columns=[])
+        assert cfg.get_connection("local", "s").engine == "sqlite"
+
+
 class TestSSHKey:
     def test_ssh_key_path_composed(self, empty_config, fake_keyring, tmp_path):
         key = tmp_path / "id_key"
@@ -121,7 +187,7 @@ class TestSSHKey:
             "local", "db1", engine="mysql", environment="prod", host="h", port=3306,
             database="d", user="u", password="p", writer_user=None, writer_password=None,
             jump_hosts=["bastion"], ssh_key_path=str(key), ssh_options_extra=["-o", "X=1"],
-            max_rows=500, mask_columns=[],
+            max_rows=500, mask_columns=[], force_privileged=True,
         )
         conn = cfg.get_connection("local", "db1")
         assert conn.ssh_options[:2] == ["-i", str(key)]
@@ -145,7 +211,8 @@ class TestDelete:
         mgr = ConnectionManager(cfg, path)
         mgr.upsert("local", "db1", engine="mysql", environment="dev", host="h", port=3306,
                    database="d", user="u", password="p", writer_user=None, writer_password=None,
-                   jump_hosts=[], ssh_key_path=None, ssh_options_extra=[], max_rows=500, mask_columns=[])
+                   jump_hosts=[], ssh_key_path=None, ssh_options_extra=[], max_rows=500,
+                   mask_columns=[], force_privileged=True)
         assert len(fake_keyring) == 1
         mgr.delete("local", "db1")
         assert len(fake_keyring) == 0  # keyring 清理

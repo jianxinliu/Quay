@@ -190,6 +190,7 @@ class TestConnectionAdminUI:
                 "environment": "dev", "host": "127.0.0.1", "port": "3306",
                 "database": "app", "user": "root", "password": "secret123",
                 "max_rows": "500", "jump_hosts": "", "ssh_options_extra": "",
+                "force_privileged": "1",  # 跳过真连探测（本测试验证写回/keyring，非权限门）
             }, follow_redirects=False)
             assert r.status_code == 303
             # 落库、密码进 keyring、文件无明文

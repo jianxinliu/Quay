@@ -86,6 +86,11 @@ class RedisPool:
             self._entries.clear()
 
 
+def build_probe_client(cfg: ConnectionConfig, role: Role = "reader") -> _PooledRedis:
+    """临时建 Redis 客户端（含隧道），已 PING。调用方用完必须 .dispose()。"""
+    return _build_client(cfg, role)
+
+
 def _build_client(cfg: ConnectionConfig, role: Role) -> _PooledRedis:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host or "127.0.0.1", cfg.port or 6379

@@ -81,11 +81,26 @@ class ConnectionManager:
         ssh_options_extra: list[str],
         max_rows: int,
         mask_columns: list[str],
+        force_privileged: bool = False,
     ) -> None:
         if not project or not connection:
             raise ConnectionAdminError("项目名与连接名不能为空")
 
         existing = self.config.projects.get(project, ProjectConfig()).connections.get(connection)
+
+        # SSH 参数
+        ssh_options = list(ssh_options_extra)
+        if ssh_key_path:
+            validate_ssh_key_path(ssh_key_path)
+            ssh_options = ["-i", ssh_key_path, *ssh_options]
+
+        # 保存前自动权限校验（mysql/pg，未勾选强制时）：连库探测账号权限，
+        # 超级用户 / 有写权限 / 连不上 → 阻止保存。在写 keyring 前用明文探测。
+        if engine in ("mysql", "postgres") and not force_privileged:
+            self._check_account_privilege(
+                engine, environment, host, port, database, user,
+                password, existing, jump_hosts, ssh_options, max_rows,
+            )
 
         # 密码：留空表示沿用旧引用；新连接必须给（sqlite/无 auth redis 除外）
         password_ref = self._resolve_password_ref(
@@ -94,12 +109,6 @@ class ConnectionManager:
         writer_account = self._resolve_writer(
             project, connection, writer_user, writer_password, existing
         )
-
-        # SSH 参数
-        ssh_options = list(ssh_options_extra)
-        if ssh_key_path:
-            validate_ssh_key_path(ssh_key_path)
-            ssh_options = ["-i", ssh_key_path, *ssh_options]
 
         # 构造并校验（ConnectionConfig 的 validator 会检查引擎必填字段）
         try:
@@ -134,6 +143,42 @@ class ConnectionManager:
         if removed.writer is not None:
             delete_keyring_secret(removed.writer.password)
         save_config(self.config, self.config_path)
+
+    def _check_account_privilege(
+        self, engine, environment, host, port, database, user,  # noqa: ANN001
+        password, existing, jump_hosts, ssh_options, max_rows,  # noqa: ANN001
+    ) -> None:
+        from .probe import probe_connection
+
+        eff_pw = f"plain://{password}" if password else (existing.password if existing else None)
+        if eff_pw is None:
+            raise ConnectionAdminError("缺少数据库密码，无法建连校验账号权限")
+        try:
+            probe_cfg = ConnectionConfig(
+                engine=engine, environment=environment, host=host or None, port=port,
+                database=database or None, user=user or None, password=eff_pw,
+                jump_hosts=jump_hosts, ssh_options=ssh_options,
+                policy=Policy(max_rows=max_rows),
+            )
+        except ValueError as e:
+            raise ConnectionAdminError(_friendly_validation_error(e)) from e
+
+        res = probe_connection(probe_cfg, None)
+        if not res.ok:
+            raise ConnectionAdminError(
+                f"无法连接以校验账号权限：{res.message}。"
+                "确认配置无误后，可勾选“强制使用高权限账号”跳过校验并保存。"
+            )
+        if res.privileged:
+            reasons = []
+            if res.is_superuser:
+                reasons.append("是超级用户/root 账号")
+            if res.has_write:
+                reasons.append("拥有写权限（INSERT/UPDATE/DELETE/DDL）")
+            raise ConnectionAdminError(
+                f"该连接账号{'、'.join(reasons)}；只读连接应使用最小权限的只读账号。"
+                "确需使用请勾选“强制使用高权限账号”。"
+            )
 
     # ---------- 内部 ----------
 

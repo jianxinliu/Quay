@@ -109,6 +109,14 @@ class EnginePool:
             self._entries.clear()
 
 
+def build_probe_engine(cfg: ConnectionConfig, role: Role = "reader") -> _PooledEngine:
+    """用给定配置临时建连（含隧道），不入池。调用方用完必须 .dispose()。
+
+    用于"测试连接/权限探测"——针对表单里尚未保存的配置，不影响 EnginePool。
+    """
+    return _build_pooled_engine(cfg, role)
+
+
 def _build_pooled_engine(cfg: ConnectionConfig, role: Role) -> _PooledEngine:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host, cfg.port

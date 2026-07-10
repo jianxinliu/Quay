@@ -254,12 +254,14 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
  <div class="row">
   <div>{_field("host", "host", cfg.host if cfg else "", ph="127.0.0.1")}</div>
   <div>{_field("port", "port", cfg.port if cfg else "", ph="3306", typ="number", width="120px")}</div>
-  <div>{_field("database", "database", cfg.database if cfg else "")}</div>
+  <div>{_field("database（可留空）", "database", cfg.database if cfg else "")}</div>
  </div>
+ <div class="muted" style="margin:-2px 0 6px">database 留空：MySQL/PG 连到实例但不绑定默认库，查询需用「库名.表名」全限定；SQLite 必填（文件路径）；Redis 为 db 编号（默认 0）。</div>
  <div class="row">
-  <div>{_field("user", "user", cfg.user if cfg else "")}</div>
-  <div>{_field("password", "password", "", ph=pw_ph, typ="password")}</div>
+  <div>{_field("只读账号 user", "user", cfg.user if cfg else "")}</div>
+  <div>{_field("密码", "password", "", ph=pw_ph, typ="password")}</div>
  </div>
+ <div class="muted" style="margin:-2px 0 6px">主账号应为<b>最小权限的只读账号</b>；保存时会自动校验，检测到写权限/超级用户会被拦截。写操作用下方 writer 账号。</div>
  <div class="row">
   <div>{_field("writer user（可选，写操作用）", "writer_user", writer_user)}</div>
   <div>{_field("writer password", "writer_password", "", ph=pw_ph, typ="password")}</div>
@@ -276,8 +278,14 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
   <div>{_field("max_rows", "max_rows", cfg.policy.max_rows if cfg else 500, typ="number", width="120px")}</div>
   <div>{_field("脱敏列（逗号分隔）", "mask_columns", masks, ph="email, phone")}</div>
  </div>
- <br><button class="btn btn-approve" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
- {"<a href='/admin/connections' style='margin-left:12px'>取消编辑</a>" if is_edit else ""}
+ <label style="margin-top:12px"><input type="checkbox" name="force_privileged" value="1" style="width:auto;margin-right:6px">强制使用高权限账号（该账号是 root/超级用户或拥有写权限，我确认知晓风险）</label>
+ <div id="conn-test-result" style="display:none;margin:12px 0"></div>
+ <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+  <button class="btn btn-approve" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
+  <button class="btn" type="button" id="btn-test" style="background:#475569">测试连接</button>
+  <button class="btn" type="button" id="btn-test-ssh" style="background:#64748b">测试 SSH 隧道</button>
+  {"<a href='/admin/connections' style='margin-left:4px'>取消编辑</a>" if is_edit else ""}
+ </div>
 </form>
 <script>
 (function(){{
@@ -305,6 +313,35 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
     envSel.addEventListener('change', applyEnvDefault);
     applyEngineDefault(); applyEnvDefault();  // 初始填一次
   }}
+
+  // 测试按钮：用当前表单值探测，结果 inline 显示，不保存
+  var resultBox = document.getElementById('conn-test-result');
+  function showResult(ok, html){{
+    resultBox.style.display = 'block';
+    resultBox.style.padding = '10px 14px';
+    resultBox.style.borderRadius = '8px';
+    resultBox.style.fontSize = '14px';
+    resultBox.style.background = ok ? '#f0fdf4' : '#fef2f2';
+    resultBox.style.border = '1px solid ' + (ok ? '#86efac' : '#fca5a5');
+    resultBox.style.color = ok ? '#166534' : '#b00020';
+    resultBox.innerHTML = html;
+  }}
+  async function runTest(url, btn){{
+    resultBox.style.display = 'none';
+    btn.disabled = true; var old = btn.textContent; btn.textContent = '测试中…';
+    try {{
+      var resp = await fetch(url, {{method:'POST', headers:{{'Accept':'application/json'}}, body:new FormData(form)}});
+      var d = await resp.json();
+      var msg = (d.ok ? '✓ ' : '✗ ') + (d.message || '');
+      if (d.detail) msg += '<br><span style="font-size:13px">' + d.detail + '</span>';
+      showResult(d.ok, msg);
+    }} catch (ex) {{ showResult(false, '✗ 请求失败：' + ex); }}
+    finally {{ btn.disabled = false; btn.textContent = old; }}
+  }}
+  var bt = document.getElementById('btn-test');
+  var bs = document.getElementById('btn-test-ssh');
+  if (bt) bt.addEventListener('click', function(){{ runTest('/admin/connections/test', bt); }});
+  if (bs) bs.addEventListener('click', function(){{ runTest('/admin/connections/test-ssh', bs); }});
 
   form.addEventListener('submit', async function(e){{
     e.preventDefault();
@@ -627,6 +664,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 ssh_options_extra=_list("ssh_options_extra", " "),
                 max_rows=int(str(f.get("max_rows") or "500")),
                 mask_columns=_list("mask_columns", ","),
+                force_privileged=str(f.get("force_privileged") or "") in ("1", "on", "true"),
             )
         except (ConnectionAdminError, QueryRejected, ValueError) as e:
             # 前端用 fetch 提交（Accept: json）→ 返回 JSON，页面 inline 提示、不清空表单
@@ -650,3 +688,59 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except (ConnectionAdminError, QueryRejected) as e:
             return HTMLResponse(_page("删除失败", f"<div class='card'>{_esc(e)}</div>"), status_code=400)
         return RedirectResponse(url="/admin/connections", status_code=303)
+
+    def _form_fields(f) -> dict:  # noqa: ANN001
+        port_raw = str(f.get("port") or "").strip()
+        return {
+            "engine": str(f.get("engine") or "").strip(),
+            "environment": str(f.get("environment") or "dev").strip(),
+            "host": str(f.get("host") or "").strip() or None,
+            "port": int(port_raw) if port_raw else None,
+            "database": str(f.get("database") or "").strip() or None,
+            "user": str(f.get("user") or "").strip() or None,
+            "password": str(f.get("password") or "") or None,
+            "jump_hosts": [x.strip() for x in str(f.get("jump_hosts") or "").split(",") if x.strip()],
+            "ssh_options": (
+                (["-i", str(f.get("ssh_key_path")).strip()] if str(f.get("ssh_key_path") or "").strip() else [])
+                + [x for x in str(f.get("ssh_options_extra") or "").split(" ") if x]
+            ),
+            "max_rows": int(str(f.get("max_rows") or "500")),
+        }
+
+    def _existing_password(project: str, connection: str) -> str | None:
+        proj = service.config.projects.get(project)
+        c = proj.connections.get(connection) if proj else None
+        return c.password if c else None
+
+    @mcp.custom_route("/admin/connections/test", methods=["POST"])
+    @guard
+    async def _connection_test(req: Request) -> Response:
+        f = await req.form()
+        fields = _form_fields(f)
+        # 编辑时密码留空 → 用已存的引用测
+        existing_pw = None
+        if not fields["password"]:
+            existing_pw = _existing_password(str(f.get("project") or ""), str(f.get("connection") or ""))
+        res = service.probe_connection_fields(fields, existing_password=existing_pw)
+        detail = []
+        if res.version:
+            detail.append(f"版本 {res.version}")
+        if res.has_write is not None:
+            if res.privileged:
+                bits = []
+                if res.is_superuser:
+                    bits.append("超级用户/root")
+                if res.has_write:
+                    bits.append("有写权限")
+                detail.append("⚠ 账号" + "、".join(bits) + "（只读连接不应使用）")
+            else:
+                detail.append("✓ 账号为最小权限只读账号")
+        return JSONResponse({"ok": res.ok, "message": res.message,
+                             "detail": " · ".join(detail), "privileged": res.privileged})
+
+    @mcp.custom_route("/admin/connections/test-ssh", methods=["POST"])
+    @guard
+    async def _connection_test_ssh(req: Request) -> Response:
+        f = await req.form()
+        res = service.probe_ssh_fields(_form_fields(f))
+        return JSONResponse({"ok": res.ok, "message": res.message})
