@@ -16,6 +16,20 @@ class ConnectionAdminError(Exception):
     """连接管理操作失败（校验不通过、keyring 不可用等）。message 面向管理员。"""
 
 
+def _friendly_validation_error(e: ValueError) -> str:
+    """把 pydantic 的冗长校验错误提炼成一句人话。"""
+    errors = getattr(e, "errors", None)
+    if callable(errors):
+        msgs = []
+        for err in e.errors():
+            msg = str(err.get("msg", "")).removeprefix("Value error, ").strip()
+            if msg:
+                msgs.append(msg)
+        if msgs:
+            return "；".join(dict.fromkeys(msgs))  # 去重保序
+    return str(e).splitlines()[0]
+
+
 def _keyring_account(project: str, connection: str, role: str) -> str:
     # keyring account 不能含 '/'
     safe = f"{project}--{connection}".replace("/", "_")
@@ -103,7 +117,7 @@ class ConnectionManager:
                 policy=Policy(max_rows=max_rows, mask_columns=mask_columns),
             )
         except ValueError as e:
-            raise ConnectionAdminError(f"连接配置无效: {e}") from e
+            raise ConnectionAdminError(_friendly_validation_error(e)) from e
 
         self.config.projects.setdefault(project, ProjectConfig()).connections[connection] = conn_cfg
         save_config(self.config, self.config_path)

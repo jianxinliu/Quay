@@ -17,7 +17,7 @@ from functools import wraps
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from .approvals import ApprovalError
 
@@ -76,10 +76,13 @@ def _page(title: str, body: str) -> str:
  .badge{{display:inline-block;padding:2px 8px;border-radius:10px;color:#fff;font-size:12px;font-weight:600}}
  .card{{background:#fff;border-radius:8px;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px}}
  pre{{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;overflow-x:auto;font-size:13px}}
- .btn{{display:inline-block;padding:8px 16px;border-radius:6px;border:none;color:#fff;font-size:14px;cursor:pointer;text-decoration:none}}
+ .btn{{display:inline-block;padding:9px 18px;border-radius:7px;border:none;color:#fff;font-size:14px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .15s,box-shadow .15s}}
+ .btn:hover{{filter:brightness(1.08);box-shadow:0 2px 6px rgba(0,0,0,.15)}}
  .btn-approve{{background:#2e7d32}} .btn-reject{{background:#b00020}}
- input,textarea{{font-family:inherit;font-size:14px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:5px}}
- label{{font-size:13px;color:#555;display:block;margin:8px 0 4px}}
+ input,textarea,select{{font-family:inherit;font-size:14px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:7px;background:#fff;box-sizing:border-box;transition:border-color .15s,box-shadow .15s}}
+ input:focus,textarea:focus,select:focus{{outline:none;border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}}
+ label{{font-size:13px;color:#555;display:block;margin:10px 0 4px}}
+ .errbar{{background:#fef2f2;border:1px solid #fca5a5;color:#b00020;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:14px}}
  .muted{{color:#888;font-size:13px}} .row{{display:flex;gap:24px;flex-wrap:wrap}}
  .filters{{margin-bottom:12px}} .filters a{{margin-right:10px;font-size:13px}}
  .kv{{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:6px 0 4px;align-items:center;font-size:14px}}
@@ -206,7 +209,8 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
     masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
     pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
     writer_user = cfg.writer.user if cfg and cfg.writer else ""
-    return f"""<form method="post" action="/admin/connections/save">
+    return f"""<div id="conn-err" class="errbar" style="display:none"></div>
+<form id="conn-form" method="post" action="/admin/connections/save">
  <div class="row">
   <div>{_field("项目", "project", project, ph="local")}</div>
   <div><label>连接名</label><input name="connection" value="{_esc(connection)}" {ro} style="width:260px"></div>
@@ -242,7 +246,37 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
  </div>
  <br><button class="btn btn-approve" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
  {"<a href='/admin/connections' style='margin-left:12px'>取消编辑</a>" if is_edit else ""}
-</form>"""
+</form>
+<script>
+(function(){{
+  var form = document.getElementById('conn-form');
+  var err = document.getElementById('conn-err');
+  if (!form) return;
+  form.addEventListener('submit', async function(e){{
+    e.preventDefault();
+    err.style.display = 'none';
+    var btn = form.querySelector('button[type=submit]');
+    btn.disabled = true; btn.style.opacity = '.6';
+    try {{
+      var resp = await fetch('/admin/connections/save', {{
+        method: 'POST',
+        headers: {{'Accept': 'application/json'}},
+        body: new FormData(form)
+      }});
+      var data = await resp.json();
+      if (data.ok) {{ window.location = '/admin/connections'; return; }}
+      err.textContent = '⚠ ' + (data.error || '保存失败');
+      err.style.display = 'block';
+      err.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+    }} catch (ex) {{
+      err.textContent = '⚠ 请求失败：' + ex;
+      err.style.display = 'block';
+    }} finally {{
+      btn.disabled = false; btn.style.opacity = '1';
+    }}
+  }});
+}})();
+</script>"""
 
 
 def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None:
@@ -529,9 +563,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 mask_columns=_list("mask_columns", ","),
             )
         except (ConnectionAdminError, QueryRejected, ValueError) as e:
+            # 前端用 fetch 提交（Accept: json）→ 返回 JSON，页面 inline 提示、不清空表单
+            if "application/json" in req.headers.get("accept", ""):
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
             body = f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>" \
                    f"<a href='/admin/connections'>← 返回</a></div>"
             return HTMLResponse(_page("保存失败", body), status_code=400)
+        if "application/json" in req.headers.get("accept", ""):
+            return JSONResponse({"ok": True})
         return RedirectResponse(url="/admin/connections", status_code=303)
 
     @mcp.custom_route("/admin/connections/delete", methods=["POST"])
