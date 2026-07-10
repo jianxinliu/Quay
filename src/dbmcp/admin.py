@@ -90,66 +90,166 @@ def _page(title: str, body: str) -> str:
 <title>{_esc(title)} · db-manage-mcp</title>
 {_FAVICON_LINK}
 <style>
- body{{font-family:-apple-system,system-ui,'PingFang SC',sans-serif;margin:0;background:#f5f6f8;color:#222}}
- header{{background:#1e293b;color:#fff;padding:12px 20px;display:flex;gap:20px;align-items:center}}
- header a{{color:#cbd5e1;text-decoration:none;font-size:14px}} header a:hover{{color:#fff}}
- header .brand{{font-weight:600;color:#fff}}
- main{{max-width:1100px;margin:20px auto;padding:0 16px}}
- table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
- th,td{{text-align:left;padding:10px 12px;border-bottom:1px solid #eef0f3;font-size:14px;vertical-align:top}}
- th{{background:#fafbfc;font-weight:600;color:#555}}
- .badge{{display:inline-block;padding:2px 8px;border-radius:10px;color:#fff;font-size:12px;font-weight:600}}
- .card{{background:#fff;border-radius:8px;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:16px}}
- pre{{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;overflow-x:auto;font-size:13px}}
- .btn{{display:inline-block;padding:9px 18px;border-radius:7px;border:none;color:#fff;font-size:14px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .15s,box-shadow .15s}}
- .btn:hover{{filter:brightness(1.08);box-shadow:0 2px 6px rgba(0,0,0,.15)}}
- .btn-approve{{background:#2e7d32}} .btn-reject{{background:#b00020}}
- input,textarea,select{{font-family:inherit;font-size:14px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:7px;background:#fff;box-sizing:border-box;transition:border-color .15s,box-shadow .15s}}
- input:focus,textarea:focus,select:focus{{outline:none;border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.15)}}
- label{{font-size:13px;color:#555;display:block;margin:10px 0 4px}}
- .errbar{{background:#fef2f2;border:1px solid #fca5a5;color:#b00020;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:14px}}
- .muted{{color:#888;font-size:13px}} .row{{display:flex;gap:24px;flex-wrap:wrap}}
- .filters{{margin-bottom:12px}} .filters a{{margin-right:10px;font-size:13px}}
- .kv{{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:6px 0 4px;align-items:center;font-size:14px}}
- .kv dt{{color:#64748b}} .kv dd{{margin:0;color:#1e293b}}
- .pill{{display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;font-weight:600}}
+ :root{{
+  --ink:#14181f; --ink-2:#1c222c; --paper:#f4f5f7; --surface:#fff;
+  --border:#e6e8ec; --line:#eef0f3; --text:#1a1f28; --muted:#6b7280; --faint:#9aa1ac;
+  --accent:#0d9488; --accent-ink:#0b7268; --accent-soft:#e6faf6;
+  --mono:ui-monospace,'SF Mono',Menlo,Monaco,'Cascadia Code',monospace;
+  --sans:-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif;
+ }}
+ *{{box-sizing:border-box}}
+ body{{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
+   -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5}}
+ code,pre,.mono{{font-family:var(--mono)}}
+ a{{color:var(--accent-ink);text-decoration:none}} a:hover{{text-decoration:underline}}
+ .shell{{display:grid;grid-template-columns:236px 1fr;min-height:100vh}}
+ /* 侧栏 */
+ .side{{background:var(--ink);color:#c7cdd6;display:flex;flex-direction:column;padding:20px 14px;
+   position:sticky;top:0;height:100vh}}
+ .side .brand{{display:flex;align-items:center;gap:10px;padding:4px 8px 20px;color:#fff}}
+ .side .brand svg{{width:30px;height:30px;border-radius:8px;flex:none}}
+ .side .brand b{{font-size:15px;font-weight:600;letter-spacing:.2px}}
+ .side .brand span{{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1px;text-transform:uppercase}}
+ .side nav{{display:flex;flex-direction:column;gap:2px;margin-top:6px}}
+ .side nav a{{display:flex;align-items:center;gap:10px;color:#aeb6c2;padding:9px 11px;border-radius:8px;
+   font-size:14px;transition:background .12s,color .12s}}
+ .side nav a:hover{{background:var(--ink-2);color:#fff;text-decoration:none}}
+ .side nav a.active{{background:var(--accent);color:#fff;font-weight:500}}
+ .side nav a .dot{{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.5;flex:none}}
+ .side nav a.active .dot{{opacity:1}}
+ .side .foot{{margin-top:auto;border-top:1px solid #262d38;padding-top:12px}}
+ .side .foot a{{color:var(--faint);font-size:13px;padding:6px 11px;display:block;border-radius:6px}}
+ .side .foot a:hover{{color:#fff;background:var(--ink-2);text-decoration:none}}
+ /* 工作区 */
+ main{{padding:32px 40px;max-width:1160px}}
+ h1,h2,h3{{color:var(--text);font-weight:600;letter-spacing:-.01em}}
+ h2{{font-size:19px;margin:0 0 2px}} h3{{font-size:15px;margin:0 0 8px}}
+ .eyebrow{{font-family:var(--mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;
+   color:var(--accent-ink);margin-bottom:6px}}
+ .pagehead{{margin-bottom:22px}}
+ .card{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 22px;margin-bottom:18px}}
+ .card h2{{margin-bottom:14px}}
+ /* 表格 */
+ table{{width:100%;border-collapse:collapse;font-size:13.5px}}
+ th,td{{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}}
+ th{{font-family:var(--mono);font-weight:600;font-size:11px;letter-spacing:.6px;text-transform:uppercase;
+   color:var(--faint);border-bottom:1px solid var(--border)}}
+ tr:last-child td{{border-bottom:none}}
+ tbody tr{{transition:background .1s}} tbody tr:hover{{background:#fafbfc}}
+ td code{{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border-radius:5px}}
+ /* 徽章 / pill / tag */
+ .badge{{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
+   font-family:var(--mono);letter-spacing:.3px}}
+ .pill{{display:inline-block;padding:1px 10px;border-radius:6px;font-size:12px;font-weight:600;font-family:var(--mono)}}
  .pill-yes{{background:#dcfce7;color:#166534}} .pill-no{{background:#f1f5f9;color:#475569}}
  .pill-na{{background:#fef3c7;color:#92400e}}
- .tag{{display:inline-block;background:#eef2ff;color:#3730a3;padding:1px 8px;border-radius:5px;font-size:12px;margin-right:4px}}
- .sec-title{{font-size:13px;font-weight:600;color:#475569;margin:14px 0 4px;text-transform:none}}
- .card h3{{margin-top:0}}
+ .tag{{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);padding:1px 8px;
+   border-radius:5px;font-size:12px;font-family:var(--mono);margin-right:4px}}
+ /* 代码 / 计划 */
+ pre{{background:var(--ink);color:#e2e8f0;padding:14px 16px;border-radius:10px;overflow-x:auto;
+   font-size:12.5px;line-height:1.55;border:1px solid #262d38}}
+ /* 按钮 */
+ .btn{{display:inline-block;padding:9px 17px;border-radius:8px;border:1px solid transparent;
+   font-size:13.5px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .12s,transform .04s;
+   background:var(--ink);color:#fff;font-family:var(--sans)}}
+ .btn:hover{{filter:brightness(1.15);text-decoration:none}} .btn:active{{transform:translateY(1px)}}
+ .btn-primary{{background:var(--accent)}} .btn-approve{{background:#16794f}} .btn-reject{{background:#c0392b}}
+ .btn-ghost{{background:#fff;color:var(--text);border-color:var(--border)}}
+ .btn-ghost:hover{{background:#f6f7f9;filter:none}}
+ /* 表单 */
+ input,textarea,select{{font-family:var(--sans);font-size:13.5px;padding:9px 11px;border:1px solid var(--border);
+   border-radius:8px;background:#fff;transition:border-color .12s,box-shadow .12s;color:var(--text)}}
+ input:focus,textarea:focus,select:focus{{outline:none;border-color:var(--accent);
+   box-shadow:0 0 0 3px rgba(13,148,136,.14)}}
+ input::placeholder{{color:var(--faint)}}
+ label{{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-weight:500}}
+ .errbar{{background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;padding:11px 15px;border-radius:9px;
+   margin-bottom:16px;font-size:13.5px}}
+ /* 通用 */
+ .muted{{color:var(--muted);font-size:13px}} .row{{display:flex;gap:22px;flex-wrap:wrap}}
+ .filters{{margin-bottom:14px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13px}}
+ .filters a{{padding:3px 10px;border-radius:6px;color:var(--muted)}}
+ .filters a:hover{{background:#eceef1;text-decoration:none;color:var(--text)}}
+ .kv{{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:4px 0;align-items:center;font-size:13.5px}}
+ .kv dt{{color:var(--muted)}} .kv dd{{margin:0;color:var(--text)}}
+ .sec-title{{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.8px;
+   text-transform:uppercase;margin:18px 0 7px}}
+ .card h3:first-child,.card .sec-title:first-child{{margin-top:0}}
+ @media (max-width:720px){{
+  .shell{{grid-template-columns:1fr}}
+  .side{{position:static;height:auto;flex-direction:row;align-items:center;padding:12px 16px;gap:8px;overflow-x:auto}}
+  .side .brand{{padding:0 8px 0 0}} .side .brand span{{display:none}}
+  .side nav{{flex-direction:row;margin:0}} .side .foot{{margin:0 0 0 auto;border:none;padding:0}}
+  .side nav a .dot{{display:none}} main{{padding:22px 18px}}
+ }}
+ @media (prefers-reduced-motion:reduce){{*{{transition:none!important}}}}
 </style></head><body>
-<header>
- <span class="brand">db-manage-mcp</span>
- <a href="/admin/approvals">审批中心</a>
- <a href="/admin/audit">操作审计</a>
- <a href="/admin/connections">连接管理</a>
- <a href="/admin/logout" style="margin-left:auto">退出</a>
-</header>
-<main>{body}</main></body></html>"""
+<div class="shell">
+ <aside class="side">
+  <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
+  <nav>
+   <a href="/admin/approvals"><span class="dot"></span>审批中心</a>
+   <a href="/admin/audit"><span class="dot"></span>操作审计</a>
+   <a href="/admin/connections"><span class="dot"></span>连接管理</a>
+  </nav>
+  <div class="foot"><a href="/admin/logout">退出登录</a></div>
+ </aside>
+ <main>{body}</main>
+</div>
+<script>
+ (function(){{var p=location.pathname;document.querySelectorAll('.side nav a').forEach(function(a){{
+   if(p.indexOf(a.getAttribute('href'))===0)a.classList.add('active');}});}})();
+</script>
+</body></html>"""
 
 
 def _login_page(error: str = "") -> str:
-    err = f"<p style='color:#b00020'>{_esc(error)}</p>" if error else ""
+    err = (f"<div style='background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;"
+           f"padding:9px 13px;border-radius:8px;font-size:13px;margin-bottom:14px'>{_esc(error)}</div>"
+           if error else "")
+    mono = "ui-monospace,'SF Mono',Menlo,monospace"
+    sans = "-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif"
     body = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · db-manage-mcp</title>
 {_FAVICON_LINK}
-<style>body{{font-family:-apple-system,system-ui,sans-serif;background:#f5f6f8;display:flex;
- justify-content:center;align-items:center;height:100vh;margin:0}}
- .box{{background:#fff;padding:32px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.1);width:320px}}
- h1{{font-size:18px;margin:0 0 16px}} input{{width:100%;box-sizing:border-box;padding:10px;
- border:1px solid #cbd5e1;border-radius:6px;font-size:14px}} button{{width:100%;margin-top:12px;
- padding:10px;background:#1e293b;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer}}</style>
-</head><body><form class="box" method="post" action="/admin/login">
- <h1>db-manage-mcp 管理后台</h1>{err}
- <input type="password" name="token" placeholder="管理 token" autofocus>
- <button type="submit">登录</button></form></body></html>"""
+<style>
+ *{{box-sizing:border-box}}
+ body{{font-family:{sans};margin:0;min-height:100vh;display:flex;justify-content:center;align-items:center;
+   background:#14181f;color:#e6e8ec;-webkit-font-smoothing:antialiased;
+   background-image:radial-gradient(circle at 30% 20%,#1c2530 0,transparent 55%),radial-gradient(circle at 80% 90%,#122a27 0,transparent 55%)}}
+ .box{{width:340px;padding:34px 30px}}
+ .brand{{display:flex;align-items:center;gap:12px;margin-bottom:22px}}
+ .brand svg{{width:40px;height:40px}}
+ .brand b{{font-size:17px;color:#fff;font-weight:600}}
+ .brand span{{display:block;font-family:{mono};font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6b7280}}
+ label{{font-family:{mono};font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:#9aa1ac;
+   display:block;margin-bottom:8px}}
+ input{{width:100%;padding:11px 13px;background:#1c222c;border:1px solid #2c3440;border-radius:9px;
+   color:#fff;font-size:14px;font-family:{mono};transition:border-color .12s,box-shadow .12s}}
+ input:focus{{outline:none;border-color:#0d9488;box-shadow:0 0 0 3px rgba(13,148,136,.2)}}
+ button{{width:100%;margin-top:16px;padding:11px;background:#0d9488;color:#fff;border:none;border-radius:9px;
+   font-size:14px;font-weight:500;cursor:pointer;font-family:{sans};transition:filter .12s}}
+ button:hover{{filter:brightness(1.12)}}
+</style></head><body>
+<form class="box" method="post" action="/admin/login">
+ <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
+ {err}
+ <label>管理 token</label>
+ <input type="password" name="token" placeholder="输入管理 token" autofocus>
+ <button type="submit">进入控制台</button>
+</form></body></html>"""
     return body
 
 
 def _badge(text: str, color_map: dict) -> str:
     color = color_map.get(str(text).lower(), color_map.get(str(text).upper(), "#666"))
     return f'<span class="badge" style="background:{color}">{_esc(text)}</span>'
+
+
+def _pagehead(eyebrow: str, title: str, sub: str = "") -> str:
+    subline = f'<div class="muted" style="margin-top:4px">{_esc(sub)}</div>' if sub else ""
+    return (f'<div class="pagehead"><div class="eyebrow">{_esc(eyebrow)}</div>'
+            f'<h2 style="font-size:22px">{_esc(title)}</h2>{subline}</div>')
 
 
 def _env_badge(env: str) -> str:
@@ -280,10 +380,10 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
  </div>
  <label style="margin-top:12px"><input type="checkbox" name="force_privileged" value="1" style="width:auto;margin-right:6px">强制使用高权限账号（该账号是 root/超级用户或拥有写权限，我确认知晓风险）</label>
  <div id="conn-test-result" style="display:none;margin:12px 0"></div>
- <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-  <button class="btn btn-approve" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
-  <button class="btn" type="button" id="btn-test" style="background:#475569">测试连接</button>
-  <button class="btn" type="button" id="btn-test-ssh" style="background:#64748b">测试 SSH 隧道</button>
+ <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+  <button class="btn btn-primary" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
+  <button class="btn btn-ghost" type="button" id="btn-test">测试连接</button>
+  <button class="btn btn-ghost" type="button" id="btn-test-ssh">测试 SSH 隧道</button>
   {"<a href='/admin/connections' style='margin-left:4px'>取消编辑</a>" if is_edit else ""}
  </div>
 </form>
@@ -443,7 +543,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return "".join(out)
 
         body = (
-            f"<div class='card'><h2>待审批 ({len(pending)})</h2>"
+            _pagehead("Approvals", "审批中心", "数据变更操作在此人工授权；批准后 agent 带 change_id 重提执行")
+            + f"<div class='card'><h2>待审批 <span class='muted'>({len(pending)})</span></h2>"
             f"<table><tr><th>单号</th><th>连接</th><th>风险</th><th>SQL</th><th>状态</th><th>提交时间</th></tr>"
             f"{_rows(pending)}</table></div>"
             f"<div class='card'><h2>近期已决策</h2>"
@@ -488,12 +589,16 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             )
 
         body = f"""
+{_pagehead("Change #" + str(c.id), f"审批单 #{c.id}")}
 <div class='card'>
- <h2>审批单 #{c.id} {_badge(st, _STATUS_COLOR)} {_badge(c.risk_level, _LEVEL_COLOR)}</h2>
- <div class='muted'>连接 {_esc(c.project)}/{_esc(c.connection)} · 环境 {_esc(c.environment)} · 引擎 {_esc(c.engine)}</div>
- <div class='muted'>提交 agent: {_esc(c.agent)} · 提交时间 {_esc(c.created_at)} · 有效期至 {_esc(c.expires_at)}</div>
- <p><b>变更原因:</b> {_esc(c.reason) or '—'}</p>
- <b>SQL</b><pre>{_esc(c.sql)}</pre>
+ <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">{_badge(st, _STATUS_COLOR)} {_badge(c.risk_level, _LEVEL_COLOR)} <span class="tag">{_esc(c.engine)}</span></div>
+ <dl class="kv">
+  <dt>连接</dt><dd><code>{_esc(c.project)}/{_esc(c.connection)}</code> · {_env_badge(c.environment)}</dd>
+  <dt>提交 agent</dt><dd>{_esc(c.agent)}</dd>
+  <dt>提交时间</dt><dd>{_esc(c.created_at)} · 有效期至 {_esc(c.expires_at)}</dd>
+  <dt>变更原因</dt><dd>{_esc(c.reason) or '—'}</dd>
+ </dl>
+ <div class="sec-title">SQL</div><pre>{_esc(c.sql)}</pre>
 </div>
 <div class='card'><h3>风险报告 {_badge(c.risk_level, _LEVEL_COLOR)}</h3>
  <div class="sec-title">影响范围</div>
@@ -503,7 +608,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
  {_explain_html(risk)}
 </div>
 {actions}
-<p><a href='/admin/approvals'>← 返回列表</a></p>"""
+<p style="margin-top:16px"><a href='/admin/approvals'>← 返回审批列表</a></p>"""
         return HTMLResponse(_page(f"审批单 #{c.id}", body))
 
     @mcp.custom_route("/admin/approvals/{change_id:int}/approve", methods=["POST"])
@@ -581,7 +686,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             + " · ".join(pager_parts) + "</div>"
         )
         body = (
-            f"<div class='card'><h2>操作审计</h2>{filters}"
+            _pagehead("Audit Log", "操作审计", "每次数据库操作的完整留痕：谁、何时、在哪个库、跑了什么、结果如何")
+            + f"<div class='card'>{filters}"
             f"<table><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th><th>SQL</th><th>状态</th><th>结果</th></tr>"
             f"{table_rows}</table>{pager}</div>"
         )
@@ -607,17 +713,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             for cname, c in sorted(proj.connections.items()):
                 jump = " → ".join(c.jump_hosts) if c.jump_hosts else "—"
                 stripe = _ENV_COLOR.get(c.environment, "#64748b")
+                db = f"<code>{_esc(c.database)}</code>" if c.database else "<span class='muted'>—</span>"
                 rows.append(
-                    f"<tr><td style='border-left:4px solid {stripe};padding-left:12px'>"
-                    f"{_esc(pname)}/{_esc(cname)}</td><td>{_esc(c.engine)}</td>"
-                    f"<td>{_env_badge(c.environment)}</td><td>{_esc(c.host)}:{_esc(c.port)}</td>"
-                    f"<td>{_esc(c.database)}</td><td class='muted'>{_esc(jump)}</td>"
-                    f"<td><a href='/admin/connections?edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
+                    f"<tr><td style='border-left:3px solid {stripe};padding-left:13px'>"
+                    f"<code>{_esc(pname)}/{_esc(cname)}</code></td><td class='mono muted'>{_esc(c.engine)}</td>"
+                    f"<td>{_env_badge(c.environment)}</td><td><code>{_esc(c.host)}:{_esc(c.port)}</code></td>"
+                    f"<td>{db}</td><td class='muted mono'>{_esc(jump)}</td>"
+                    f"<td style='white-space:nowrap'><a href='/admin/connections?edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
                     f"<form method='post' action='/admin/connections/delete' style='display:inline' "
                     f"onsubmit='return confirm(\"删除连接 {_esc(pname)}/{_esc(cname)}？\")'>"
                     f"<input type='hidden' name='project' value='{_esc(pname)}'>"
                     f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
-                    f"<button class='btn btn-reject' style='padding:2px 10px'>删除</button></form></td></tr>"
+                    f"<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form></td></tr>"
                 )
         table = "".join(rows) or '<tr><td colspan="7" class="muted">（无连接）</td></tr>'
 
@@ -627,7 +734,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         )
         form = _connection_form(e_project, e_conn, edit_cfg)
         body = (
-            f"<div class='card'><h2>连接列表</h2>"
+            _pagehead("Connections", "连接管理", "主账号应为只读账号；保存时自动校验权限，密码写入系统钥匙串")
+            + f"<div class='card'><h2>连接列表</h2>"
             f"<table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
             f"<th>跳板</th><th>操作</th></tr>{table}</table></div>"
             f"<div class='card'><h2>{'编辑' if edit_cfg else '新增'}连接</h2>{keyring_note}{form}</div>"
