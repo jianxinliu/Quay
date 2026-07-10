@@ -44,6 +44,13 @@ _LEVEL_COLOR = {
     "MEDIUM": "#f9a825",
     "LOW": "#2e7d32",
 }
+# 环境配色：越靠生产越醒目（红），本地/开发偏冷色
+_ENV_COLOR = {
+    "local": "#64748b",     # 灰
+    "dev": "#2563eb",       # 蓝
+    "staging": "#d97706",   # 橙
+    "prod": "#dc2626",      # 红
+}
 _STATUS_COLOR = {
     "pending": "#1565c0",
     "approved": "#2e7d32",
@@ -124,6 +131,11 @@ def _login_page(error: str = "") -> str:
 def _badge(text: str, color_map: dict) -> str:
     color = color_map.get(str(text).lower(), color_map.get(str(text).upper(), "#666"))
     return f'<span class="badge" style="background:{color}">{_esc(text)}</span>'
+
+
+def _env_badge(env: str) -> str:
+    color = _ENV_COLOR.get(env, "#64748b")
+    return f'<span class="badge" style="background:{color}">{_esc(env or "—")}</span>'
 
 
 def _bool_pill(value: object) -> str:
@@ -209,6 +221,7 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
     masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
     pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
     writer_user = cfg.writer.user if cfg and cfg.writer else ""
+    is_edit_js = "true" if is_edit else "false"
     return f"""<div id="conn-err" class="errbar" style="display:none"></div>
 <form id="conn-form" method="post" action="/admin/connections/save">
  <div class="row">
@@ -252,6 +265,28 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
   var form = document.getElementById('conn-form');
   var err = document.getElementById('conn-err');
   if (!form) return;
+
+  // 新增模式：引擎决定默认端口，local 环境默认 host 127.0.0.1（不覆盖用户手改的值）
+  if (!{is_edit_js}) {{
+    var DEFAULT_PORTS = {{mysql:'3306', postgres:'5432', redis:'6379', sqlite:''}};
+    var AUTO_PORTS = ['', '3306', '5432', '6379'];
+    var engineSel = form.querySelector('[name=engine]');
+    var envSel = form.querySelector('[name=environment]');
+    var hostInput = form.querySelector('[name=host]');
+    var portInput = form.querySelector('[name=port]');
+    function applyEngineDefault(){{
+      // 仅当端口为空或仍是某个默认端口（说明用户没定制）时才跟随引擎变化
+      if (AUTO_PORTS.indexOf(portInput.value) >= 0) portInput.value = DEFAULT_PORTS[engineSel.value] || '';
+    }}
+    function applyEnvDefault(){{
+      if (envSel.value === 'local' && (hostInput.value === '' || hostInput.value === '127.0.0.1'))
+        hostInput.value = '127.0.0.1';
+    }}
+    engineSel.addEventListener('change', applyEngineDefault);
+    envSel.addEventListener('change', applyEnvDefault);
+    applyEngineDefault(); applyEnvDefault();  // 初始填一次
+  }}
+
   form.addEventListener('submit', async function(e){{
     e.preventDefault();
     err.style.display = 'none';
@@ -505,9 +540,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         for pname, proj in sorted(service.config.projects.items()):
             for cname, c in sorted(proj.connections.items()):
                 jump = " → ".join(c.jump_hosts) if c.jump_hosts else "—"
+                stripe = _ENV_COLOR.get(c.environment, "#64748b")
                 rows.append(
-                    f"<tr><td>{_esc(pname)}/{_esc(cname)}</td><td>{_esc(c.engine)}</td>"
-                    f"<td>{_esc(c.environment)}</td><td>{_esc(c.host)}:{_esc(c.port)}</td>"
+                    f"<tr><td style='border-left:4px solid {stripe};padding-left:12px'>"
+                    f"{_esc(pname)}/{_esc(cname)}</td><td>{_esc(c.engine)}</td>"
+                    f"<td>{_env_badge(c.environment)}</td><td>{_esc(c.host)}:{_esc(c.port)}</td>"
                     f"<td>{_esc(c.database)}</td><td class='muted'>{_esc(jump)}</td>"
                     f"<td><a href='/admin/connections?edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
                     f"<form method='post' action='/admin/connections/delete' style='display:inline' "
