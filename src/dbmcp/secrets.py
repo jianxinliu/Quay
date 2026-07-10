@@ -32,7 +32,14 @@ def store_keyring_secret(account: str, value: str) -> str:
         raise SecretResolveError(
             "未安装 keyring，无法安全存储密码：pip install 'db-manage-mcp[keyring]'"
         ) from e
-    keyring.set_password(KEYRING_SERVICE, account, value)
+    try:
+        keyring.set_password(KEYRING_SERVICE, account, value)
+    except Exception as e:
+        # Docker/无桌面环境下 keyring 无可用后端（无 Keychain / D-Bus secret service）
+        raise SecretResolveError(
+            "系统钥匙串不可用（常见于 Docker/无桌面环境），无法通过页面安全存储密码。"
+            "请改用配置文件的 env:// 引用注入密码，或在有钥匙串的本地进程模式下管理连接。"
+        ) from e
     return f"keyring://{KEYRING_SERVICE}/{account}"
 
 

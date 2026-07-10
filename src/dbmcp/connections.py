@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import AppConfig, ConnectionConfig, Policy, ProjectConfig, WriterAccount, save_config
-from .secrets import delete_keyring_secret, store_keyring_secret
+from .secrets import SecretResolveError, delete_keyring_secret, store_keyring_secret
 
 
 class ConnectionAdminError(Exception):
@@ -128,7 +128,10 @@ class ConnectionManager:
         new_plain: str | None, existing_ref: str | None,
     ) -> str | None:
         if new_plain:
-            return store_keyring_secret(_keyring_account(project, connection, role), new_plain)
+            try:
+                return store_keyring_secret(_keyring_account(project, connection, role), new_plain)
+            except SecretResolveError as e:
+                raise ConnectionAdminError(str(e)) from e
         return existing_ref  # 留空 → 沿用旧引用（可能为 None）
 
     def _resolve_writer(

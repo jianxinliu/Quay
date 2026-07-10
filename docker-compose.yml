@@ -5,10 +5,17 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8100:8100"   # 只暴露给本机
+    environment:
+      # 管理后台登录 token（生产务必改掉；也可放进 .env）
+      DBM_ADMIN_TOKEN: "${DBM_ADMIN_TOKEN:-changeme-admin-token}"
+      # 容器内用 docker 专用配置（host.docker.internal 指向宿主）
+      DBM_CONFIG: /app/config/connections.docker.yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux 下让容器能解析宿主
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
-      - ~/.ssh:/root/.ssh:ro     # M2 SSH 多跳隧道复用宿主的 ssh 配置与密钥
+      - ~/.ssh:/root/.ssh:ro     # SSH 多跳隧道复用宿主的 ssh 配置与密钥
     env_file:
       - path: .env               # 数据库密码经 env:// 引用注入，示例见 .env.example
         required: false
