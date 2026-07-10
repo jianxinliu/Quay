@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html
@@ -66,11 +67,28 @@ def _esc(v: object) -> str:
     return html.escape(str(v if v is not None else ""))
 
 
+# 图标：数据库柱形 + 审批勾徽章。内联为 data URI（零外部文件/网络），同时由路由 serve。
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+    '<rect width="64" height="64" rx="14" fill="#1e293b"/>'
+    '<g fill="none" stroke="#e2e8f0" stroke-width="3.5" stroke-linecap="round">'
+    '<ellipse cx="26" cy="19" rx="14" ry="5.5"/>'
+    '<path d="M12 19 v22 c0 3 6.3 5.5 14 5.5 s14 -2.5 14 -5.5 V19"/>'
+    '<path d="M12 30 c0 3 6.3 5.5 14 5.5 s14 -2.5 14 -5.5"/></g>'
+    '<circle cx="46" cy="46" r="13" fill="#22c55e" stroke="#1e293b" stroke-width="3.5"/>'
+    '<path d="M40 46 l4.2 4.2 L52 41" fill="none" stroke="#fff" stroke-width="4"'
+    ' stroke-linecap="round" stroke-linejoin="round"/></svg>'
+)
+_FAVICON_HREF = "data:image/svg+xml;base64," + base64.b64encode(_FAVICON_SVG.encode()).decode()
+_FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
+
+
 def _page(title: str, body: str) -> str:
     return f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · db-manage-mcp</title>
+{_FAVICON_LINK}
 <style>
  body{{font-family:-apple-system,system-ui,'PingFang SC',sans-serif;margin:0;background:#f5f6f8;color:#222}}
  header{{background:#1e293b;color:#fff;padding:12px 20px;display:flex;gap:20px;align-items:center}}
@@ -115,6 +133,7 @@ def _login_page(error: str = "") -> str:
     err = f"<p style='color:#b00020'>{_esc(error)}</p>" if error else ""
     body = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · db-manage-mcp</title>
+{_FAVICON_LINK}
 <style>body{{font-family:-apple-system,system-ui,sans-serif;background:#f5f6f8;display:flex;
  justify-content:center;align-items:center;height:100vh;margin:0}}
  .box{{background:#fff;padding:32px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.1);width:320px}}
@@ -325,6 +344,16 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 return RedirectResponse(url="/admin/login", status_code=303)
             return await handler(req)
         return _wrapped
+
+    @mcp.custom_route("/favicon.ico", methods=["GET"])
+    @mcp.custom_route("/favicon.svg", methods=["GET"])
+    @mcp.custom_route("/admin/favicon.svg", methods=["GET"])
+    async def _favicon(_req: Request) -> Response:
+        return Response(
+            _FAVICON_SVG,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @mcp.custom_route("/admin/login", methods=["GET"])
     async def _login_form(req: Request) -> HTMLResponse:

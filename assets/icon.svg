@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#1e293b"/>
+  <!-- 数据库柱形 -->
+  <g fill="none" stroke="#e2e8f0" stroke-width="3.5" stroke-linecap="round">
+    <ellipse cx="26" cy="19" rx="14" ry="5.5"/>
+    <path d="M12 19 v22 c0 3 6.3 5.5 14 5.5 s14 -2.5 14 -5.5 V19"/>
+    <path d="M12 30 c0 3 6.3 5.5 14 5.5 s14 -2.5 14 -5.5"/>
+  </g>
+  <!-- 审批通过徽章 -->
+  <circle cx="46" cy="46" r="13" fill="#22c55e" stroke="#1e293b" stroke-width="3.5"/>
+  <path d="M40 46 l4.2 4.2 L52 41" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
