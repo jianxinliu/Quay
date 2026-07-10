@@ -67,6 +67,19 @@ def _esc(v: object) -> str:
     return html.escape(str(v if v is not None else ""))
 
 
+def _format_sql(sql: str, engine: str) -> str:
+    """用 sqlglot 美化 SQL（缩进/关键字对齐）；解析失败则原样返回。"""
+    if not sql:
+        return ""
+    dialect = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}.get(engine)
+    try:
+        import sqlglot  # noqa: PLC0415
+        out = sqlglot.transpile(sql, read=dialect, write=dialect, pretty=True)
+        return ";\n".join(out) if out else sql
+    except Exception:
+        return sql
+
+
 # 图标：数据库柱形 + 审批勾徽章。内联为 data URI（零外部文件/网络），同时由路由 serve。
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
@@ -83,7 +96,10 @@ _FAVICON_HREF = "data:image/svg+xml;base64," + base64.b64encode(_FAVICON_SVG.enc
 _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, pending: int = 0) -> str:
+    nav_badge = f"<span class='nav-count'>{pending}</span>" if pending else ""
+    banner = (f"<a class='pending-banner' href='/admin/approvals'>"
+              f"⚠ <b>{pending}</b> 条数据变更待审批，点此处理 →</a>" if pending else "")
     return f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -117,6 +133,11 @@ def _page(title: str, body: str) -> str:
  .side nav a.active{{background:var(--accent);color:#fff;font-weight:500}}
  .side nav a .dot{{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.5;flex:none}}
  .side nav a.active .dot{{opacity:1}}
+ .nav-count{{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
+   min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}}
+ .pending-banner{{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
+   padding:11px 16px;border-radius:10px;margin-bottom:20px;font-size:14px;font-weight:500;text-decoration:none}}
+ .pending-banner:hover{{background:#fee2e2;text-decoration:none}} .pending-banner b{{font-size:16px}}
  .side .foot{{margin-top:auto;border-top:1px solid #262d38;padding-top:12px}}
  .side .foot a{{color:var(--faint);font-size:13px;padding:6px 11px;display:block;border-radius:6px}}
  .side .foot a:hover{{color:#fff;background:var(--ink-2);text-decoration:none}}
@@ -130,6 +151,7 @@ def _page(title: str, body: str) -> str:
  .card{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 22px;margin-bottom:18px}}
  .card h2{{margin-bottom:14px}}
  /* 表格 */
+ .tablewrap{{overflow-x:auto;margin:0 -6px;border-radius:8px}}
  table{{width:100%;border-collapse:collapse;font-size:13.5px}}
  th,td{{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}}
  th{{font-family:var(--mono);font-weight:600;font-size:11px;letter-spacing:.6px;text-transform:uppercase;
@@ -137,8 +159,14 @@ def _page(title: str, body: str) -> str:
  tr:last-child td{{border-bottom:none}}
  tbody tr{{transition:background .1s}} tbody tr:hover{{background:#fafbfc}}
  td code{{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border-radius:5px}}
- .cell-sql{{display:inline-block;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}}
+ .cell-sql{{display:inline-block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}}
+ .sql-toggle:hover{{background:#e6faf6;color:var(--accent-ink)}}
+ .sql-full td{{background:#0f141b;padding:0}} .sql-full pre{{margin:0;border-radius:0;border:none}}
  .cell-detail{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;margin-top:2px}}
+ .pager{{display:flex;align-items:center;gap:14px;margin-top:16px}}
+ .pager-info{{font-size:13px;color:var(--muted)}}
+ .btn.pg{{padding:6px 13px;font-size:13px}}
+ .btn.disabled{{opacity:.4;pointer-events:none}}
  /* 徽章 / pill / tag */
  .badge{{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
    font-family:var(--mono);letter-spacing:.3px}}
@@ -190,13 +218,13 @@ def _page(title: str, body: str) -> str:
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
   <nav>
-   <a href="/admin/approvals"><span class="dot"></span>审批中心</a>
+   <a href="/admin/approvals"><span class="dot"></span>审批中心{nav_badge}</a>
    <a href="/admin/audit"><span class="dot"></span>操作审计</a>
    <a href="/admin/connections"><span class="dot"></span>连接管理</a>
   </nav>
   <div class="foot"><a href="/admin/logout">退出登录</a></div>
  </aside>
- <main>{body}</main>
+ <main>{banner}{body}</main>
 </div>
 <script>
  (function(){{var p=location.pathname;document.querySelectorAll('.side nav a').forEach(function(a){{
@@ -484,6 +512,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return await handler(req)
         return _wrapped
 
+    def _shell(title: str, body: str) -> HTMLResponse:
+        """渲染登录后的页面，自动注入待审批数（侧栏角标 + 顶部横幅）。"""
+        try:
+            pending = len(service.list_changes("pending"))
+        except Exception:
+            pending = 0
+        return HTMLResponse(_page(title, body, pending=pending))
+
     @mcp.custom_route("/favicon.ico", methods=["GET"])
     @mcp.custom_route("/favicon.svg", methods=["GET"])
     @mcp.custom_route("/admin/favicon.svg", methods=["GET"])
@@ -547,13 +583,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         body = (
             _pagehead("Approvals", "审批中心", "数据变更操作在此人工授权；批准后 agent 带 change_id 重提执行")
             + f"<div class='card'><h2>待审批 <span class='muted'>({len(pending)})</span></h2>"
-            f"<table><tr><th>单号</th><th>连接</th><th>风险</th><th>SQL</th><th>状态</th><th>提交时间</th></tr>"
-            f"{_rows(pending)}</table></div>"
+            f"<div class='tablewrap'><table><tr><th>单号</th><th>连接</th><th>风险</th><th>SQL</th><th>状态</th><th>提交时间</th></tr>"
+            f"{_rows(pending)}</table></div></div>"
             f"<div class='card'><h2>近期已决策</h2>"
-            f"<table><tr><th>单号</th><th>连接</th><th>风险</th><th>SQL</th><th>状态</th><th>提交时间</th></tr>"
-            f"{_rows(recent)}</table></div>"
+            f"<div class='tablewrap'><table><tr><th>单号</th><th>连接</th><th>风险</th><th>SQL</th><th>状态</th><th>提交时间</th></tr>"
+            f"{_rows(recent)}</table></div></div>"
         )
-        return HTMLResponse(_page("审批中心", body))
+        return _shell("审批中心", body)
 
     @mcp.custom_route("/admin/approvals/{change_id:int}", methods=["GET"])
     @guard
@@ -611,7 +647,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
 </div>
 {actions}
 <p style="margin-top:16px"><a href='/admin/approvals'>← 返回审批列表</a></p>"""
-        return HTMLResponse(_page(f"审批单 #{c.id}", body))
+        return _shell(f"审批单 #{c.id}", body)
 
     @mcp.custom_route("/admin/approvals/{change_id:int}/approve", methods=["POST"])
     @guard
@@ -654,8 +690,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         rows = service.store.recent(limit, offset, filters)
 
         trs = []
-        for r in rows:
-            sql = _esc((r["sql"] or "")[:90])
+        for i, r in enumerate(rows):
             # 结果列：有行数/耗时才显示；detail 截断 + 完整值放 title 悬浮
             stat = []
             if r["row_count"] is not None:
@@ -666,8 +701,17 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             detail = r["detail"] or ""
             dline = (f"<div class='cell-detail' title='{_esc(detail)}'>{_esc(detail[:70])}"
                      f"{'…' if len(detail) > 70 else ''}</div>") if detail else ""
-            sqlcell = (f"<code class='cell-sql' title='{_esc(r['sql'] or '')}'>{sql}"
-                       f"{'…' if r['sql'] and len(r['sql']) > 90 else ''}</code>") if r["sql"] else "<span class='muted'>—</span>"
+            # SQL：点击展开该行下方的格式化完整 SQL
+            raw_sql = r["sql"] or ""
+            if raw_sql:
+                truncated = _esc(raw_sql[:88]) + ("…" if len(raw_sql) > 88 else "")
+                sqlcell = (f"<code class='cell-sql sql-toggle' data-i='{i}' title='点击展开完整 SQL'>"
+                           f"{truncated}</code>")
+                expand_row = (f"<tr class='sql-full' id='sqlfull-{i}' style='display:none'>"
+                              f"<td colspan='7'><pre>{_esc(_format_sql(raw_sql, r['engine'] or ''))}</pre></td></tr>")
+            else:
+                sqlcell = "<span class='muted'>—</span>"
+                expand_row = ""
             trs.append(
                 f"<tr><td class='muted mono' style='white-space:nowrap'>{_esc(r['ts'])}</td>"
                 f"<td class='mono'>{_esc(r['agent'])}</td>"
@@ -677,6 +721,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 f"<td>{sqlcell}</td>"
                 f"<td>{_badge(r['status'], _STATUS_COLOR)}</td>"
                 f"<td class='muted'>{statline}{dline}</td></tr>"
+                f"{expand_row}"
             )
         table_rows = "".join(trs) or '<tr><td colspan="7" class="muted">（无匹配记录）</td></tr>'
 
@@ -702,34 +747,39 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             "</form>"
         )
 
-        # 分页保留筛选参数
+        # 分页：按页码，始终显示，保留筛选参数
         def _url(off: int) -> str:
             parts = [f"limit={limit}", f"offset={off}"] + [f"{k}={_esc(v)}" for k, v in filters.items()]
             return "/admin/audit?" + "&".join(parts)
-        pager_parts = []
-        if offset > 0:
-            pager_parts.append(f"<a href='{_url(max(offset - limit, 0))}'>← 较新</a>")
-        if offset + limit < total:
-            pager_parts.append(f"<a href='{_url(offset + limit)}'>较旧 →</a>")
-        shown = f"第 {offset + 1}–{min(offset + limit, total)} 条" if total else "无记录"
-        pager = (f"<div class='filters' style='margin-top:12px'>共 {total} 条 · {shown} "
-                 + " · ".join(pager_parts) + "</div>")
+        pages = max((total + limit - 1) // limit, 1)
+        cur_page = offset // limit + 1
+        prev_btn = (f"<a class='btn btn-ghost pg' href='{_url(max(offset - limit, 0))}'>← 上一页</a>"
+                    if offset > 0 else "<span class='btn btn-ghost pg disabled'>← 上一页</span>")
+        next_btn = (f"<a class='btn btn-ghost pg' href='{_url(offset + limit)}'>下一页 →</a>"
+                    if offset + limit < total else "<span class='btn btn-ghost pg disabled'>下一页 →</span>")
+        pager = (f"<div class='pager'>{prev_btn}"
+                 f"<span class='pager-info'>第 <b>{cur_page}</b> / {pages} 页 · 共 {total} 条</span>"
+                 f"{next_btn}</div>")
 
         body = (
             _pagehead("Audit Log", "操作审计", "每次数据库操作的完整留痕：谁、何时、在哪个库、跑了什么、结果如何")
             + f"<div class='card'>{filter_bar}"
-            f"<table class='audit'><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th>"
-            f"<th>SQL</th><th>状态</th><th>结果</th></tr>{table_rows}</table>{pager}</div>"
+            f"<div class='tablewrap'><table class='audit'><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th>"
+            f"<th>SQL</th><th>状态</th><th>结果</th></tr>{table_rows}</table></div>{pager}</div>"
             "<script>(function(){"
-            "var box=document.getElementById('auto-refresh');if(!box)return;"
-            "var on=localStorage.getItem('dbm-audit-refresh')==='1';box.checked=on;"
+            "var box=document.getElementById('auto-refresh');"
+            "if(box){var on=localStorage.getItem('dbm-audit-refresh')==='1';box.checked=on;"
             "var t=on?setTimeout(function(){location.reload();},5000):null;"
             "box.addEventListener('change',function(){"
             "localStorage.setItem('dbm-audit-refresh',box.checked?'1':'0');"
-            "if(box.checked)location.reload();else if(t)clearTimeout(t);});"
+            "if(box.checked)location.reload();else if(t)clearTimeout(t);});}"
+            "document.querySelectorAll('.sql-toggle').forEach(function(c){"
+            "c.style.cursor='pointer';c.addEventListener('click',function(){"
+            "var f=document.getElementById('sqlfull-'+c.getAttribute('data-i'));"
+            "if(f)f.style.display=f.style.display==='none'?'table-row':'none';});});"
             "})();</script>"
         )
-        return HTMLResponse(_page("操作审计", body))
+        return _shell("操作审计", body)
 
     def _caller(req: Request) -> "CallerInfo":
         from .service import CallerInfo
@@ -774,11 +824,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         body = (
             _pagehead("Connections", "连接管理", "主账号应为只读账号；保存时自动校验权限，密码写入系统钥匙串")
             + f"<div class='card'><h2>连接列表</h2>"
-            f"<table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
-            f"<th>跳板</th><th>操作</th></tr>{table}</table></div>"
+            f"<div class='tablewrap'><table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
+            f"<th>跳板</th><th>操作</th></tr>{table}</table></div></div>"
             f"<div class='card'><h2>{'编辑' if edit_cfg else '新增'}连接</h2>{keyring_note}{form}</div>"
         )
-        return HTMLResponse(_page("连接管理", body))
+        return _shell("连接管理", body)
 
     @mcp.custom_route("/admin/connections/save", methods=["POST"])
     @guard
