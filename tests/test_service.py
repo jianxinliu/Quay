@@ -119,3 +119,26 @@ class TestMeta:
 
     def test_test_connection(self, service):
         assert service.test_connection("demo", "main", CALLER)["ok"] is True
+
+
+class TestNoDatabaseHint:
+    def test_no_database_error_detection(self):
+        from dbmcp.service import _is_no_database_error
+        assert _is_no_database_error(Exception("(1046, 'No database selected')"))
+        assert _is_no_database_error(Exception("no schema has been selected to create in"))
+        assert not _is_no_database_error(Exception("table not found"))
+
+    def test_list_connections_note_when_no_database(self, tmp_path):
+        from dbmcp.audit.log import AuditStore
+        from dbmcp.config import AppConfig
+        cfg = AppConfig.model_validate({"projects": {"p": {"connections": {
+            "nodb": {"engine": "mysql", "host": "h", "user": "u", "password": "plain://x",
+                     "environment": "dev"},
+            "withdb": {"engine": "mysql", "host": "h", "database": "app", "user": "u",
+                       "password": "plain://x", "environment": "dev"},
+        }}}})
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+        conns = {c["connection"]: c for c in svc.list_connections("p")}
+        assert "note" in conns["nodb"] and "全限定" in conns["nodb"]["note"]
+        assert "note" not in conns["withdb"]
+        svc.close()

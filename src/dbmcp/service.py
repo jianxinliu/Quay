@@ -30,6 +30,16 @@ class QueryRejected(Exception):
     """SQL 被审计规则拒绝。message 面向 agent，说明原因与下一步动作。"""
 
 
+def _is_no_database_error(e: Exception) -> bool:
+    """识别"未选定数据库"类错误：MySQL 1046 / PG no schema / 未限定表名。"""
+    msg = str(e).lower()
+    return (
+        "1046" in msg
+        or "no database selected" in msg
+        or "no schema has been selected" in msg
+    )
+
+
 @dataclass
 class CallerInfo:
     agent: str = "unknown"
@@ -73,6 +83,10 @@ class DbmService:
                 "environment": c.environment,
                 "database": c.database,
                 "host": c.host,
+                # 无默认库时提示 agent 用全限定表名
+                **({"note": "此连接未绑定默认库，查询/schema 操作请用「库名.表名」全限定，"
+                            "list_tables/describe_table 需先用 SHOW DATABASES 选定库"}
+                   if c.engine in ("mysql", "postgres") and not c.database else {}),
                 # 有意不返回 user/password/writer 等账号信息
             }
             for name, c in sorted(proj.connections.items())
@@ -101,6 +115,15 @@ class DbmService:
         except QueryRejected:
             raise
         except Exception as e:
+            # 无默认库时用非限定表名 → MySQL 1046 / PG 未指定 schema，给 agent 友好指引
+            if not cfg.database and _is_no_database_error(e):
+                rec.status = "error"
+                rec.detail = "未选定数据库"
+                self.store.record(rec)
+                raise QueryRejected(
+                    "该连接未绑定默认库。请用「库名.表名」全限定表名查询"
+                    "（如 SELECT * FROM mydb.users），或先执行 SHOW DATABASES 查看可用库。"
+                ) from e
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
             self.store.record(rec)
