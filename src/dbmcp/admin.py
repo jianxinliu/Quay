@@ -82,6 +82,14 @@ def _page(title: str, body: str) -> str:
  label{{font-size:13px;color:#555;display:block;margin:8px 0 4px}}
  .muted{{color:#888;font-size:13px}} .row{{display:flex;gap:24px;flex-wrap:wrap}}
  .filters{{margin-bottom:12px}} .filters a{{margin-right:10px;font-size:13px}}
+ .kv{{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:6px 0 4px;align-items:center;font-size:14px}}
+ .kv dt{{color:#64748b}} .kv dd{{margin:0;color:#1e293b}}
+ .pill{{display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;font-weight:600}}
+ .pill-yes{{background:#dcfce7;color:#166534}} .pill-no{{background:#f1f5f9;color:#475569}}
+ .pill-na{{background:#fef3c7;color:#92400e}}
+ .tag{{display:inline-block;background:#eef2ff;color:#3730a3;padding:1px 8px;border-radius:5px;font-size:12px;margin-right:4px}}
+ .sec-title{{font-size:13px;font-weight:600;color:#475569;margin:14px 0 4px;text-transform:none}}
+ .card h3{{margin-top:0}}
 </style></head><body>
 <header>
  <span class="brand">db-manage-mcp</span>
@@ -113,6 +121,48 @@ def _login_page(error: str = "") -> str:
 def _badge(text: str, color_map: dict) -> str:
     color = color_map.get(str(text).lower(), color_map.get(str(text).upper(), "#666"))
     return f'<span class="badge" style="background:{color}">{_esc(text)}</span>'
+
+
+def _bool_pill(value: object) -> str:
+    """True→是(绿) / False→否(灰) / None→未知(黄)。"""
+    if value is True:
+        return '<span class="pill pill-yes">是</span>'
+    if value is False:
+        return '<span class="pill pill-no">否</span>'
+    return '<span class="pill pill-na">未知</span>'
+
+
+def _num(value: object, unknown: str = "未知") -> str:
+    if value is None:
+        return f'<span class="muted">{unknown}</span>'
+    if isinstance(value, int):
+        return f"约 {value:,}"
+    return _esc(value)
+
+
+def _impact_html(risk: dict) -> str:
+    tables = risk.get("tables") or []
+    tags = "".join(f'<span class="tag">{_esc(t)}</span>' for t in tables) or '<span class="muted">—</span>'
+    return (
+        '<dl class="kv">'
+        f"<dt>影响表</dt><dd>{tags}</dd>"
+        f"<dt>表行数量级</dt><dd>{_num(risk.get('row_estimate'))}</dd>"
+        f"<dt>预估影响行数</dt><dd>{_num(risk.get('affected_estimate'), unknown='未知（取决于运行时数据）')}</dd>"
+        f"<dt>含 WHERE 条件</dt><dd>{_bool_pill(risk.get('has_where'))}</dd>"
+        f"<dt>命中索引</dt><dd>{_bool_pill(risk.get('uses_index'))}</dd>"
+        "</dl>"
+    )
+
+
+def _explain_html(risk: dict) -> str:
+    plan = risk.get("explain")
+    if not plan:
+        return ""
+    # MySQL 对单行主键更新等语句的无信息量输出，转成人话
+    if "not executable by iterator executor" in plan:
+        return ('<div class="sec-title">执行计划</div>'
+                '<div class="muted">该语句为点查/单行定位更新，优化器无需生成可展示的查询计划。</div>')
+    return f'<div class="sec-title">执行计划（EXPLAIN）</div><pre>{_esc(plan)}</pre>'
 
 
 def _keyring_available() -> bool:
@@ -280,12 +330,6 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         risk = c.risk_report
         reasons = "".join(f"<li>{_esc(r)}</li>" for r in risk.get("reasons", []))
         warnings = "".join(f"<li>⚠️ {_esc(w)}</li>" for w in risk.get("warnings", []))
-        impact = (
-            f"影响表: {_esc(', '.join(risk.get('tables', [])) or '—')}<br>"
-            f"表行数量级: {_esc(risk.get('row_estimate'))}<br>"
-            f"预估影响行数: {_esc(risk.get('affected_estimate'))}<br>"
-            f"含 WHERE: {_esc(risk.get('has_where'))} · 命中索引: {_esc(risk.get('uses_index'))}"
-        )
 
         actions = ""
         if st == "pending":
@@ -316,11 +360,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
  <p><b>变更原因:</b> {_esc(c.reason) or '—'}</p>
  <b>SQL</b><pre>{_esc(c.sql)}</pre>
 </div>
-<div class='card'><h3>风险报告</h3>
- <div class='row'><div><b>影响范围</b><br>{impact}</div></div>
- <b>判定依据</b><ul>{reasons}</ul>
- {'<b>告警</b><ul>' + warnings + '</ul>' if warnings else ''}
- {'<b>执行计划（EXPLAIN）</b><pre>' + _esc(risk.get('explain')) + '</pre>' if risk.get('explain') else ''}
+<div class='card'><h3>风险报告 {_badge(c.risk_level, _LEVEL_COLOR)}</h3>
+ <div class="sec-title">影响范围</div>
+ {_impact_html(risk)}
+ <div class="sec-title">判定依据</div><ul>{reasons}</ul>
+ {'<div class="sec-title">告警</div><ul>' + warnings + '</ul>' if warnings else ''}
+ {_explain_html(risk)}
 </div>
 {actions}
 <p><a href='/admin/approvals'>← 返回列表</a></p>"""
