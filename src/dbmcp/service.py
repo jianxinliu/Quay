@@ -11,10 +11,12 @@ from dataclasses import dataclass
 from .approvals import ApprovalError, ApprovalStore
 from .audit.classify import classify, fingerprint
 from .audit.log import AuditRecord, AuditStore
+from .audit.redis_rules import classify_command, command_fingerprint, parse_command
 from .audit.risk import assess
 from .config import AppConfig, ConnectionConfig
+from .masking import apply_mask
 from .metadata import MetadataCache
-from . import engines
+from . import engines, redis_engine
 
 
 class QueryRejected(Exception):
@@ -38,6 +40,7 @@ class DbmService:
         self.config = config
         self.store = store
         self.pool = engines.EnginePool()
+        self.redis_pool = redis_engine.RedisPool()
         self.approvals = approvals
         self.metadata = metadata
 
@@ -96,14 +99,18 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
-        return {
+        rows, masked = apply_mask(result.columns, result.rows, cfg.policy)
+        out = {
             "columns": result.columns,
-            "rows": result.rows,
+            "rows": rows,
             "row_count": result.row_count,
             "truncated": result.truncated,
             "duration_ms": result.duration_ms,
             "statement_kind": verdict.statement_kind,
         }
+        if masked:
+            out["masked_columns"] = masked
+        return out
 
     # ---------- 写操作（拒绝—重提 + change_id 放行）----------
 
@@ -228,6 +235,106 @@ class DbmService:
 
         return provider
 
+    # ---------- Redis（同一套拒绝—重提审批流）----------
+
+    def redis_execute(
+        self,
+        project: str,
+        connection: str,
+        command: str,
+        caller: CallerInfo,
+        reason: str = "",
+        change_id: int | None = None,
+    ) -> dict:
+        """Redis 命令统一入口：读命令直通；写命令走审批（与 SQL 相同的流程）。"""
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine != "redis":
+            raise QueryRejected(f"连接 {project}/{connection} 引擎为 {cfg.engine}，请用 query/execute")
+        if self.approvals is None:
+            raise QueryRejected("审批子系统未启用，无法执行 Redis 写命令")
+
+        verdict = classify_command(command)
+        rec = self._base_record(project, connection, cfg, "redis_command", command, caller)
+        rec.fingerprint = command_fingerprint(command)
+
+        if verdict.readonly:
+            try:
+                client = self.redis_pool.get(project, connection, cfg)
+                result = redis_engine.run_command(client, parse_command(command))
+            except Exception as e:
+                rec.status = "error"
+                rec.detail = f"{type(e).__name__}: {e}"
+                self.store.record(rec)
+                raise
+            rec.status = "ok"
+            rec.duration_ms = result.duration_ms
+            self.store.record(rec)
+            return {"status": "executed", "readonly": True, "value": result.value,
+                    "duration_ms": result.duration_ms}
+
+        if change_id is not None:
+            return self._redis_execute_approved(project, connection, cfg, command, change_id, caller)
+
+        # 生成审批单并拒绝
+        report = {
+            "level": verdict.level,
+            "statement_kind": f"Redis:{verdict.command}",
+            "tables": [],
+            "reasons": [verdict.reason],
+            "warnings": [],
+        }
+        change = self.approvals.create(
+            project=project, connection=connection, environment=cfg.environment,
+            engine="redis", sql=command, fingerprint=command_fingerprint(command),
+            reason=reason, risk_level=verdict.level, risk_report=report,
+            agent=caller.agent, session_id=caller.session_id,
+        )
+        rec.status = "rejected"
+        rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {verdict.level}）"
+        self.store.record(rec)
+        return {
+            "status": "approval_required",
+            "change_id": change.id,
+            "risk": report,
+            "message": (
+                f"Redis 写命令需人工授权（风险 {verdict.level}）。已生成审批单 #{change.id}，"
+                f"请通知用户审批；批准后带 change_id={change.id} 重提相同命令。30 分钟内有效。"
+            ),
+        }
+
+    def _redis_execute_approved(
+        self, project: str, connection: str, cfg: ConnectionConfig,
+        command: str, change_id: int, caller: CallerInfo,
+    ) -> dict:
+        rec = self._base_record(project, connection, cfg, "redis_command", command, caller)
+        rec.fingerprint = command_fingerprint(command)
+        try:
+            change = self.approvals.consume(
+                change_id, command_fingerprint(command), (project, connection)
+            )
+        except ApprovalError as e:
+            rec.status = "rejected"
+            rec.detail = str(e)
+            self.store.record(rec)
+            return {"status": "rejected", "change_id": change_id, "reason": str(e)}
+
+        try:
+            # 执行审批单存储的命令；配置了 writer（Redis ACL）则用 writer
+            role = "writer" if cfg.writer is not None else "reader"
+            client = self.redis_pool.get(project, connection, cfg, role=role)
+            result = redis_engine.run_command(client, parse_command(change.sql))
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+        rec.status = "ok"
+        rec.detail = f"审批单 #{change_id} 已核销（审批人 {change.decided_by}）"
+        rec.duration_ms = result.duration_ms
+        self.store.record(rec)
+        return {"status": "executed", "change_id": change_id, "value": result.value,
+                "duration_ms": result.duration_ms}
+
     # ---------- 审批决策（管理后台 / elicitation 调用）----------
 
     def approve_change(self, change_id: int, decided_by: str, note: str = ""):
@@ -271,12 +378,16 @@ class DbmService:
 
         def _run() -> dict:
             result = engines.sample_rows(engine, table, limit)
-            return {
+            rows, masked = apply_mask(result.columns, result.rows, cfg.policy)
+            out = {
                 "columns": result.columns,
-                "rows": result.rows,
+                "rows": rows,
                 "row_count": result.row_count,
                 "duration_ms": result.duration_ms,
             }
+            if masked:
+                out["masked_columns"] = masked
+            return out
 
         return self._audited(project, connection, cfg, "sample_rows", table, caller, _run)
 
@@ -329,6 +440,7 @@ class DbmService:
 
     def close(self) -> None:
         self.pool.dispose()
+        self.redis_pool.dispose()
         self.store.close()
         if self.approvals is not None:
             self.approvals.close()

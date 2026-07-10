@@ -23,6 +23,11 @@ class Policy(BaseModel):
     max_rows: int = DEFAULT_MAX_ROWS
     statement_timeout_s: int = DEFAULT_STATEMENT_TIMEOUT_S
     auto_approve_low_risk_write: bool = False
+    # 敏感字段脱敏：内置模式（password/token/secret 等）+ 自定义列名（不区分大小写）
+    mask_default_patterns: bool = True
+    mask_columns: list[str] = Field(default_factory=list)
+    # elicitation 快捷审批：None = 按环境自动（local/dev 开、staging/prod 关）
+    elicitation_approval: bool | None = None
 
 
 class WriterAccount(BaseModel):
@@ -47,11 +52,22 @@ class ConnectionConfig(BaseModel):
         if self.engine == "sqlite":
             if not self.database:
                 raise ValueError("sqlite 连接必须提供 database（文件路径或 :memory:）")
+        elif self.engine == "redis":
+            # Redis 可以无账号（本地无 auth）或仅 requirepass（无 user）
+            if self.host is None:
+                raise ValueError("redis 连接缺少必填字段: host")
         else:
             missing = [f for f in ("host", "user", "password") if getattr(self, f) is None]
             if missing:
                 raise ValueError(f"{self.engine} 连接缺少必填字段: {', '.join(missing)}")
         return self
+
+    @property
+    def elicitation_enabled(self) -> bool:
+        """elicitation 快捷审批开关：显式配置优先，否则按环境（local/dev 开）。"""
+        if self.policy.elicitation_approval is not None:
+            return self.policy.elicitation_approval
+        return self.environment in ("local", "dev")
 
 
 class ProjectConfig(BaseModel):

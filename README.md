@@ -2,7 +2,7 @@
 
 为所有 agent 提供数据库访问的 MCP 服务：按项目管理连接与账密、SSH 多层跳板、SQL 审计与人工授权、操作审计与管理后台。设计文档见 [DESIGN.md](DESIGN.md)。
 
-当前进度：**M3 完成**。已支持只读查询、schema 探索、SSH 多跳、元数据缓存、SQL 风险审计、拒绝—重提人工授权、操作审计与管理后台。Redis、elicitation 快捷审批、goInception 集成在 M4。
+当前进度：**M4 完成**。只读查询、schema 探索、SSH 多跳、元数据缓存、SQL/Redis 风险审计、拒绝—重提人工授权（管理后台 / elicitation 会话内确认 / CLI 三种审批通道）、敏感字段脱敏、操作审计。goInception 集成为可选后续项（需实例才能联调）。
 
 ## 快速开始
 
@@ -35,8 +35,21 @@ claude mcp add --transport http dbm http://127.0.0.1:8100/mcp
 | `query(project, connection, sql)` | 只读 SQL；非只读语句一律拒绝并审计 |
 | `execute(project, connection, sql, reason?, change_id?)` | 写操作：首次提交生成审批单并返回 change_id；批准后带 change_id 重提执行 |
 | `get_change_status(change_id)` | 查询审批单状态与风险报告 |
+| `redis_command(project, connection, command, ...)` | Redis：读命令直通；写命令走授权流程；FLUSHDB/KEYS/EVAL 等按 CRITICAL 管控 |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
 | `test_connection` | 连通性检查 |
+
+## 三种审批通道
+
+1. **elicitation 会话内确认**（local/dev 默认开，staging/prod 默认关，`policy.elicitation_approval` 可配）：客户端支持时直接弹确认，批准即执行；不支持则自动回退审批单
+2. **管理后台** `/admin/approvals`：查看完整风险报告后决策
+3. **CLI 兜底**：`uv run dbm approvals` / `uv run dbm approve <id> --note ok` / `uv run dbm reject <id> --note 理由`
+
+无论哪种通道，审批单都会创建并留痕（谁批的、何时、备注）。
+
+## 敏感字段脱敏
+
+查询结果按列名自动脱敏：内置模式（password/passwd/secret/token/api_key/credit_card 等子串匹配，`policy.mask_default_patterns: false` 可关）+ `policy.mask_columns` 业务自定义列，命中的值替换为 `***MASKED***`，响应带 `masked_columns` 说明。
 
 ## 管理后台
 

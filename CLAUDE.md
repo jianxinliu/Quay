@@ -53,14 +53,17 @@ docker compose up -d --build
 - `tunnel.py` 系统 OpenSSH 多跳隧道；`metadata.py` 元数据缓存（TTL）
 - `audit/classify.py` 只读判定 + 指纹；`audit/risk.py` 风险评估；`audit/log.py` 操作审计
 - `approvals.py` 审批单存储与生命周期；`admin.py` 管理后台（Starlette custom_route，服务端渲染）
+- `redis_engine.py` Redis 池；`audit/redis_rules.py` 命令分类；`masking.py` 脱敏；`__main__.py` serve/approvals/approve/reject 子命令
+- elicitation 快捷审批在 `server.py::_maybe_elicit_approval`：审批单先创建（审计完整），elicitation 只是把批准动作搬进会话；客户端不支持时异常被吞、自然回退审批单流程
 
 ## 当前状态
 
 - [x] 设计定稿（DESIGN.md）
 - [x] M1 骨架：daemon（Docker）+ SecretProvider + MySQL/PG/SQLite 只读 query + schema + 操作审计
 - [x] M2 连接：SSH 多跳隧道 + 引擎池（隧道托管/空闲回收）+ 元数据缓存
-- [x] M3 管控：风险审计引擎 + 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台（88 个测试全过；真实 daemon 端到端闭环验证通过）
-- [ ] M4 增强：elicitation 审批 + Redis + goInception（可选）+ 脱敏 + CLI 审批兜底
+- [x] M3 管控：风险审计引擎 + 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台
+- [x] M4 增强：elicitation 快捷审批（local/dev 默认开，审批单始终留痕）+ Redis 适配（命令分类 + 同一套审批流，真实 Redis 7 e2e 通过）+ 敏感字段脱敏 + CLI 审批兜底（dbm approvals/approve/reject）。130 个测试全过。
+- [ ] goInception 可选集成：**有意未做**——需要跑起 goInception 实例才能联调，不写无法验证的集成代码；接入点预留在 audit/risk.py（MySQL 深度审核可作为 assess 的增强数据源）
 
 ## 尚未做真实集成验证的部分
 

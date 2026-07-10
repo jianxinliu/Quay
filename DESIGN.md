@@ -193,4 +193,5 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 1. **[已完成] M1 骨架**：FastMCP daemon（Docker）+ 配置模型 + SecretProvider + MySQL/PG/SQLite 只读 `query` + schema 工具 + 操作记录落 SQLite
 2. **[已完成] M2 连接**：SSH 多跳隧道（系统 OpenSSH，隧道随引擎池托管、空闲回收）+ 连接池 + 元数据缓存（schema/索引/行数，TTL）
 3. **[已完成] M3 管控**：审计引擎（sqlglot + 元数据风险报告）+ 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台（审计查看 + 审批中心）
-4. **M4 增强**：elicitation 快捷审批 + Redis 适配 + goInception 可选集成 + 敏感字段脱敏 + CLI 审批兜底
+4. **[已完成] M4 增强**：elicitation 快捷审批（local/dev 默认开、prod 默认关，审批单始终留痕）+ Redis 适配（命令分类 + 同一套审批流）+ 敏感字段脱敏（内置模式 + mask_columns）+ CLI 审批兜底（dbm approvals/approve/reject）
+5. **待定** goInception 可选集成：需实例联调，接入点预留在 audit/risk.py

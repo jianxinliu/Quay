@@ -28,8 +28,20 @@ projects:
         host: 10.0.3.12
         port: 5432
         database: shop
-        environment: prod
+        environment: prod          # prod 默认关闭 elicitation 快捷审批，写操作必须走后台
         user: shop_reader
         password: env://SHOP_PG_READER_PW
-        # 多层跳板（M2 支持），按序经过
+        # 多层跳板，按序经过
         jump_hosts: [bastion1.corp, bastion2.corp]
+        policy:
+          mask_columns: [salary, phone]   # 业务敏感列（内置已覆盖 password/token/secret 等）
+
+      dev-redis:
+        engine: redis
+        host: 127.0.0.1
+        port: 6379
+        database: "0"              # db index
+        environment: dev           # local/dev 默认开启 elicitation 快捷审批
+        password: env://DEV_REDIS_PW   # 无 auth 的本地实例可省略
+        # policy:
+        #   elicitation_approval: false  # 显式关闭会话内快捷审批
