@@ -40,14 +40,27 @@ docker compose up -d --build
 ## 经验教训
 
 - **包名是 `dbmcp`，不是 `dbm`**：`dbm` 是 Python 标准库模块，会被 stdlib 遮蔽导致 import 全挂。CLI 命令仍叫 `dbm`。
-- **本机 curl 测试要加 `--noproxy '*'`**：这台机器 shell 有 SOCKS 代理环境变量，不绕过会把 127.0.0.1 请求发进代理得到 502；起本地服务进程时也建议 `env -u ALL_PROXY ...` 清掉代理变量。
+- **本机测本地服务要绕过代理**：这台机器 shell 有 SOCKS 代理环境变量，不绕过会把 127.0.0.1 请求发进代理得到 502。curl 用 `--noproxy '*'`；fastmcp Client（底层 httpx）用 `env NO_PROXY='*' no_proxy='*'`（单纯 `-u ALL_PROXY` 不够，httpx 还会读其他代理变量，NO_PROXY 最稳）。
 - **写 sqlglot 相关逻辑前先跑实验脚本验证解析行为**：已验证的坑——PG 方言 `EXPLAIN`/`SHOW` 退化为不透明 `Command` 节点需特判；`WITH x AS (INSERT ...) SELECT` 顶层是 `Select`，必须遍历整棵树找写节点。
 - fastmcp 3.x 装的是 `fastmcp` + `fastmcp-slim`，其依赖 `uncalled-for` 是正常的依赖注入库（已核实非投毒包）。
+
+## 模块地图（src/dbmcp/）
+
+- `server.py` MCP 工具注册 → `service.py` 核心逻辑（可单测）
+- `engines.py` SQLAlchemy 适配 + 引擎池（托管 SSH 隧道、reader/writer 双角色、空闲回收）
+- `tunnel.py` 系统 OpenSSH 多跳隧道；`metadata.py` 元数据缓存（TTL）
+- `audit/classify.py` 只读判定 + 指纹；`audit/risk.py` 风险评估；`audit/log.py` 操作审计
+- `approvals.py` 审批单存储与生命周期；`admin.py` 管理后台（Starlette custom_route，服务端渲染）
 
 ## 当前状态
 
 - [x] 设计定稿（DESIGN.md）
-- [x] M1 骨架：daemon（Docker 验证通过）+ 配置/SecretProvider + MySQL/PG/SQLite 只读 query + schema 工具 + 操作审计（52 个测试全过）
-- [ ] M2 连接：SSH 多跳 + 元数据缓存（schema/索引/行数）
-- [ ] M3 管控：审计引擎（风险报告）+ 拒绝—重提审批流 + 管理后台
-- [ ] M4 增强：elicitation 审批 + Redis + goInception（可选）+ 脱敏
+- [x] M1 骨架：daemon（Docker）+ SecretProvider + MySQL/PG/SQLite 只读 query + schema + 操作审计
+- [x] M2 连接：SSH 多跳隧道 + 引擎池（隧道托管/空闲回收）+ 元数据缓存
+- [x] M3 管控：风险审计引擎 + 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台（88 个测试全过；真实 daemon 端到端闭环验证通过）
+- [ ] M4 增强：elicitation 审批 + Redis + goInception（可选）+ 脱敏 + CLI 审批兜底
+
+## 尚未做真实集成验证的部分
+
+- MySQL/PostgreSQL 连接、SSH 多跳隧道、元数据估算（table_rows/reltuples）都只在 SQLite/单元层面验证过，缺真实 MySQL/PG 实例与 bastion 的端到端测试。首次接真实库时先 test_connection，并核对 writer 账号权限。
+- writer 账号的"仅审批通过才使用"依赖 config 正确配置独立账号；sqlite 无账号概念，测试里 writer 复用同库。

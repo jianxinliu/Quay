@@ -2,7 +2,7 @@
 
 为所有 agent 提供数据库访问的 MCP 服务：按项目管理连接与账密、SSH 多层跳板、SQL 审计与人工授权、操作审计与管理后台。设计文档见 [DESIGN.md](DESIGN.md)。
 
-当前进度：**M1**（只读查询 + schema 探索 + 操作审计）。写操作授权流（M3）尚未上线，所有数据变更语句会被拒绝。
+当前进度：**M3 完成**。已支持只读查询、schema 探索、SSH 多跳、元数据缓存、SQL 风险审计、拒绝—重提人工授权、操作审计与管理后台。Redis、elicitation 快捷审批、goInception 集成在 M4。
 
 ## 快速开始
 
@@ -33,8 +33,24 @@ claude mcp add --transport http dbm http://127.0.0.1:8100/mcp
 |---|---|
 | `list_projects` / `list_connections` | 浏览可用连接（不含账号密码） |
 | `query(project, connection, sql)` | 只读 SQL；非只读语句一律拒绝并审计 |
+| `execute(project, connection, sql, reason?, change_id?)` | 写操作：首次提交生成审批单并返回 change_id；批准后带 change_id 重提执行 |
+| `get_change_status(change_id)` | 查询审批单状态与风险报告 |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
 | `test_connection` | 连通性检查 |
+
+## 管理后台
+
+daemon 运行时同端口提供（默认 http://127.0.0.1:8100）：
+
+- `/admin/approvals` — 审批中心：待审列表 + 详情页（SQL、风险报告、批准/拒绝）
+- `/admin/audit` — 操作审计：按状态/连接筛选
+
+## 写操作授权流程
+
+1. agent 调 `execute` 提交写 SQL → 系统评估风险、生成审批单、**拒绝**并返回 `change_id`
+2. 人在 `/admin/approvals` 查看风险报告后批准/拒绝
+3. 批准后 agent 带 `change_id` 重提**相同 SQL** → 执行（执行的是审批单里存储的 SQL，重提文本仅作指纹校验）
+4. 被拒则返回人的理由，agent 调整后重新发起
 
 ## 安全模型（M1 已实现的部分）
 

@@ -9,8 +9,10 @@ import argparse
 import os
 from pathlib import Path
 
+from .approvals import ApprovalStore
 from .audit.log import AuditStore
 from .config import load_config
+from .metadata import MetadataCache
 from .server import build_mcp
 from .service import DbmService
 
@@ -30,14 +32,21 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    store = AuditStore(Path(args.data_dir) / "dbm.sqlite3")
-    service = DbmService(config, store)
+    db_path = Path(args.data_dir) / "dbm.sqlite3"
+    store = AuditStore(db_path)
+    approvals = ApprovalStore(db_path)
+    service = DbmService(config, store, approvals)
+    service.metadata = MetadataCache(db_path, service.pool)
     mcp = build_mcp(service)
 
     try:
         if args.stdio:
             mcp.run(transport="stdio")
         else:
+            # 管理后台挂载在 MCP 应用同一 ASGI 服务下
+            from .admin import mount_admin
+
+            mount_admin(mcp, service)
             mcp.run(transport="http", host=args.host, port=args.port)
     finally:
         service.close()

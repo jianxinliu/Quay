@@ -52,7 +52,7 @@ Agent A / B / C ...（Claude Code 等 MCP 客户端）
 | SSH 多跳 | 子进程调用系统 OpenSSH：`ssh -N -L 本地端口:db:port -J jump1,jump2 target` | 天然多跳、复用 `~/.ssh/config`；容器内挂载 `~/.ssh`（只读）或转发 `SSH_AUTH_SOCK` |
 | 密钥 | SecretProvider 抽象：`env://`（Docker 推荐，经 docker secret/env 注入）、`file+age`（加密配置文件）、`keyring://`（裸机运行时用 macOS Keychain） | **Docker 内无法访问宿主 Keychain**，故容器部署默认 env/加密文件 |
 | 存储 | SQLite（volume 持久化） | 审计、审批单、元数据缓存 |
-| 管理后台 | FastAPI + Jinja2 + HTMX（轻量服务端渲染） | 不引前端框架，够用即可 |
+| 管理后台 | FastMCP custom_route（Starlette）+ 服务端渲染 HTML | 与 MCP 同进程；实现时未引入 Jinja2/HTMX，用无外部依赖的 f-string 渲染（YAGNI，规避 CSP/静态资源），够用即可 |
 
 ## 四、配置模型
 
@@ -190,7 +190,7 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 
 ## 十二、里程碑
 
-1. **M1 骨架**：FastMCP daemon（Docker）+ 配置模型 + SecretProvider + MySQL/PG 直连 + 只读 `query` + schema 工具 + 操作记录落 SQLite
-2. **M2 连接**：SSH 多跳隧道 + 连接池 + 元数据缓存（schema/索引/行数）
-3. **M3 管控**：审计引擎（规则 + EXPLAIN 风险报告）+ 拒绝—重提审批流 + CLI 审批 + 管理后台（审计查看 + 审批中心）
-4. **M4 增强**：elicitation 快捷审批 + Redis 适配 + goInception 可选集成 + 敏感字段脱敏
+1. **[已完成] M1 骨架**：FastMCP daemon（Docker）+ 配置模型 + SecretProvider + MySQL/PG/SQLite 只读 `query` + schema 工具 + 操作记录落 SQLite
+2. **[已完成] M2 连接**：SSH 多跳隧道（系统 OpenSSH，隧道随引擎池托管、空闲回收）+ 连接池 + 元数据缓存（schema/索引/行数，TTL）
+3. **[已完成] M3 管控**：审计引擎（sqlglot + 元数据风险报告）+ 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台（审计查看 + 审批中心）
+4. **M4 增强**：elicitation 快捷审批 + Redis 适配 + goInception 可选集成 + 敏感字段脱敏 + CLI 审批兜底

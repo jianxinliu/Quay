@@ -36,9 +36,10 @@ def build_mcp(service: DbmService) -> FastMCP:
         name="db-manage-mcp",
         instructions=(
             "统一的数据库访问服务。先用 list_projects / list_connections 找到目标连接，"
-            "用 list_tables / describe_table / sample_rows 探索 schema，再用 query 执行只读 SQL。"
-            "query 仅接受单条只读语句（SELECT/SHOW/DESCRIBE/EXPLAIN）；"
-            "任何数据变更（INSERT/UPDATE/DELETE/DDL）都会被拒绝，需走人工授权流程（即将上线）。"
+            "用 list_tables / describe_table / sample_rows 探索 schema。"
+            "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
+            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：首次提交会生成审批单并返回 change_id，"
+            "需人工在管理后台审批；批准后带 change_id 重提相同 SQL 才执行。"
             "所有操作都会被审计记录。"
         ),
     )
@@ -71,6 +72,50 @@ def build_mcp(service: DbmService) -> FastMCP:
             return service.query(project, connection, sql, _caller_from_ctx(ctx))
         except (QueryRejected, KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
+
+    @mcp.tool
+    def execute(
+        project: str,
+        connection: str,
+        sql: Annotated[str, Field(description="要执行的写 SQL（INSERT/UPDATE/DELETE/DDL）")],
+        reason: Annotated[str, Field(description="变更原因，供审批人参考")] = "",
+        change_id: Annotated[
+            int | None, Field(description="已获批审批单号；批准后带上它重提相同 SQL 即可执行")
+        ] = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """执行数据变更操作（需人工授权）。
+
+        首次提交（不带 change_id）：系统评估风险并生成审批单，返回 status=approval_required
+        与 change_id；请把审批单号告知用户，让其在管理后台审批。
+        审批通过后：带上 change_id 重新提交**完全相同的 SQL**，返回 status=executed。
+        若返回 status=rejected，reason 会说明原因（未审批/已过期/被驳回/SQL 不一致），据此调整。
+        只读语句会被直接执行。
+        """
+        try:
+            return service.execute(
+                project, connection, sql, _caller_from_ctx(ctx), reason=reason, change_id=change_id
+            )
+        except (QueryRejected, KeyError, ValueError) as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool
+    def get_change_status(change_id: int) -> dict:
+        """查询审批单状态（pending / approved / rejected / consumed / expired）及风险报告。"""
+        try:
+            change = service.get_change(change_id)
+        except Exception as e:
+            raise ToolError(str(e)) from e
+        return {
+            "change_id": change.id,
+            "status": change.effective_status(),
+            "risk_level": change.risk_level,
+            "project": change.project,
+            "connection": change.connection,
+            "decided_by": change.decided_by,
+            "decision_note": change.decision_note,
+            "expires_at": change.expires_at,
+        }
 
     @mcp.tool
     def list_tables(project: str, connection: str, ctx: Context | None = None) -> list[str]:
