@@ -144,8 +144,14 @@ def _page(title: str, body: str, pending: int = 0) -> str:
    font-size:14px;transition:background .12s,color .12s}}
  .side nav a:hover{{background:var(--ink-2);color:#fff;text-decoration:none}}
  .side nav a.active{{background:var(--accent);color:#fff;font-weight:500}}
- .side nav a .dot{{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.5;flex:none}}
- .side nav a.active .dot{{opacity:1}}
+ /* 每个页面的专属导航图标（SVG data-URI，与查询台树图标同风格）；收起态只显图标 */
+ .side nav a .nico{{width:17px;height:17px;flex:none;background-position:center;
+   background-repeat:no-repeat;background-size:contain;opacity:.85}}
+ .side nav a.active .nico,.side nav a:hover .nico{{opacity:1}}
+ .nico-sql{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='2.5' width='13' height='11' rx='2' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3Cpath d='M4.5 6.5 7 8.5l-2.5 2' fill='none' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 10.5h3' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")}}
+ .nico-approve{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 13.5 3.5v4c0 3.2-2.3 5.8-5.5 7-3.2-1.2-5.5-3.8-5.5-7v-4z' fill='none' stroke='%2356d364' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.8 6' fill='none' stroke='%2356d364' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}}
+ .nico-audit{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3.5h8M2 8h6M2 12.5h5' stroke='%23e8b339' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='11.5' cy='10.5' r='3' fill='none' stroke='%23e8b339' stroke-width='1.5'/%3E%3Cpath d='M11.5 9v1.7l1.2.8' fill='none' stroke='%23e8b339' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E")}}
+ .nico-conn{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%236f9be8'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3C/svg%3E")}}
  .nav-count{{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
    min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}}
  .pending-banner{{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
@@ -235,7 +241,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
   .side{{position:static;height:auto;flex-direction:row;align-items:center;padding:12px 16px;gap:8px;overflow-x:auto}}
   .side .brand{{padding:0 8px 0 0}} .side .brand span{{display:none}}
   .side nav{{flex-direction:row;margin:0}} .side .foot{{margin:0 0 0 auto;border:none;padding:0}}
-  .side nav a .dot{{display:none}} main{{padding:22px 18px}}
+  main{{padding:22px 18px}}
  }}
  @media (prefers-reduced-motion:reduce){{*{{transition:none!important}}}}
 </style></head><body>
@@ -243,10 +249,10 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
   <nav>
-   <a href="/admin/sql"><span class="dot"></span>查询台</a>
-   <a href="/admin/approvals"><span class="dot"></span>审批中心{nav_badge}</a>
-   <a href="/admin/audit"><span class="dot"></span>操作审计</a>
-   <a href="/admin/connections"><span class="dot"></span>连接管理</a>
+   <a href="/admin/sql"><span class="nico nico-sql"></span>查询台</a>
+   <a href="/admin/approvals"><span class="nico nico-approve"></span>审批中心{nav_badge}</a>
+   <a href="/admin/audit"><span class="nico nico-audit"></span>操作审计</a>
+   <a href="/admin/connections"><span class="nico nico-conn"></span>连接管理</a>
   </nav>
   <div class="foot"><a href="/admin/logout">退出登录</a></div>
  </aside>

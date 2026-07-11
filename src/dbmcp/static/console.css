@@ -9,7 +9,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .side .brand > div { display: none; }
 .side .brand svg { width: 26px !important; height: 26px !important; }
 .side nav a { font-size: 0; justify-content: center; padding: 11px 0 !important; }
-.side nav a .dot { width: 7px; height: 7px; opacity: .8; }
+.side nav a .nico { width: 19px; height: 19px; opacity: .9; }
 .side nav a .nav-count { font-size: 10px; position: absolute; transform: translate(10px, -8px); }
 .side nav a { position: relative; }
 .side .foot a { font-size: 0; padding: 8px 0 !important; text-align: center; }
