@@ -70,6 +70,36 @@
     return ranges;
   }
 
+  // 提取一条语句里 FROM/JOIN/UPDATE/INTO 的表（含 schema 前缀与别名），供上下文补全
+  function stmtTables(sql) {
+    var out = [], seen = {};
+    var re = /\b(?:from|join|update|into)\s+`?(?:([a-zA-Z_][\w$]*)`?\.`?)?([a-zA-Z_][\w$]*)`?(?:\s+(?:as\s+)?`?([a-zA-Z_][\w$]*)`?)?/gi, m;
+    while ((m = re.exec(sql))) {
+      var schema = m[1] || tableSchema[m[2]] || "";
+      var alias = (m[3] && !RESERVED[m[3].toLowerCase()]) ? m[3] : null;
+      if (m[1]) tableSchema[m[2]] = m[1];
+      var k = schema + "|" + m[2];
+      if (!seen[k]) { seen[k] = 1; out.push({ schema: schema, table: m[2], alias: alias }); }
+    }
+    return out;
+  }
+
+  // 上下文补全用的关键字与常用函数（MySQL 向，PG 通用子集）
+  var SQL_KEYWORDS = ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT",
+    "OFFSET", "JOIN", "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "ON", "AS", "AND", "OR", "NOT",
+    "IN", "IS NULL", "IS NOT NULL", "LIKE", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "END",
+    "DISTINCT", "UNION", "UNION ALL", "INSERT INTO", "VALUES", "UPDATE", "SET", "DELETE FROM",
+    "SHOW", "EXPLAIN", "WITH", "EXISTS", "ASC", "DESC"];
+  var SQL_FUNCS = ["COUNT", "SUM", "AVG", "MIN", "MAX", "NOW", "CONCAT", "COALESCE", "IFNULL",
+    "GROUP_CONCAT", "SUBSTRING", "LENGTH", "ROUND", "CAST", "DATE_FORMAT", "FROM_UNIXTIME",
+    "UNIX_TIMESTAMP", "DATE", "IF", "DISTINCT"];
+  // 光标前最近的主要关键字 → 决定此处该补什么
+  var KW_TABLE_CTX = { from: 1, join: 1, into: 1, update: 1 };
+  function lastKeyword(before) {
+    var m = before.toLowerCase().match(/\b(select|from|join|where|on|having|set|by|and|or|not|when|then|else|in|like|between|distinct|values|into|update|limit|offset|union)\b/g);
+    return m ? m[m.length - 1] : null;
+  }
+
   function fetchCols(table) {
     var schema = tableSchema[table] || "";
     var key = currentConn + "|" + schema + "|" + table;
@@ -984,28 +1014,110 @@
         });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { self.run(false); });
         editor.onDidBlurEditorText(function () { self.persist(); });
+        // 上下文感知补全（DataGrip 式）：
+        // - `库.` → 该库的表；`表./别名.` → 列
+        // - FROM/JOIN/UPDATE/INTO 后 → 表；SELECT/WHERE/ON/BY/SET 等后 → 当前语句各表的列
+        //   （向后看整条语句找 FROM 表，SELECT 位置也能补列）+ 函数
+        // - 空格触发自动弹（仅在有明确上下文时），语句开头给关键字
         monaco.languages.registerCompletionItemProvider("sql", {
-          triggerCharacters: ["."],
-          provideCompletionItems: function (model, position) {
+          triggerCharacters: [".", " "],
+          provideCompletionItems: function (model, position, ctx) {
+            var Kind = monaco.languages.CompletionItemKind;
             var w = model.getWordUntilPosition(position);
             var range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
                           startColumn: w.startColumn, endColumn: w.endColumn };
             var line = model.getValueInRange({ startLineNumber: position.lineNumber, startColumn: 1,
                                                endLineNumber: position.lineNumber, endColumn: position.column });
+            function kw(items, sort) {
+              return items.map(function (k) {
+                return { label: k, kind: Kind.Keyword, insertText: k, range: range,
+                         sortText: (sort || "3") + k };
+              });
+            }
+            function fns(sort) {
+              return SQL_FUNCS.map(function (f) {
+                return { label: f + "(…)", kind: Kind.Function, insertText: f + "($0)",
+                         insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                         filterText: f, range: range, sortText: (sort || "1") + f };
+              });
+            }
+            function tbls(sort) {
+              return currentTables.map(function (t) {
+                return { label: t, kind: Kind.Struct, insertText: t, range: range,
+                         detail: "表", sortText: (sort || "2") + t };
+              });
+            }
+
+            // 1) `ident.`：库 → 该库的表；表/别名 → 列
             var dot = /([A-Za-z_][\w$]*)\.\s*[\w$]*$/.exec(line);
             if (dot) {
-              var table = resolveTable(model.getValue(), dot[1]);
+              var ident = dot[1];
+              var dbHit = self.databases.filter(function (d) {
+                return d.toLowerCase() === ident.toLowerCase(); })[0];
+              if (dbHit) {
+                var cachedT = self.tablesByDb[dbHit];
+                var p = cachedT ? Promise.resolve(cachedT)
+                  : fetch("/admin/sql/tables?conn=" + encodeURIComponent(currentConn)
+                          + "&schema=" + encodeURIComponent(dbHit))
+                      .then(function (r) { return r.json(); })
+                      .then(function (d) {
+                        if (d.ok) self.tablesByDb[dbHit] = d.tables || [];
+                        return d.ok ? d.tables : [];
+                      }).catch(function () { return []; });
+                return p.then(function (names) {
+                  return { suggestions: (names || []).map(function (t) {
+                    return { label: t, kind: Kind.Struct, insertText: t, range: range,
+                             detail: dbHit + " 的表", sortText: "0" + t };
+                  }) };
+                });
+              }
+              var table = resolveTable(model.getValue(), ident);
               return fetchCols(table).then(function (cols) {
                 return { suggestions: cols.map(function (c) {
-                  return { label: c.name, kind: monaco.languages.CompletionItemKind.Field,
-                           insertText: c.name, range: range, detail: (c.type || "列") };
+                  return { label: c.name, kind: Kind.Field, insertText: c.name, range: range,
+                           detail: (c.type || "列"), sortText: "0" + c.name };
                 }) };
               });
             }
-            return { suggestions: currentTables.map(function (t) {
-              return { label: t, kind: monaco.languages.CompletionItemKind.Struct,
-                       insertText: t, range: range, detail: "表" };
-            }) };
+
+            // 2) 位置感知：光标所在语句 + 光标前最近关键字
+            var text = model.getValue();
+            var off = model.getOffsetAt(position);
+            var ranges = stmtRanges(text), stmt = text, stmtStart = 0;
+            for (var i = 0; i < ranges.length; i++) {
+              if (off <= ranges[i].e) { stmt = text.slice(ranges[i].s, ranges[i].e); stmtStart = ranges[i].s; break; }
+            }
+            var before = text.slice(stmtStart, off);
+            var last = lastKeyword(before);
+            var spaceTrig = ctx && ctx.triggerCharacter === " ";
+
+            if (last && KW_TABLE_CTX[last]) {           // FROM/JOIN/UPDATE/INTO → 表优先
+              return { suggestions: tbls("0").concat(kw(["SELECT"], "9")) };
+            }
+            if (last) {                                  // SELECT/WHERE/ON/BY/SET… → 语句内各表的列
+              var tabs = stmtTables(stmt);
+              if (tabs.length) {
+                return Promise.all(tabs.map(function (t) { return fetchCols(t.table); }))
+                  .then(function (colsets) {
+                    var sug = [];
+                    colsets.forEach(function (cols, ti) {
+                      cols.forEach(function (c) {
+                        sug.push({ label: c.name, kind: Kind.Field, insertText: c.name, range: range,
+                                   detail: tabs[ti].table + " · " + (c.type || ""),
+                                   sortText: "0" + c.name });
+                      });
+                    });
+                    return { suggestions: sug.concat(fns("1")).concat(tbls("2"))
+                               .concat(kw(SQL_KEYWORDS, "3")) };
+                  });
+              }
+              return { suggestions: fns("1").concat(tbls("2")).concat(kw(SQL_KEYWORDS, "3")) };
+            }
+            // 语句开头/无上下文：仅打字时给关键字，空格触发不骚扰
+            if (spaceTrig) return { suggestions: [] };
+            return { suggestions: kw(["SELECT", "INSERT INTO", "UPDATE", "DELETE FROM", "SHOW",
+                                      "EXPLAIN", "WITH", "CREATE TABLE", "ALTER TABLE"], "0")
+                       .concat(tbls("1")) };
           }
         });
         this.editorReady = true;
