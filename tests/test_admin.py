@@ -34,6 +34,8 @@ def client(tmp_path):
         }}}}}
     )
     svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3"))
+    from dbmcp.snippets import SnippetStore
+    svc.snippets = SnippetStore(tmp_path / "a.sqlite3")
     mcp = build_mcp(svc)
     mount_admin(mcp, svc, admin_token=TOKEN)
     app = mcp.http_app()
@@ -111,21 +113,30 @@ def test_index_redirects(client):
 class TestSqlConsole:
     """查询台：页面渲染 + 静态资源 + 元信息 + 读/写执行 + 导出。"""
 
-    def test_page_renders_with_connection_and_codemirror(self, client):
+    def test_page_renders_console_app(self, client):
         tc, _ = client
         r = tc.get("/admin/sql")
         assert r.status_code == 200
         assert "查询台" in r.text
-        assert "demo/main" in r.text  # 连接下拉
-        assert "/admin/static/codemirror.min.js" in r.text
+        assert "/admin/static/console.js" in r.text
+        assert "/admin/static/vue.global.prod.js" in r.text
+        assert "/admin/static/monaco/vs/loader.js" in r.text
 
-    def test_static_asset_served(self, client):
+    def test_static_assets_served_without_auth(self, client):
         tc, _ = client
-        r = tc.get("/admin/static/codemirror.min.js")
-        assert r.status_code == 200
-        assert "javascript" in r.headers["content-type"]
-        # 目录穿越防护
-        assert tc.get("/admin/static/..%2f..%2fconfig").status_code in (400, 404)
+        for path in ("/admin/static/console.js", "/admin/static/vue.global.prod.js",
+                     "/admin/static/monaco/vs/loader.js"):
+            r = tc.get(path)
+            assert r.status_code == 200, path
+            assert "javascript" in r.headers["content-type"], path
+        # 目录穿越防护：resolve 后越出静态根 → 404
+        assert tc.get("/admin/static/%2e%2e/%2e%2e/pyproject.toml").status_code in (400, 404)
+        assert tc.get("/admin/static/nope.js").status_code == 404
+
+    def test_connections_endpoint(self, client):
+        tc, _ = client
+        d = tc.get("/admin/sql/connections").json()
+        assert d["ok"] and any(c["value"] == "demo/main" for c in d["connections"])
 
     def test_tables_and_table_meta(self, client):
         tc, _ = client
@@ -178,11 +189,53 @@ class TestSqlConsole:
         assert r.status_code == 400
         assert not r.json()["ok"]
 
-    def test_sql_routes_require_auth(self, client):
+    def test_sql_page_requires_auth_static_public(self, client):
         tc, _ = client
         tc.get("/admin/logout")
-        for path in ("/admin/sql", "/admin/static/codemirror.min.js"):
-            assert tc.get(path, follow_redirects=False).status_code == 303
+        # 页面需鉴权
+        assert tc.get("/admin/sql", follow_redirects=False).status_code == 303
+        assert tc.get("/admin/sql/connections", follow_redirects=False).status_code == 303
+        # 静态资源公开（Monaco worker 用 data-URI importScripts，带 cookie 会 303 崩）
+        assert tc.get("/admin/static/console.js").status_code == 200
+
+
+class TestSnippets:
+    """SQL 片段库：保存 / 列表 / 更新 / 删除。"""
+
+    def test_save_list_update_delete(self, client):
+        tc, _ = client
+        # 保存
+        r = tc.post("/admin/sql/snippets/save", data={
+            "title": "日活", "note": "每日", "sql": "SELECT count(*) FROM users",
+            "connection": "demo/main"}).json()
+        assert r["ok"] and r["snippet"]["id"] > 0
+        sid = r["snippet"]["id"]
+        # 列表
+        lst = tc.get("/admin/sql/snippets").json()
+        assert lst["ok"] and any(s["id"] == sid for s in lst["snippets"])
+        # 更新标题/备注
+        u = tc.post("/admin/sql/snippets/save", data={
+            "id": sid, "title": "日活V2", "note": "改了", "sql": "SELECT 1"}).json()
+        assert u["ok"] and u["snippet"]["title"] == "日活V2"
+        # 删除
+        d = tc.post("/admin/sql/snippets/delete", data={"id": sid}).json()
+        assert d["ok"]
+        assert not any(s["id"] == sid for s in tc.get("/admin/sql/snippets").json()["snippets"])
+
+    def test_save_requires_title(self, client):
+        tc, _ = client
+        r = tc.post("/admin/sql/snippets/save", data={"title": "", "sql": "SELECT 1"})
+        assert r.status_code == 400 and not r.json()["ok"]
+
+    def test_delete_missing_returns_error(self, client):
+        tc, _ = client
+        r = tc.post("/admin/sql/snippets/delete", data={"id": "99999"})
+        assert r.status_code == 400 and not r.json()["ok"]
+
+    def test_snippet_routes_require_auth(self, client):
+        tc, _ = client
+        tc.get("/admin/logout")
+        assert tc.get("/admin/sql/snippets", follow_redirects=False).status_code == 303
 
 
 class TestAuth:

@@ -23,6 +23,7 @@ from .config import load_config
 from .metadata import MetadataCache
 from .server import build_mcp
 from .service import DbmService
+from .snippets import SnippetStore
 
 DEFAULT_CONFIG = os.environ.get("DBM_CONFIG", "config/connections.yaml")
 DEFAULT_DATA_DIR = os.environ.get("DBM_DATA_DIR", "data")
@@ -78,6 +79,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     approvals = ApprovalStore(db_path)
     service = DbmService(config, store, approvals, config_path=args.config)
     service.metadata = MetadataCache(db_path, service.pool)
+    service.snippets = SnippetStore(db_path)
     service.start_housekeeping(retention_days=args.retention_days)
     mcp = build_mcp(service)
 

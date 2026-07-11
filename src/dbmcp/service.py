@@ -54,6 +54,7 @@ class DbmService:
         approvals: ApprovalStore | None = None,
         metadata: MetadataCache | None = None,
         config_path: str | None = None,
+        snippets: "SnippetStore | None" = None,
     ):
         self.config = config
         self.store = store
@@ -62,6 +63,7 @@ class DbmService:
         self.approvals = approvals
         self.metadata = metadata
         self.config_path = config_path
+        self.snippets = snippets
         self._housekeeping_stop: threading.Event | None = None
 
     # ---------- 元信息 ----------
@@ -205,6 +207,31 @@ class DbmService:
             raise QueryRejected("导出仅支持只读查询（SELECT/SHOW/...）的结果")
         result = self.query(project, connection, sql, caller)
         return export_result(result["columns"], result["rows"], fmt)
+
+    # ---------- SQL 片段库（查询台保存/加载）----------
+
+    def _require_snippets(self) -> "SnippetStore":
+        if self.snippets is None:
+            from .snippets import SnippetError
+            raise SnippetError("片段库未启用")
+        return self.snippets
+
+    def list_snippets(self) -> list[dict]:
+        if self.snippets is None:
+            return []
+        return [s.to_dict() for s in self.snippets.list()]
+
+    def save_snippet(
+        self, title: str, sql: str, note: str = "", connection: str = "",
+        snippet_id: int | None = None,
+    ) -> dict:
+        store = self._require_snippets()
+        if snippet_id is not None:
+            return store.update(snippet_id, title, sql, note, connection).to_dict()
+        return store.create(title, sql, note, connection).to_dict()
+
+    def delete_snippet(self, snippet_id: int) -> None:
+        self._require_snippets().delete(snippet_id)
 
     # ---------- 写操作（拒绝—重提 + change_id 放行）----------
 
@@ -674,3 +701,5 @@ class DbmService:
             self.approvals.close()
         if self.metadata is not None:
             self.metadata.close()
+        if self.snippets is not None:
+            self.snippets.close()
