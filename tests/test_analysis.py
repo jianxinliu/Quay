@@ -215,3 +215,90 @@ class TestWorkflow:
         assert any(w["name"] == "w1" for w in svc.workflow_list())
         svc.workflow_delete("w1")
         assert not any(w["name"] == "w1" for w in svc.workflow_list())
+
+
+def _node(nid, typ, name, **cfg):
+    return {"id": nid, "type": typ, "name": name, "x": 0, "y": 0, "cfg": cfg}
+
+
+class TestGraph:
+    """DAG 画布：编译器 + 图 workflow 运行。"""
+
+    def test_compile_linear(self):
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("a", "source", "orders", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30"),
+                _node("c", "aggregate", "stats", group="name", aggs="count(*) AS n"),
+                _node("d", "output", "out", order_by="n DESC", limit=100)],
+             "edges": [{"from": "a", "to": "b", "port": "in"},
+                       {"from": "b", "to": "c", "port": "in"},
+                       {"from": "c", "to": "d", "port": "in"}]}
+        plan = compile_graph(g)
+        assert plan["sources"][0]["dataset"] == "orders" and plan["sources"][0]["node"] == "a"
+        assert 'VIEW "adults" AS SELECT * FROM "orders" WHERE age >= 30' in plan["steps"][0]["sql"]
+        assert "GROUP BY name" in plan["steps"][1]["sql"]
+        assert plan["steps"][2]["sql"] == 'SELECT * FROM "stats" ORDER BY n DESC LIMIT 100'
+
+    def test_compile_join_ports(self):
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("a", "source", "o", conn="p/c", sql="SELECT 1"),
+                _node("b", "source", "u", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "ou", kind="LEFT", on="l.uid = r.id")],
+             "edges": [{"from": "a", "to": "j", "port": "left"},
+                       {"from": "b", "to": "j", "port": "right"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert 'FROM "o" l LEFT JOIN "u" r ON l.uid = r.id' in sql
+
+    def test_compile_errors(self):
+        from dbmcp.workflows import WorkflowError, compile_graph
+        with pytest.raises(WorkflowError, match="为空"):
+            compile_graph({"nodes": [], "edges": []})
+        with pytest.raises(WorkflowError, match="不合法"):
+            compile_graph({"nodes": [_node("a", "filter", "1bad", where="x")], "edges": []})
+        with pytest.raises(WorkflowError, match="缺少输入"):
+            compile_graph({"nodes": [_node("a", "filter", "f", where="x")], "edges": []})
+        with pytest.raises(WorkflowError, match="接满左右"):
+            compile_graph({"nodes": [_node("a", "source", "s", conn="p/c", sql="SELECT 1"),
+                                     _node("j", "join", "jj", on="l.a=r.b")],
+                           "edges": [{"from": "a", "to": "j", "port": "left"}]})
+        with pytest.raises(WorkflowError, match="存在环"):
+            compile_graph({"nodes": [_node("a", "filter", "f1", where="x"),
+                                     _node("b", "filter", "f2", where="y")],
+                           "edges": [{"from": "a", "to": "b", "port": "in"},
+                                     {"from": "b", "to": "a", "port": "in"}]})
+
+    def test_graph_workflow_end_to_end(self, service, tmp_path):
+        from dbmcp.workflows import WorkflowStore
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30"),
+                _node("c", "aggregate", "stats", group="", aggs="count(*) AS n"),
+                _node("d", "output", "out")],
+             "edges": [{"from": "a", "to": "b", "port": "in"},
+                       {"from": "b", "to": "c", "port": "in"},
+                       {"from": "c", "to": "d", "port": "in"}]}
+        wf = service.workflow_save("dag", "ws1", "", CALLER, graph=g)
+        assert wf["graph"]["nodes"][0]["name"] == "u"
+        assert wf["sources"][0]["dataset"] == "u"  # 配方来自图的 source 节点
+        out = service.workflow_run("dag", CALLER)
+        assert out["ok"] is True
+        assert out["output"]["rows"][0][0] == 2  # alice/carol ≥ 30
+        by_node = {s.get("node"): s for s in out["steps"]}
+        assert by_node["a"]["ok"] and by_node["b"]["ok"] and by_node["d"]["ok"]
+        # 中间节点是工作区里的视图，可单独预览
+        prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
+        assert prev["rows"][0][0] == 2
+
+    def test_run_graph_unsaved_and_compile_error(self, service, tmp_path):
+        from dbmcp.workflows import WorkflowStore
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users")],
+             "edges": []}
+        out = service.workflow_run_graph("ws1", g, CALLER)
+        assert out["ok"] is True and out["output"]["row_count"] == 3
+        bad = service.workflow_run_graph("ws1", {"nodes": [], "edges": []}, CALLER)
+        assert bad["ok"] is False and "为空" in bad["steps"][0]["error"]
+

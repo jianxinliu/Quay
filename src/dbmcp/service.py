@@ -405,14 +405,22 @@ class DbmService:
         return self.workflows
 
     def workflow_save(self, name: str, workspace: str, script: str, caller: CallerInfo,
-                      chart: dict | None = None) -> dict:
-        """保存 workflow：脚本 + 工作区当前各数据集的取数配方（自动收集）+ 图表配置。"""
+                      chart: dict | None = None, graph: dict | None = None) -> dict:
+        """保存 workflow：脚本/DAG + 取数配方 + 图表配置。
+
+        DAG workflow 的取数配方在图的 source 节点里（编译时校验图合法）；
+        纯脚本 workflow 从工作区 provenance 自动收集。
+        """
+        from .workflows import compile_graph
         store = self._require_workflows()
-        sources = self._require_analysis().get_provenance(workspace)
-        wf = store.save(name, workspace, script, sources, chart)
-        rec = self._analysis_record(workspace, "workflow_save", script[:500], caller)
+        if graph:
+            sources = compile_graph(graph)["sources"]  # 校验 + 配方以图为准
+        else:
+            sources = self._require_analysis().get_provenance(workspace)
+        wf = store.save(name, workspace, script, sources, chart, graph)
+        rec = self._analysis_record(workspace, "workflow_save", (script or "graph")[:500], caller)
         rec.status = "ok"
-        rec.detail = f"workflow={name} sources={len(sources)}"
+        rec.detail = f"workflow={name} sources={len(sources)} graph={bool(graph)}"
         self.store.record(rec)
         return wf.to_dict()
 
@@ -425,40 +433,62 @@ class DbmService:
         self._require_workflows().delete(name)
 
     def workflow_run(self, name: str, caller: CallerInfo) -> dict:
-        """一键重跑：按 sources 重拉数据 → 逐条执行脚本 → 最后一个结果集作为输出。
+        """一键重跑：按 sources 重拉数据 → 逐条执行（脚本语句或 DAG 编译结果）→ 输出。
 
         任一步失败即停，标注在哪一步。全程审计（取数走 _read，脚本走 analysis_sql）。
         """
-        from .workflows import split_statements
+        from .workflows import compile_graph, split_statements
         wf = self._require_workflows().get(name)
-        steps: list[dict] = []
-        # 1) 重拉数据源
-        for src in wf.sources:
+        if wf.graph:
+            plan = compile_graph(wf.graph)
+            out = self._run_plan(wf.workspace, plan["sources"], plan["steps"], caller)
+        else:
+            stmts = [{"node": None, "name": f"步骤 {i}", "sql": s}
+                     for i, s in enumerate(split_statements(wf.script), 1)]
+            out = self._run_plan(wf.workspace, wf.sources, stmts, caller)
+        return {"workflow": name, **out}
+
+    def workflow_run_graph(self, workspace: str, graph: dict, caller: CallerInfo) -> dict:
+        """直接运行画布上的 DAG（未保存也能跑）。编译失败作为第一步错误返回。"""
+        from .workflows import WorkflowError, compile_graph
+        try:
+            plan = compile_graph(graph)
+        except WorkflowError as e:
+            return {"workflow": None, "ok": False, "output": None,
+                    "steps": [{"step": "编译流程", "ok": False, "error": str(e)}]}
+        return {"workflow": None, **self._run_plan(workspace, plan["sources"], plan["steps"], caller)}
+
+    def _run_plan(self, workspace: str, sources: list[dict], steps: list[dict],
+                  caller: CallerInfo) -> dict:
+        """执行计划：重拉 sources → 顺序执行 steps（带 node id 供画布标注状态）。"""
+        done: list[dict] = []
+        for src in sources:
             label = f"导入 {src.get('dataset')}"
+            node = src.get("node")
             try:
                 if src.get("kind") == "file":
-                    out = self.analysis_import_file(wf.workspace, src["dataset"], src["path"], caller)
+                    out = self.analysis_import_file(workspace, src["dataset"], src["path"], caller)
                 else:
-                    out = self.analysis_import(wf.workspace, src["dataset"], src["project"],
+                    out = self.analysis_import(workspace, src["dataset"], src["project"],
                                                src["connection"], src["sql"], caller,
                                                limit=src.get("limit"), schema=src.get("schema"))
-                steps.append({"step": label, "ok": True, "rows": out["rows"]})
+                done.append({"step": label, "node": node, "ok": True, "rows": out["rows"]})
             except Exception as e:  # noqa: BLE001
-                steps.append({"step": label, "ok": False, "error": str(e)})
-                return {"workflow": name, "steps": steps, "output": None, "ok": False}
-        # 2) 逐条执行脚本
+                done.append({"step": label, "node": node, "ok": False, "error": str(e)})
+                return {"steps": done, "output": None, "ok": False}
         output = None
-        for i, stmt in enumerate(split_statements(wf.script), 1):
-            label = f"步骤 {i}: {stmt[:60]}"
+        for st in steps:
+            label = f"{st['name']}: {st['sql'][:60]}"
             try:
-                res = self.analysis_sql(wf.workspace, stmt, caller)
-                steps.append({"step": label, "ok": True, "rows": res["row_count"]})
+                res = self.analysis_sql(workspace, st["sql"], caller)
+                done.append({"step": label, "node": st.get("node"), "ok": True,
+                             "rows": res["row_count"]})
                 if res["columns"]:
                     output = res
             except Exception as e:  # noqa: BLE001
-                steps.append({"step": label, "ok": False, "error": str(e)})
-                return {"workflow": name, "steps": steps, "output": output, "ok": False}
-        return {"workflow": name, "steps": steps, "output": output, "ok": True}
+                done.append({"step": label, "node": st.get("node"), "ok": False, "error": str(e)})
+                return {"steps": done, "output": output, "ok": False}
+        return {"steps": done, "output": output, "ok": True}
 
     # ---------- SQL 片段库（查询台保存/加载）----------
 

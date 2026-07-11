@@ -1152,13 +1152,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         from .workflows import WorkflowError
         f = await req.form()
         chart_raw = str(f.get("chart") or "")
+        graph_raw = str(f.get("graph") or "")
         try:
             chart = _json.loads(chart_raw) if chart_raw else None
             if chart is not None and not isinstance(chart, dict):
                 chart = None
+            graph = _json.loads(graph_raw) if graph_raw else None
+            if graph is not None and not isinstance(graph, dict):
+                graph = None
             wf = await anyio.to_thread.run_sync(
                 service.workflow_save, str(f.get("name") or ""),
-                str(f.get("workspace") or ""), str(f.get("script") or ""), _caller(req), chart)
+                str(f.get("workspace") or ""), str(f.get("script") or ""), _caller(req),
+                chart, graph)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "workflow": wf})
@@ -1195,6 +1200,36 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                     _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
 
         _threading.Thread(target=_work_wf, name="dbm-adminjob", daemon=True).start()
+        return JSONResponse({"ok": True, "job_id": job_id})
+
+    @mcp.custom_route("/admin/workflows/run_graph", methods=["POST"])
+    @guard
+    async def _wf_run_graph(req: Request) -> JSONResponse:
+        """直接运行画布 DAG（无需先保存）。异步 job，结果 kind=workflow（steps 带 node id）。"""
+        import json as _json
+        f = await req.form()
+        workspace = str(f.get("workspace") or "")
+        try:
+            graph = _json.loads(str(f.get("graph") or ""))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "graph 不是合法 JSON"}, status_code=400)
+        caller = _caller(req)
+        _jobs_gc()
+        job_id = _uuid.uuid4().hex[:12]
+        with _jobs_lock:
+            _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
+
+        def _work_graph() -> None:
+            try:
+                out = service.workflow_run_graph(workspace, graph, caller)
+                with _jobs_lock:
+                    _jobs[job_id].update(status="done", ts=_time.time(),
+                                         result={"kind": "workflow", **out})
+            except Exception as e:  # noqa: BLE001
+                with _jobs_lock:
+                    _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
+
+        _threading.Thread(target=_work_graph, name="dbm-adminjob", daemon=True).start()
         return JSONResponse({"ok": True, "job_id": job_id})
 
     @mcp.custom_route("/admin/analysis/import", methods=["POST"])

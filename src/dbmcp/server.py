@@ -243,7 +243,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """
         try:
             return {"workspaces": service.analysis_overview(),
-                    "workflows": [{"name": w["name"], "workspace": w["workspace"]}
+                    "workflows": [{"name": w["name"], "workspace": w["workspace"],
+                                   "kind": "graph" if w.get("graph") else "script"}
                                   for w in service.workflow_list()]}
         except Exception as e:
             raise ToolError(str(e)) from e
@@ -300,8 +301,10 @@ def build_mcp(service: DbmService) -> FastMCP:
         name: Annotated[str, Field(description="workflow 名称（人或 agent 之前保存的分析流程）")],
         ctx: Context | None = None,
     ) -> dict:
-        """一键重跑已保存的分析 workflow：重新拉取源数据 → 逐步执行 SQL 脚本 → 返回
-        每步状态与最终输出预览。人沉淀的分析，agent 可按需重跑并解读结果。
+        """一键重跑已保存的分析 workflow：重新拉取源数据 → 逐步执行 → 返回每步状态
+        与最终输出预览。两类 workflow 均支持：脚本式（多语句 SQL）与可视化 DAG
+        （管理后台画布编排的取数/过滤/JOIN/聚合流程，按拓扑序执行）。
+        人沉淀的分析，agent 可按需重跑并解读结果。
         可用 workflow 列表见 analysis_workspaces 工具或询问用户。
         """
         caller = _caller_from_ctx(ctx)
