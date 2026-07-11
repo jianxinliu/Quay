@@ -235,6 +235,70 @@ table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 
 .dg-snip .t .x.arm { opacity: 1; color: var(--dg-red); font-size: 11px; }
 
+/* data tab 的 WHERE / ORDER BY 条（走 SQL 重查，DataGrip Table Data 风格） */
+.dg-where {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-panel-2); flex: none;
+}
+.dg-where .k { font-family: var(--dg-mono); font-size: 11px; color: var(--dg-faint); letter-spacing: .6px; }
+.dg-where input {
+  flex: 1; background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-border);
+  border-radius: 6px; padding: 5px 10px; font-size: 12.5px; font-family: var(--dg-mono);
+}
+.dg-where input:focus { outline: none; border-color: var(--dg-accent); }
+.dg-where .dg-btn { padding: 4px 10px; font-size: 12px; }
+.dg-where .ob { font-family: var(--dg-mono); font-size: 11.5px; color: var(--dg-amber); white-space: nowrap; }
+.dg-where .ob a { cursor: pointer; color: var(--dg-muted); margin-left: 3px; }
+.dg-where .ob a:hover { color: var(--dg-red); }
+
+/* 可排序表头 + 列筛选漏斗 */
+table.dg-rt th.sortable { cursor: pointer; user-select: none; }
+table.dg-rt th.sortable:hover { color: var(--dg-text); }
+table.dg-rt th .funnel { opacity: 0; margin-left: 4px; cursor: pointer; color: var(--dg-muted); }
+table.dg-rt th:hover .funnel { opacity: 1; }
+table.dg-rt th .funnel:hover { color: var(--dg-accent); }
+
+/* 单元格就地编辑 */
+table.dg-rt td.editable { cursor: cell; }
+.dg-cell-edit {
+  width: 100%; min-width: 80px; background: var(--dg-bg); color: var(--dg-text);
+  border: 1px solid var(--dg-accent); border-radius: 4px; padding: 2px 6px;
+  font-size: 12px; font-family: var(--dg-mono);
+}
+.dg-cell-edit:focus { outline: none; }
+
+/* 查询历史（左栏） */
+.dg-hist {
+  display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer;
+  font-family: var(--dg-mono); font-size: 11.5px; overflow: hidden;
+}
+.dg-hist:hover { background: var(--dg-hover); }
+.dg-hist .st.ok { color: var(--dg-green); } .dg-hist .st.bad { color: var(--dg-red); }
+.dg-hist .st { font-size: 8px; flex: none; }
+.dg-hist .sq { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dg-text); }
+.dg-hist .tm { color: var(--dg-faint); font-size: 10px; flex: none; }
+
+/* EXPLAIN 计划树 */
+.dg-explain {
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-panel-2);
+  max-height: 46%; overflow: auto; padding: 8px 12px; flex: none;
+}
+.dg-explain .hd { display: flex; align-items: center; margin-bottom: 6px; font-size: 12.5px; }
+.dg-explain .hd .act { margin-left: auto; cursor: pointer; color: var(--dg-muted); font-size: 12px; }
+.dg-explain .hd .act:hover { color: var(--dg-text); }
+.dg-plan { font-family: var(--dg-mono); font-size: 12px; }
+.dg-plan summary { cursor: pointer; padding: 2px 0; list-style-position: inside; }
+.dg-plan summary::marker { color: var(--dg-faint); }
+.pl-label { color: var(--dg-muted); margin-right: 6px; }
+.pl-head { color: #7cc4ff; font-weight: 600; margin-right: 6px; }
+.pl-badge {
+  display: inline-block; background: var(--dg-panel); border: 1px solid var(--dg-border);
+  color: var(--dg-amber); border-radius: 4px; padding: 0 6px; font-size: 10.5px; margin-right: 4px;
+}
+.pl-scalars { margin-left: 20px; padding: 1px 0 3px; }
+.pl-kv { display: inline-block; color: var(--dg-faint); margin-right: 12px; font-size: 11px; }
+.pl-kv b { color: var(--dg-text); font-weight: normal; }
+
 #dg-toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111214; color: #fff;
   border: 1px solid var(--dg-border); padding: 9px 16px; border-radius: 8px; font-size: 13px; z-index: 90;

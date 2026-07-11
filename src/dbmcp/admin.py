@@ -1092,6 +1092,34 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
 
+    @mcp.custom_route("/admin/sql/history", methods=["GET"])
+    @guard
+    async def _sql_history(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            items = await anyio.to_thread.run_sync(
+                service.admin_query_history, project, connection)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "items": items})
+
+    @mcp.custom_route("/admin/sql/explain", methods=["POST"])
+    @guard
+    async def _sql_explain(req: Request) -> JSONResponse:
+        from .service import QueryRejected
+        f = await req.form()
+        schema = str(f.get("schema") or "").strip() or None
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            out = await anyio.to_thread.run_sync(
+                service.admin_explain, project, connection, str(f.get("sql") or ""),
+                _caller(req), schema)
+        except (QueryRejected, KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, **out})
+
     @mcp.custom_route("/admin/sql/ddl", methods=["GET"])
     @guard
     async def _sql_ddl(req: Request) -> JSONResponse:

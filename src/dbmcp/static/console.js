@@ -45,6 +45,31 @@
     return ident;
   }
 
+  // 按分号切分多条语句（跳过引号/反引号/行注释/块注释），返回 [{s,e}] 偏移区间。
+  // 供「光标处执行」：编辑器放多条 SQL，只跑光标所在那条（DataGrip 行为）。
+  function stmtRanges(text) {
+    var ranges = [], start = 0, i = 0, n = text.length;
+    while (i < n) {
+      var c = text[i], c2 = text.substr(i, 2);
+      if (c === "'" || c === '"' || c === "`") {
+        var q = c; i++;
+        while (i < n) {
+          if (text[i] === "\\") { i += 2; continue; }
+          if (text[i] === q) { if (q === "'" && text[i + 1] === "'") { i += 2; continue; } i++; break; }
+          i++;
+        }
+      } else if (c2 === "--" || (c === "#")) {
+        while (i < n && text[i] !== "\n") i++;
+      } else if (c2 === "/*") {
+        i += 2; while (i < n && text.substr(i, 2) !== "*/") i++; i += 2;
+      } else if (c === ";") {
+        ranges.push({ s: start, e: i + 1 }); i++; start = i;
+      } else i++;
+    }
+    if (start < n && text.slice(start).trim()) ranges.push({ s: start, e: n });
+    return ranges;
+  }
+
   function fetchCols(table) {
     var schema = tableSchema[table] || "";
     var key = currentConn + "|" + schema + "|" + table;
@@ -137,6 +162,49 @@
 </div>`
   };
 
+  // EXPLAIN JSON 计划 → 可折叠树。table/access/rows/cost 等关键字段徽章高亮，其余通用渲染。
+  var PlanNode = {
+    name: "plan-node",
+    props: ["label", "node", "depth"],
+    computed: {
+      isObj: function () { return this.node !== null && typeof this.node === "object"; },
+      entries: function () {
+        if (!this.isObj) return [];
+        if (Array.isArray(this.node)) return this.node.map(function (v, i) { return ["#" + i, v]; });
+        return Object.entries(this.node);
+      },
+      scalars: function () {
+        return this.entries.filter(function (e) { return e[1] === null || typeof e[1] !== "object"; });
+      },
+      children: function () {
+        return this.entries.filter(function (e) { return e[1] !== null && typeof e[1] === "object"; });
+      },
+      headline: function () {
+        var n = this.node || {};
+        return n.table_name || n["Relation Name"] || n["Node Type"] || n.access_type || "";
+      },
+      badges: function () {
+        var n = this.node || {}, out = [];
+        var keys = ["access_type", "Node Type", "key", "Index Name", "rows_examined_per_scan",
+                    "Plan Rows", "filtered", "Total Cost", "query_cost"];
+        keys.forEach(function (k) { if (n[k] != null) out.push(k + ": " + n[k]); });
+        var ci = n.cost_info || {};
+        if (ci.query_cost) out.push("cost: " + ci.query_cost);
+        return out;
+      }
+    },
+    template: `
+<details class="dg-plan" :open="depth < 3" :style="{marginLeft: (depth ? 12 : 0) + 'px'}">
+  <summary><span class="pl-label">{{ label }}</span>
+    <span v-if="headline" class="pl-head">{{ headline }}</span>
+    <span v-for="b in badges" :key="b" class="pl-badge">{{ b }}</span></summary>
+  <div v-if="scalars.length" class="pl-scalars">
+    <span v-for="e in scalars" :key="e[0]" class="pl-kv">{{ e[0] }}: <b>{{ e[1] === null ? "null" : e[1] }}</b></span>
+  </div>
+  <plan-node v-for="e in children" :key="e[0]" :label="e[0]" :node="e[1]" :depth="depth+1"/>
+</details>`
+  };
+
   var app = Vue.createApp({
     data: function () {
       return {
@@ -151,6 +219,7 @@
         ctx: { show: false, x: 0, y: 0, table: "", schema: "", multi: false },
         dropPlan: null,         // {items:[{t,db}], running, results}
         delSnip: null,
+        history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, editorReady: false, toast: "",
         leftW: 264, editorH: 300,
@@ -230,7 +299,10 @@
         var id = seq++;
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
-                    sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, running: false };
+                    sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, running: false,
+                    // data tab：WHERE 条 / 列头排序（走 SQL 重查，跨页正确）
+                    where: opts.where || "", orderCol: null, orderDir: "ASC", lastPage: 0,
+                    pendingSql: null, readSql: null, explain: null, edit: null };
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -318,6 +390,7 @@
         this.schemaFilter = ""; this.selected = {};
         if (!t || !t.conn) { this.lastLoadedConn = null; currentTables = []; currentConn = ""; return; }
         this.lastLoadedConn = t.conn; currentConn = t.conn;
+        this.loadHistory();
         var cached = !force && this.treeCache[t.conn];
         if (cached) {  // 快照恢复：不发任何请求
           this.databases = cached.databases; this.tablesByDb = cached.tablesByDb;
@@ -488,29 +561,170 @@
       },
 
       // ---------- 运行 / 分页 / 导出 ----------
-      run: function (confirm, page) {
+      // data tab 的查询由 表 + WHERE 条 + 列头排序 构建（DataGrip Table Data 行为，走 SQL 跨页正确）
+      buildDataSql: function (t) {
+        var q = t.schema ? t.schema + "." + t.table : t.table;
+        var sql = "SELECT * FROM " + q;
+        if (t.where && t.where.trim()) sql += " WHERE " + t.where.trim();
+        if (t.orderCol) sql += " ORDER BY " + t.orderCol + " " + t.orderDir;
+        return sql;
+      },
+      // 光标处执行：编辑器多条语句时只跑光标所在那条；有选区则跑选区（DataGrip 行为）
+      stmtAtCursor: function () {
+        var text = this.currentSql();
+        if (!editor) return text;
+        var sel = editor.getSelection();
+        if (sel && !sel.isEmpty()) return editor.getModel().getValueInRange(sel);
+        var ranges = stmtRanges(text);
+        if (ranges.length <= 1) return text;
+        var off = editor.getModel().getOffsetAt(editor.getPosition());
+        for (var i = 0; i < ranges.length; i++) {
+          if (off <= ranges[i].e) return text.slice(ranges[i].s, ranges[i].e);
+        }
+        return text.slice(ranges[ranges.length - 1].s);
+      },
+      run: function (confirm, page, sqlOverride) {
         var self = this, t = this.activeTab;
         if (!t) return;
         if (t.type === "ddl") { this.flash("DDL 为只读视图"); return; }
         if (!t.conn) { this.flash("请先选择连接"); return; }
-        var sql = this.currentSql();
+        var sql;
+        if (sqlOverride != null) sql = sqlOverride;
+        else if (confirm && t.pendingSql) sql = t.pendingSql;   // 确认执行的是刚才那条
+        else if (t.type === "data" && t.table) sql = this.buildDataSql(t);
+        else sql = this.stmtAtCursor();
         if (!sql.trim()) { this.flash("请输入 SQL"); return; }
         page = page || 0;
-        t.running = true; t.err = null; t.ok = null; t.confirm = null;
+        t.pendingSql = sql;
+        t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null;
         if (page === 0) t.result = null;
         apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
                                     page: page, schema: t.schema || null })
           .then(function (d) {
             t.running = false;
             if (!d.ok) { t.err = d.error; self.persist(); return; }
-            if (d.kind === "read") t.result = d;
+            if (d.kind === "read") { t.result = d; t.readSql = sql; t.lastPage = page; }
             else if (d.kind === "confirm") t.confirm = { risk: d.risk || {}, statement_kind: d.statement_kind };
-            else if (d.kind === "write") { t.ok = d; self.refreshTree(); }
+            else if (d.kind === "write") {
+              t.ok = d;
+              if (t.type === "data") {  // 单元格编辑等写操作后自动刷新当前页
+                setTimeout(function () { self.run(false, t.lastPage); }, 60);
+              } else self.refreshTree();
+            }
             self.persist();
           }).catch(function (e) { t.running = false; t.err = "" + e; });
       },
-      goPage: function (p) { if (p >= 0) this.run(false, p); },
+      goPage: function (p) {
+        var t = this.activeTab;
+        if (p < 0 || !t) return;
+        // 翻页沿用上次执行的读语句（光标可能已移动到别的语句上）
+        this.run(false, p, t.type === "data" ? null : t.readSql);
+      },
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
+      // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
+      applyWhere: function () { this.run(false, 0); },
+      cycleOrder: function (col) {
+        var t = this.activeTab;
+        if (!t || t.type !== "data") return;
+        if (t.orderCol !== col) { t.orderCol = col; t.orderDir = "ASC"; }
+        else if (t.orderDir === "ASC") t.orderDir = "DESC";
+        else { t.orderCol = null; t.orderDir = "ASC"; }
+        this.run(false, 0);
+      },
+      orderMark: function (col) {
+        var t = this.activeTab;
+        if (!t || t.orderCol !== col) return "";
+        return t.orderDir === "ASC" ? " ↑" : " ↓";
+      },
+      funnel: function (col) {
+        var t = this.activeTab; if (!t) return;
+        t.where = (t.where && t.where.trim()) ? (t.where.trim() + " AND " + col + " = ") : (col + " = ");
+        var self = this;
+        this.$nextTick(function () {
+          var el = document.getElementById("dg-where-input");
+          if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+        });
+      },
+
+      // ---------- 单元格就地编辑（data tab，经写确认流生成 UPDATE） ----------
+      sqlLit: function (v, original) {
+        if (v === "NULL") return "NULL";
+        if (typeof original === "number" && v !== "" && !isNaN(+v)) return "" + (+v);
+        return "'" + String(v).replace(/'/g, "''") + "'";
+      },
+      startEdit: function (ri, ci) {
+        var t = this.activeTab;
+        if (!t || t.type !== "data" || !t.result) return;
+        var k = this.mk(t.table, t.schema);
+        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
+        var v = t.result.rows[ri][ci];
+        t.edit = { ri: ri, ci: ci, val: v == null ? "NULL" : this.cellText(v) };
+        this.$nextTick(function () {
+          var el = document.getElementById("dg-cell-input");
+          if (el) { el.focus(); el.select(); }
+        });
+      },
+      cancelEdit: function () { if (this.activeTab) this.activeTab.edit = null; },
+      commitEdit: function () {
+        var t = this.activeTab;
+        if (!t || !t.edit || !t.result) return;
+        var k = this.mk(t.table, t.schema);
+        var meta = this.tableMeta[k];
+        if (!meta) { this.flash("表结构加载中，请稍后再试"); return; }
+        var pk = meta.primary_key || [];
+        if (!pk.length) { this.flash("该表无主键，无法定位行进行编辑"); t.edit = null; return; }
+        var cols = t.result.columns, row = t.result.rows[t.edit.ri];
+        var col = cols[t.edit.ci];
+        var oldV = row[t.edit.ci];
+        var newRaw = t.edit.val;
+        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) { t.edit = null; return; }
+        var self = this;
+        var conds = pk.map(function (p) {
+          var idx = cols.indexOf(p);
+          if (idx < 0) return null;
+          var pv = row[idx];
+          return p + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
+        });
+        if (conds.some(function (c) { return c == null; })) {
+          this.flash("结果集缺少主键列，无法定位行"); t.edit = null; return;
+        }
+        var q = t.schema ? t.schema + "." + t.table : t.table;
+        var sql = "UPDATE " + q + " SET " + col + " = " + this.sqlLit(newRaw, oldV) +
+                  " WHERE " + conds.join(" AND ");
+        t.edit = null;
+        this.run(false, 0, sql);  // 走写确认流：先风险报告，确认后 writer 执行，随后自动刷新
+      },
+
+      // ---------- EXPLAIN 可视化 ----------
+      explainStmt: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        var sql = t.type === "data" ? this.buildDataSql(t) : this.stmtAtCursor();
+        if (!sql.trim()) { this.flash("请输入 SQL"); return; }
+        t.explain = { loading: true };
+        apiPost("/admin/sql/explain", { conn: t.conn, sql: sql, schema: t.schema || null })
+          .then(function (d) {
+            if (!d.ok) { t.explain = null; self.flash(d.error); return; }
+            if (d.format === "json") {
+              try { t.explain = { tree: JSON.parse(d.rows[0][0]) }; }
+              catch (e) { t.explain = { rows: d.rows, columns: d.columns }; }
+            } else t.explain = { rows: d.rows, columns: d.columns };
+            self.persist();
+          }).catch(function (e) { t.explain = null; self.flash("" + e); });
+      },
+      closeExplain: function () { if (this.activeTab) { this.activeTab.explain = null; this.persist(); } },
+
+      // ---------- 查询历史（来自审计，按连接去重） ----------
+      loadHistory: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.conn) { this.history = []; return; }
+        apiGet("/admin/sql/history?conn=" + encodeURIComponent(t.conn)).then(function (d) {
+          self.history = d && d.ok ? d.items : [];
+        });
+      },
+      openHistory: function (item) {
+        this.newTab({ title: item.sql.slice(0, 18), sql: item.sql });
+      },
       cancelConfirm: function () { if (this.activeTab) this.activeTab.confirm = null; },
       formatSql: function () {
         var t = this.activeTab; if (!t || t.type === "ddl") return;
@@ -582,7 +796,9 @@
           var tabs = this.tabs.map(function (t) {
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: this.sqlOf(t),
-                     result: t.result, ok: t.ok, err: t.err };
+                     result: t.result, ok: t.ok, err: t.err,
+                     where: t.where || "", orderCol: t.orderCol, orderDir: t.orderDir,
+                     lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain };
           }, this);
           var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH };
@@ -604,7 +820,9 @@
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: t.sql || "",
                      result: t.result || null, ok: t.ok || null, err: t.err || null,
-                     confirm: null, running: false };
+                     where: t.where || "", orderCol: t.orderCol || null, orderDir: t.orderDir || "ASC",
+                     lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
+                     pendingSql: null, edit: null, confirm: null, running: false };
           });
           this.activeId = d.activeId || this.tabs[0].id;
           this.treeCache = d.treeCache || {};
@@ -740,6 +958,17 @@
             @ctxmenu="e=>openCtx(e,t,'')"/>
         </template>
       </template>
+      <div class="dg-sec-hd" style="margin-top:8px"><span>历史</span>
+        <span class="act" @click="showHistory=!showHistory">{{ showHistory ? "收起" : "展开" }}</span>
+        <span class="act" @click="loadHistory" title="刷新">↻</span></div>
+      <template v-if="showHistory">
+        <div v-if="!history.length" class="dg-empty">（暂无历史）</div>
+        <div v-for="(h,hi) in history" :key="hi" class="dg-hist" @click="openHistory(h)" :title="h.sql">
+          <span class="st" :class="h.status==='ok'?'ok':'bad'">●</span>
+          <span class="sq">{{ h.sql }}</span>
+          <span class="tm">{{ fmtTs(h.ts).slice(5) }}</span>
+        </div>
+      </template>
       <div class="dg-sec-hd" style="margin-top:8px"><span>片段</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></div>
       <div v-if="showSnipForm" class="dg-snipform">
         <input v-model="snipDraft.title" placeholder="标题">
@@ -759,6 +988,7 @@
     <div class="dg-top">
       <button class="dg-btn run" :disabled="!activeTab || activeTab.running" @click="run(false)">▶ {{ activeTab && activeTab.running ? "执行中…" : (activeTab && activeTab.type==='data' ? "刷新" : "运行") }}</button>
       <button class="dg-btn" @click="formatSql">格式化</button>
+      <button class="dg-btn" @click="explainStmt" title="取执行计划（不执行语句）">解释</button>
       <div class="dg-menu">
         <button class="dg-btn" @click.stop="exportOpen=!exportOpen">导出 ▾</button>
         <div v-if="exportOpen" class="dg-menu-pop">
@@ -806,6 +1036,24 @@
     <div class="dg-hsplit" v-show="activeTab && activeTab.type==='query'" @mousedown="beginDrag($event, 'y')"></div>
     <div class="dg-results" v-show="activeTab && activeTab.type!=='ddl'">
       <template v-if="activeTab">
+        <div v-if="activeTab.type==='data'" class="dg-where">
+          <span class="k">WHERE</span>
+          <input id="dg-where-input" v-model="activeTab.where" placeholder="如 status = 'paid' AND amount > 100 （回车应用）"
+                 @keydown.enter="applyWhere">
+          <button class="dg-btn" @click="applyWhere">应用</button>
+          <button v-if="activeTab.where" class="dg-btn" @click="activeTab.where='';applyWhere()">清除</button>
+          <span v-if="activeTab.orderCol" class="ob">ORDER BY {{ activeTab.orderCol }} {{ activeTab.orderDir }}
+            <a @click="activeTab.orderCol=null;run(false,0)" title="清除排序">✕</a></span>
+        </div>
+        <div v-if="activeTab.explain" class="dg-explain">
+          <div class="hd"><b>执行计划</b><span class="act" @click="closeExplain">✕ 关闭</span></div>
+          <div v-if="activeTab.explain.loading" class="dg-empty">获取中…</div>
+          <plan-node v-else-if="activeTab.explain.tree" :label="'plan'" :node="activeTab.explain.tree" :depth="0"/>
+          <table v-else-if="activeTab.explain.rows" class="dg-rt" style="margin:8px">
+            <thead><tr><th v-for="c in activeTab.explain.columns" :key="c">{{ c }}</th></tr></thead>
+            <tbody><tr v-for="(r,i) in activeTab.explain.rows" :key="i"><td v-for="(v,j) in r" :key="j">{{ cellText(v) }}</td></tr></tbody>
+          </table>
+        </div>
         <div v-if="activeTab.confirm" class="dg-confirm">
           <h4>确认执行写操作 <span class="lv" :style="{background: lvColor(activeTab.confirm.risk.level)}">{{ activeTab.confirm.risk.level }}</span> <span style="color:var(--dg-muted);font-weight:normal">{{ activeTab.confirm.statement_kind }}</span></h4>
           <div style="font-size:12px;color:var(--dg-muted)">将用 writer 账号<b>直接执行</b>并记入审计（后台旁路，不进审批单）。</div>
@@ -832,8 +1080,25 @@
           </div>
           <div v-if="!activeTab.result.columns.length" class="dg-res-empty">语句已执行，无结果集。</div>
           <div v-else class="dg-res-scroll"><table class="dg-rt">
-            <thead><tr><th v-for="c in activeTab.result.columns" :key="c">{{ c }}</th></tr></thead>
-            <tbody><tr v-for="(row,ri) in activeTab.result.rows" :key="ri"><td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)"><span v-if="v===null" class="nul">NULL</span><span v-else>{{ cellText(v) }}</span></td></tr></tbody>
+            <thead><tr>
+              <th v-for="c in activeTab.result.columns" :key="c"
+                  :class="{sortable: activeTab.type==='data'}"
+                  @click="activeTab.type==='data' && cycleOrder(c)"
+                  :title="activeTab.type==='data' ? '点击排序（走 SQL）' : c">
+                {{ c }}{{ orderMark(c) }}
+                <span v-if="activeTab.type==='data'" class="funnel" @click.stop="funnel(c)" title="按此列筛选（填入 WHERE）">⧩</span>
+              </th>
+            </tr></thead>
+            <tbody><tr v-for="(row,ri) in activeTab.result.rows" :key="ri">
+              <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)"
+                  :class="{editable: activeTab.type==='data'}"
+                  @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
+                <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
+                       id="dg-cell-input" class="dg-cell-edit" v-model="activeTab.edit.val"
+                       @keydown.enter="commitEdit" @keydown.esc="cancelEdit" @blur="cancelEdit">
+                <template v-else><span v-if="v===null" class="nul">NULL</span><span v-else>{{ cellText(v) }}</span></template>
+              </td>
+            </tr></tbody>
           </table></div>
         </template>
         <div v-else class="dg-res-empty">{{ activeTab.type==='data' ? "加载中…" : "运行查询查看结果（⌘/Ctrl+Enter）。" }}</div>
@@ -860,5 +1125,6 @@
   });
 
   app.component("tbl-node", TblNode);
+  app.component("plan-node", PlanNode);
   app.mount("#dbm-console");
 })();

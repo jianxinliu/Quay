@@ -251,6 +251,59 @@ class DbmService:
                             cfg.policy.max_rows, schema=schema)
         return export_result(result["columns"], result["rows"], fmt)
 
+    def admin_query_history(self, project: str, connection: str, limit: int = 30) -> list[dict]:
+        """查询台历史面板：从审计取该连接最近执行过的 SQL，按文本去重保留最新。"""
+        rows = self.store.recent(limit=300, filters={"project": project, "connection": connection})
+        seen: set[str] = set()
+        out: list[dict] = []
+        for r in rows:
+            sql = (r["sql"] or "").strip()
+            if not sql or r["tool"] not in ("query", "execute", "admin_execute"):
+                continue
+            key = " ".join(sql.split()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"sql": sql, "ts": r["ts"], "status": r["status"], "tool": r["tool"]})
+            if len(out) >= limit:
+                break
+        return out
+
+    _EXPLAIN_PREFIX = {
+        "mysql": "EXPLAIN FORMAT=JSON ",
+        "postgres": "EXPLAIN (FORMAT JSON) ",
+        "sqlite": "EXPLAIN QUERY PLAN ",
+    }
+
+    def admin_explain(
+        self, project: str, connection: str, sql: str, caller: CallerInfo,
+        schema: str | None = None,
+    ) -> dict:
+        """查询台 EXPLAIN：按引擎方言取执行计划（MySQL/PG 为 JSON，SQLite 为行）。
+
+        纯 EXPLAIN 不执行语句（不带 ANALYZE），对写语句也安全。多语句拒绝。
+        """
+        import re as _re
+        cfg = self.config.get_connection(project, connection)
+        stmt = _re.sub(r"^\s*explain\s+", "", sql, flags=_re.IGNORECASE).strip().rstrip(";")
+        if not stmt:
+            raise QueryRejected("请先在编辑器写一条 SQL")
+        verdict = classify(stmt, cfg.engine)
+        if "多语句" in verdict.reason:
+            raise QueryRejected("EXPLAIN 只支持单条语句")
+        prefix = self._EXPLAIN_PREFIX.get(cfg.engine)
+        if prefix is None:
+            raise QueryRejected(f"引擎 {cfg.engine} 不支持 EXPLAIN")
+        fmt = "rows" if cfg.engine == "sqlite" else "json"
+
+        def _run() -> dict:
+            engine = self.pool.get(project, connection, cfg, schema=schema)
+            # JSON 计划可能很长，放开单元格截断
+            res = engines.run_query(engine, prefix + stmt, max_rows=500, max_cell_chars=1_000_000)
+            return {"format": fmt, "columns": res.columns, "rows": res.rows}
+
+        return self._audited(project, connection, cfg, "explain", stmt, caller, _run)
+
     # ---------- SQL 片段库（查询台保存/加载）----------
 
     def _require_snippets(self) -> "SnippetStore":
