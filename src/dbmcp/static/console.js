@@ -129,20 +129,20 @@
        @click="$emit('rowclick', $event)" @dblclick="$emit('opendata')"
        @contextmenu.prevent="$emit('ctxmenu', $event)" title="双击打开数据 · 右键菜单 · ⌘点多选">
     <span class="tw" @click.stop="$emit('toggle')">{{ open ? "▾" : "▸" }}</span>
-    <span class="ic">▦</span><span class="nm">{{ tname }}</span>
+    <span class="ic ic-table"></span><span class="nm">{{ tname }}</span>
   </div>
   <template v-if="open">
     <div v-if="!meta" class="dg-empty" :style="{paddingLeft:(pad+22)+'px'}">加载中…</div>
     <template v-else>
       <div class="dg-item sub" :style="{paddingLeft:(pad+16)+'px'}" @click="$emit('togglesub','columns')">
-        <span class="tw">{{ sub.columns ? "▾" : "▸" }}</span><span class="ic fold">▤</span>
+        <span class="tw">{{ sub.columns ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
         <span class="nm">columns</span><span class="cnt">{{ meta.columns.length }}</span></div>
       <template v-if="sub.columns">
         <div v-for="c in meta.columns" :key="c.name" class="dg-col" :style="{paddingLeft:(pad+38)+'px'}">
           <span class="cn" :class="{pk: pkset[c.name]}">{{ c.name }}</span><span class="ct">{{ c.type }}</span></div>
       </template>
       <div class="dg-item sub" :style="{paddingLeft:(pad+16)+'px'}" @click="$emit('togglesub','keys')">
-        <span class="tw">{{ sub.keys ? "▾" : "▸" }}</span><span class="ic fold">⚿</span>
+        <span class="tw">{{ sub.keys ? "▾" : "▸" }}</span><span class="ic ic-key"></span>
         <span class="nm">keys</span><span class="cnt">{{ meta.primary_key.length ? 1 : 0 }}</span></div>
       <template v-if="sub.keys">
         <div v-if="!meta.primary_key.length" class="dg-empty" :style="{paddingLeft:(pad+38)+'px'}">（无主键）</div>
@@ -150,7 +150,7 @@
           <span class="cn pk">PRIMARY</span><span class="ct">{{ meta.primary_key.join(", ") }}</span></div>
       </template>
       <div class="dg-item sub" :style="{paddingLeft:(pad+16)+'px'}" @click="$emit('togglesub','indexes')">
-        <span class="tw">{{ sub.indexes ? "▾" : "▸" }}</span><span class="ic fold">≡</span>
+        <span class="tw">{{ sub.indexes ? "▾" : "▸" }}</span><span class="ic ic-idx"></span>
         <span class="nm">indexes</span><span class="cnt">{{ meta.indexes.length }}</span></div>
       <template v-if="sub.indexes">
         <div v-if="!meta.indexes.length" class="dg-empty" :style="{paddingLeft:(pad+38)+'px'}">（无索引）</div>
@@ -159,6 +159,54 @@
       </template>
     </template>
   </template>
+</div>`
+  };
+
+  // 自绘下拉（原生 <select> 的弹出列表无法样式化，深色 UI 里很扎眼）。
+  // 支持筛选（选项 > 8 时显示搜索框）。
+  var DgSelect = {
+    name: "dg-select",
+    props: ["modelValue", "options", "placeholder"],  // options: [{value, label}]
+    emits: ["update:modelValue"],
+    data: function () { return { open: false, q: "" }; },
+    computed: {
+      label: function () {
+        var v = this.modelValue;
+        for (var i = 0; i < this.options.length; i++)
+          if (this.options[i].value === v) return this.options[i].label;
+        return this.placeholder || "选择…";
+      },
+      filtered: function () {
+        var q = this.q.trim().toLowerCase();
+        return q ? this.options.filter(function (o) { return o.label.toLowerCase().indexOf(q) >= 0; })
+                 : this.options;
+      }
+    },
+    methods: {
+      toggle: function () {
+        this.open = !this.open; this.q = "";
+        if (this.open) {
+          var self = this;
+          this.$nextTick(function () { var el = self.$refs.qEl; if (el) el.focus(); });
+        }
+      },
+      pick: function (v) { this.$emit("update:modelValue", v); this.open = false; },
+      onDocClick: function (e) { if (!this.$el.contains(e.target)) this.open = false; },
+    },
+    mounted: function () { document.addEventListener("click", this.onDocClick); },
+    unmounted: function () { document.removeEventListener("click", this.onDocClick); },
+    template: `
+<div class="dg-sel">
+  <button type="button" class="dg-sel-btn" @click.stop="toggle" :title="label">
+    <span class="lb">{{ label }}</span><span class="ar">▾</span></button>
+  <div v-if="open" class="dg-sel-pop" @click.stop>
+    <input v-if="options.length > 8" ref="qEl" v-model="q" class="dg-sel-q" placeholder="筛选…">
+    <div class="dg-sel-list">
+      <div v-for="o in filtered" :key="o.value" class="dg-sel-item"
+           :class="{cur: o.value === modelValue}" @click="pick(o.value)">{{ o.label }}</div>
+      <div v-if="!filtered.length" class="dg-sel-none">（无匹配）</div>
+    </div>
+  </div>
 </div>`
   };
 
@@ -261,6 +309,17 @@
         var t = this.activeTab;
         if (t && t.type === "ddl") return { flex: "1", height: "auto" };
         return { height: this.editorH + "px" };
+      },
+      connOptions: function () {
+        return [{ value: "", label: "选择连接…" }].concat(this.connections.map(function (c) {
+          return { value: c.value,
+                   label: c.connection + " · " + c.engine + (c.environment ? " (" + c.environment + ")" : "") };
+        }));
+      },
+      schemaOptions: function () {
+        var m = this.connMeta;
+        var head = { value: "", label: m && m.database ? "默认（" + m.database + "）" : "未指定" };
+        return [head].concat(this.databases.map(function (d) { return { value: d, label: d }; }));
       }
     },
     methods: {
@@ -300,8 +359,9 @@
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
                     sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, running: false,
-                    // data tab：WHERE 条 / 列头排序（走 SQL 重查，跨页正确）
-                    where: opts.where || "", orderCol: null, orderDir: "ASC", lastPage: 0,
+                    pinned: false,
+                    // data tab：WHERE 条 / ORDER BY 表达式（走 SQL 重查，跨页正确）
+                    where: opts.where || "", orderBy: "", lastPage: 0,
                     pendingSql: null, readSql: null, explain: null, edit: null };
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
@@ -309,9 +369,14 @@
         this.persist();
         return tab;
       },
+      togglePin: function (id) {
+        var t = this.tabs.find(function (x) { return x.id === id; });
+        if (t) { t.pinned = !t.pinned; this.persist(); }
+      },
       closeTab: function (id) {
         var i = this.tabs.findIndex(function (t) { return t.id === id; });
         if (i < 0) return;
+        if (this.tabs[i].pinned) { this.flash("已固定的 tab，先取消固定再关闭"); return; }
         this.tabs.splice(i, 1);
         var m = models.get(id); if (m) { m.dispose(); models.delete(id); }
         if (!this.tabs.length) { this.newTab({}); return; }
@@ -520,9 +585,14 @@
         else if (act === "ddl") this.openDdlTab(t, s);
         else if (act === "select") this.insertSelect(t, s);
         else if (act === "count") {
-          this.newTab({ type: "data", title: "count " + t, table: t,
-                        sql: "SELECT count(*) AS total FROM " + q, schema: s });
-          this.$nextTick(function () { self.run(false); });
+          // 轻量即时统计：不开 tab，toast 显示（之前开 data tab 会被 buildDataSql 覆盖成 SELECT *）
+          var tab = this.activeTab;
+          this.flash("统计中…");
+          apiPost("/admin/sql/run", { conn: tab.conn, sql: "SELECT count(*) AS total FROM " + q })
+            .then(function (d) {
+              if (d.ok && d.kind === "read" && d.rows.length) self.flash(q + " 共 " + d.rows[0][0] + " 行");
+              else self.flash(d.error || "统计失败");
+            }).catch(function (e) { self.flash("" + e); });
         }
         else if (act === "copy") {
           var text = multi ? Object.values(this.selected).map(this.qn).join(", ") : q;
@@ -566,7 +636,7 @@
         var q = t.schema ? t.schema + "." + t.table : t.table;
         var sql = "SELECT * FROM " + q;
         if (t.where && t.where.trim()) sql += " WHERE " + t.where.trim();
-        if (t.orderCol) sql += " ORDER BY " + t.orderCol + " " + t.orderDir;
+        if (t.orderBy && t.orderBy.trim()) sql += " ORDER BY " + t.orderBy.trim();
         return sql;
       },
       // 光标处执行：编辑器多条语句时只跑光标所在那条；有选区则跑选区（DataGrip 行为）
@@ -598,21 +668,43 @@
         t.pendingSql = sql;
         t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null;
         if (page === 0) t.result = null;
-        apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
-                                    page: page, schema: t.schema || null })
+        // 异步任务：查询在服务端线程池执行，切页/刷新不中断；job_id 持久化，回来续接轮询
+        apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
+                                          page: page, schema: t.schema || null })
           .then(function (d) {
-            t.running = false;
-            if (!d.ok) { t.err = d.error; self.persist(); return; }
-            if (d.kind === "read") { t.result = d; t.readSql = sql; t.lastPage = page; }
-            else if (d.kind === "confirm") t.confirm = { risk: d.risk || {}, statement_kind: d.statement_kind };
-            else if (d.kind === "write") {
-              t.ok = d;
-              if (t.type === "data") {  // 单元格编辑等写操作后自动刷新当前页
-                setTimeout(function () { self.run(false, t.lastPage); }, 60);
-              } else self.refreshTree();
-            }
+            if (!d.ok) { t.running = false; t.err = d.error; self.persist(); return; }
+            t.jobId = d.job_id; t.jobPage = page;
             self.persist();
+            self.pollJob(t.id, d.job_id, page);
           }).catch(function (e) { t.running = false; t.err = "" + e; });
+      },
+      pollJob: function (tabId, jobId, page) {
+        var self = this;
+        var t = this.tabs.find(function (x) { return x.id === tabId; });
+        if (!t || t.jobId !== jobId) return;  // tab 已关/已发起新查询
+        apiGet("/admin/sql/job?id=" + jobId).then(function (d) {
+          var t2 = self.tabs.find(function (x) { return x.id === tabId; });
+          if (!t2 || t2.jobId !== jobId) return;
+          if (!d.ok) { t2.running = false; t2.jobId = null; t2.err = d.error || "任务丢失"; self.persist(); return; }
+          if (d.status === "running") {
+            t2.running = true;
+            setTimeout(function () { self.pollJob(tabId, jobId, page); }, 450);
+            return;
+          }
+          t2.running = false; t2.jobId = null;
+          if (d.status === "error") { t2.err = d.error; self.persist(); return; }
+          var r = d.result || {};
+          if (r.kind === "read") { t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page; }
+          else if (r.kind === "confirm") t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
+          else if (r.kind === "write") {
+            t2.ok = r;
+            if (t2.type === "data") setTimeout(function () { self.run(false, t2.lastPage); }, 60);
+            else self.refreshTree();
+          }
+          self.persist();
+        }).catch(function () {  // 网络抖动：稍后重试
+          setTimeout(function () { self.pollJob(tabId, jobId, page); }, 1200);
+        });
       },
       goPage: function (p) {
         var t = this.activeTab;
@@ -623,18 +715,21 @@
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
       applyWhere: function () { this.run(false, 0); },
+      // 列头点击与 ORDER BY 输入框联动：点头写入表达式，手写表达式亦可（支持多列/函数）
       cycleOrder: function (col) {
         var t = this.activeTab;
         if (!t || t.type !== "data") return;
-        if (t.orderCol !== col) { t.orderCol = col; t.orderDir = "ASC"; }
-        else if (t.orderDir === "ASC") t.orderDir = "DESC";
-        else { t.orderCol = null; t.orderDir = "ASC"; }
+        if (t.orderBy === col + " ASC") t.orderBy = col + " DESC";
+        else if (t.orderBy === col + " DESC") t.orderBy = "";
+        else t.orderBy = col + " ASC";
         this.run(false, 0);
       },
       orderMark: function (col) {
         var t = this.activeTab;
-        if (!t || t.orderCol !== col) return "";
-        return t.orderDir === "ASC" ? " ↑" : " ↓";
+        if (!t || !t.orderBy) return "";
+        if (t.orderBy === col + " ASC") return " ↑";
+        if (t.orderBy === col + " DESC") return " ↓";
+        return "";
       },
       funnel: function (col) {
         var t = this.activeTab; if (!t) return;
@@ -789,16 +884,17 @@
         });
       },
 
-      // ---------- 持久化（全状态保活） ----------
+      // ---------- 持久化（全状态保活，localStorage：关页面/关浏览器均保留） ----------
       persist: function () {
         try {
           this.stashTree();
           var tabs = this.tabs.map(function (t) {
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: this.sqlOf(t),
-                     result: t.result, ok: t.ok, err: t.err,
-                     where: t.where || "", orderCol: t.orderCol, orderDir: t.orderDir,
-                     lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain };
+                     result: t.result, ok: t.ok, err: t.err, pinned: !!t.pinned,
+                     where: t.where || "", orderBy: t.orderBy || "",
+                     lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
+                     jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql };
           }, this);
           var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH };
@@ -820,9 +916,13 @@
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: t.sql || "",
                      result: t.result || null, ok: t.ok || null, err: t.err || null,
-                     where: t.where || "", orderCol: t.orderCol || null, orderDir: t.orderDir || "ASC",
+                     pinned: !!t.pinned,
+                     where: t.where || "",
+                     orderBy: t.orderBy || (t.orderCol ? t.orderCol + " " + (t.orderDir || "ASC") : ""),
                      lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
-                     pendingSql: null, edit: null, confirm: null, running: false };
+                     jobId: t.jobId || null, jobPage: t.jobPage || 0,
+                     pendingSql: t.pendingSql || null, edit: null, confirm: null,
+                     running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
           this.treeCache = d.treeCache || {};
@@ -899,6 +999,10 @@
     mounted: function () {
       var self = this;
       this.restore();
+      // 切页/刷新前发起的查询在服务端继续跑：凭持久化的 job_id 续接轮询
+      this.tabs.forEach(function (t) {
+        if (t.jobId) self.pollJob(t.id, t.jobId, t.jobPage || 0);
+      });
       this.loadConnections().then(function () { self.loadSnippets(); });
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
@@ -908,10 +1012,8 @@
 <div class="dg-root">
   <aside class="dg-left" :style="{width: leftW + 'px'}">
     <div class="dg-conn">
-      <select :value="activeTab ? activeTab.conn : ''" @change="setConn($event.target.value)">
-        <option value="">选择连接…</option>
-        <option v-for="c in connections" :key="c.value" :value="c.value">{{ c.connection }} · {{ c.engine }}<template v-if="c.environment"> ({{ c.environment }})</template></option>
-      </select>
+      <dg-select :model-value="activeTab ? activeTab.conn : ''" :options="connOptions"
+                 placeholder="选择连接…" @update:model-value="setConn"/>
     </div>
     <div class="dg-tree">
       <div class="dg-sec-hd"><span>{{ needsDb ? "库 / 表" : "表" }}</span>
@@ -924,11 +1026,11 @@
         <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>
         <template v-for="db in filteredDatabases" :key="db">
           <div class="dg-item" @click="toggleDb(db)">
-            <span class="tw">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic">🗄</span><span class="nm">{{ db }}</span>
+            <span class="tw">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic ic-db"></span><span class="nm">{{ db }}</span>
           </div>
           <template v-if="openDb[db]">
             <div class="dg-item sub" style="padding-left:22px" @click="toggleTf(db)">
-              <span class="tw">{{ openTf[db] ? "▾" : "▸" }}</span><span class="ic fold">▤</span>
+              <span class="tw">{{ openTf[db] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
               <span class="nm">tables</span><span class="cnt">{{ tablesByDb[db] ? tablesByDb[db].length : "…" }}</span></div>
             <template v-if="openTf[db]">
               <div v-if="!tablesByDb[db]" class="dg-empty" style="padding-left:40px">加载中…</div>
@@ -945,7 +1047,7 @@
       </template>
       <template v-else>
         <div class="dg-item sub" @click="toggleTf('')">
-          <span class="tw">{{ openTf[''] ? "▾" : "▸" }}</span><span class="ic fold">▤</span>
+          <span class="tw">{{ openTf[''] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
           <span class="nm">tables</span><span class="cnt">{{ tablesByDb[''] ? tablesByDb[''].length : "…" }}</span></div>
         <template v-if="openTf['']">
           <div v-if="tablesLoading" class="dg-empty" style="padding-left:24px">加载中…</div>
@@ -999,17 +1101,18 @@
       <button class="dg-btn" @click="saveSqlFile">保存 .sql</button>
       <span class="sp"></span>
       <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres')" class="dg-schema-pick">执行 schema
-        <select :value="activeTab?activeTab.schema:''" @change="setSchema($event.target.value)">
-          <option value="">{{ connMeta.database ? "默认（"+connMeta.database+"）" : "未指定" }}</option>
-          <option v-for="db in databases" :key="db" :value="db">{{ db }}</option>
-        </select></label>
+        <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
+                   placeholder="未指定" @update:model-value="setSchema"/></label>
       <span class="hint">⌘/Ctrl+Enter 运行 · ⌃Space 补全</span>
     </div>
     <div class="dg-tabs">
       <div v-for="t in tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId, drag: t.id===dragId}" @click="switchTab(t.id)"
            draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">
         <span class="ticon" v-if="t.type==='data'">▦</span><span class="ticon" v-else-if="t.type==='ddl'">≔</span>
-        <span class="nm">{{ t.title }}</span><span class="x" @click.stop="closeTab(t.id)">✕</span>
+        <span class="nm">{{ t.title }}</span>
+        <span class="pin" :class="{on: t.pinned}" @click.stop="togglePin(t.id)"
+              :title="t.pinned ? '取消固定' : '固定（防误关）'">⚲</span>
+        <span v-if="!t.pinned" class="x" @click.stop="closeTab(t.id)">✕</span>
       </div>
       <button class="dg-tab-add" @click="newTab({})" title="新建查询">＋</button>
     </div>
@@ -1038,12 +1141,14 @@
       <template v-if="activeTab">
         <div v-if="activeTab.type==='data'" class="dg-where">
           <span class="k">WHERE</span>
-          <input id="dg-where-input" v-model="activeTab.where" placeholder="如 status = 'paid' AND amount > 100 （回车应用）"
+          <input id="dg-where-input" v-model="activeTab.where" placeholder="status = 'paid' AND amount > 100"
                  @keydown.enter="applyWhere">
+          <span class="k">ORDER BY</span>
+          <input class="obin" v-model="activeTab.orderBy" placeholder="amount DESC, id"
+                 @keydown.enter="applyWhere" title="任意排序表达式，回车应用；点列头快捷设置">
           <button class="dg-btn" @click="applyWhere">应用</button>
-          <button v-if="activeTab.where" class="dg-btn" @click="activeTab.where='';applyWhere()">清除</button>
-          <span v-if="activeTab.orderCol" class="ob">ORDER BY {{ activeTab.orderCol }} {{ activeTab.orderDir }}
-            <a @click="activeTab.orderCol=null;run(false,0)" title="清除排序">✕</a></span>
+          <button v-if="activeTab.where || activeTab.orderBy" class="dg-btn"
+                  @click="activeTab.where='';activeTab.orderBy='';applyWhere()">清除</button>
         </div>
         <div v-if="activeTab.explain" class="dg-explain">
           <div class="hd"><b>执行计划</b><span class="act" @click="closeExplain">✕ 关闭</span></div>
@@ -1126,5 +1231,6 @@
 
   app.component("tbl-node", TblNode);
   app.component("plan-node", PlanNode);
+  app.component("dg-select", DgSelect);
   app.mount("#dbm-console");
 })();

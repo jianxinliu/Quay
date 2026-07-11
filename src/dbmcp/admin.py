@@ -733,8 +733,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             limit, offset = 200, 0
         # 服务端筛选（下推到 SQL）
         filters = {k: qp.get(k) for k in ("project", "connection", "agent", "status") if qp.get(k)}
-        total = service.store.count(filters)
-        rows = service.store.recent(limit, offset, filters)
+        # 默认隐藏查询台自身操作（agent=admin-ui，噪音大）；show_admin=1 或明确筛选它时显示
+        show_admin = qp.get("show_admin") == "1" or filters.get("agent") == "admin-ui"
+        query_filters = dict(filters)
+        if not show_admin:
+            query_filters["agent__ne"] = "admin-ui"
+        total = service.store.count(query_filters)
+        rows = service.store.recent(limit, offset, query_filters)
 
         trs = []
         for i, r in enumerate(rows):
@@ -788,7 +793,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             + _sel("agent", "agent", service.store.distinct_values("agent"))
             + _sel("status", "状态", status_opts)
             + f"<input type='hidden' name='limit' value='{limit}'>"
+            + (f"<input type='hidden' name='show_admin' value='1'>" if show_admin else "")
             + "<a href='/admin/audit' style='margin-left:4px'>清除</a>"
+            + (f"<a href='{_esc('/admin/audit?' + '&'.join([f'{k}={v}' for k, v in filters.items()]))}'"
+               f" style='margin-left:4px'>隐藏 admin-ui</a>" if show_admin else
+               f"<a href='{_esc('/admin/audit?show_admin=1&' + '&'.join([f'{k}={v}' for k, v in filters.items()]))}'"
+               f" style='margin-left:4px'>显示 admin-ui</a>")
             + "<label style='margin:0 0 0 auto;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)'>"
             "<input type='checkbox' id='auto-refresh' style='width:auto'>自动刷新（5s）</label>"
             "</form>"
@@ -797,6 +807,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         # 分页：按页码，始终显示，保留筛选参数
         def _url(off: int) -> str:
             parts = [f"limit={limit}", f"offset={off}"] + [f"{k}={_esc(v)}" for k, v in filters.items()]
+            if show_admin:
+                parts.append("show_admin=1")
             return "/admin/audit?" + "&".join(parts)
         pages = max((total + limit - 1) // limit, 1)
         cur_page = offset // limit + 1
@@ -1132,6 +1144,79 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "ddl": ddl})
+
+    # 异步查询任务：查询在服务端线程池执行，页面切走/刷新不中断；前端凭 job_id
+    # 轮询取结果（job_id 持久化在前端状态里，切回来自动续接）。结果保留 10 分钟。
+    import threading as _threading
+    import time as _time
+    import uuid as _uuid
+
+    _jobs: dict[str, dict] = {}
+    _jobs_lock = _threading.Lock()
+    _JOB_TTL_S = 600
+
+    def _jobs_gc() -> None:
+        now = _time.time()
+        with _jobs_lock:
+            for k in [k for k, v in _jobs.items() if now - v["ts"] > _JOB_TTL_S]:
+                del _jobs[k]
+
+    @mcp.custom_route("/admin/sql/run_async", methods=["POST"])
+    @guard
+    async def _sql_run_async(req: Request) -> JSONResponse:
+        from .service import QueryRejected
+        f = await req.form()
+        sql = str(f.get("sql") or "")
+        confirm = str(f.get("confirm") or "") in ("1", "on", "true")
+        try:
+            page = max(int(str(f.get("page") or "0")), 0)
+        except ValueError:
+            page = 0
+        schema = str(f.get("schema") or "").strip() or None
+        caller = _caller(req)
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+
+        _jobs_gc()
+        job_id = _uuid.uuid4().hex[:12]
+        with _jobs_lock:
+            _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
+
+        def _work() -> None:
+            try:
+                result = service.admin_run_sql(project, connection, sql, caller,
+                                               confirm, page, None, schema)
+                with _jobs_lock:
+                    _jobs[job_id].update(status="done", result=result, ts=_time.time())
+            except (QueryRejected, KeyError, ValueError) as e:
+                with _jobs_lock:
+                    _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
+            except Exception as e:  # noqa: BLE001
+                with _jobs_lock:
+                    _jobs[job_id].update(status="error", error=f"{type(e).__name__}: {e}",
+                                         ts=_time.time())
+
+        # daemon 线程：单管理员场景无需池化；非 daemon 线程会让 pytest/进程退出时挂住
+        _threading.Thread(target=_work, name="dbm-adminjob", daemon=True).start()
+        return JSONResponse({"ok": True, "job_id": job_id})
+
+    @mcp.custom_route("/admin/sql/job", methods=["GET"])
+    @guard
+    async def _sql_job(req: Request) -> JSONResponse:
+        job_id = req.query_params.get("id", "")
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            payload = dict(job) if job else None
+        if payload is None:
+            return JSONResponse({"ok": False, "error": "任务不存在或已过期（结果保留 10 分钟）"})
+        out = {"ok": True, "status": payload["status"]}
+        if payload["status"] == "done":
+            out["result"] = payload["result"]
+        elif payload["status"] == "error":
+            out["error"] = payload["error"]
+        return JSONResponse(out)
 
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard

@@ -100,6 +100,11 @@ class AuditStore:
             if val:
                 clauses.append(f"{col} = ?")
                 params.append(val)
+            # 排除条件：key 形如 "agent__ne"（审计页默认隐藏 admin-ui 自身操作）
+            nev = (filters or {}).get(col + "__ne")
+            if nev:
+                clauses.append(f"{col} != ?")
+                params.append(nev)
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
     def recent(self, limit: int = 100, offset: int = 0, filters: dict | None = None) -> list[dict]:
