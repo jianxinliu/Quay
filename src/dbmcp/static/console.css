@@ -12,13 +12,18 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 
 #dbm-console { height: 100vh; }
 .dg-root {
-  height: 100%; display: grid; grid-template-columns: 264px 1fr;
+  height: 100%; display: flex;
   background: var(--dg-bg); color: var(--dg-text);
   font-size: 13px; -webkit-font-smoothing: antialiased;
 }
 
+/* 拖动分隔条 */
+.dg-vsplit { width: 6px; cursor: col-resize; flex: none; background: transparent; }
+.dg-vsplit:hover, .dg-hsplit:hover { background: var(--dg-accent); }
+.dg-hsplit { height: 6px; cursor: row-resize; flex: none; background: var(--dg-border); }
+
 /* ---------- 左栏：连接 / 表 / 片段 ---------- */
-.dg-left { display: flex; flex-direction: column; border-right: 1px solid var(--dg-border); overflow: hidden; }
+.dg-left { display: flex; flex-direction: column; border-right: 1px solid var(--dg-border); overflow: hidden; flex: none; }
 .dg-conn { padding: 10px; border-bottom: 1px solid var(--dg-border); }
 .dg-conn select {
   width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
@@ -68,9 +73,9 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-snipform input:focus, .dg-snipform textarea:focus { outline: none; border-color: var(--dg-accent); }
 
 /* ---------- 主区：topbar / tabs / editor / results ---------- */
-.dg-main { display: grid; grid-template-rows: auto auto minmax(120px, 42%) 1fr; overflow: hidden; }
+.dg-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 
-.dg-top { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--dg-border); }
+.dg-top { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--dg-border); flex: none; }
 .dg-btn {
   background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
   border-radius: 6px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit;
@@ -94,7 +99,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 }
 .dg-menu-pop button:hover { background: var(--dg-hover); }
 
-.dg-tabs { display: flex; align-items: stretch; background: var(--dg-panel-2); border-bottom: 1px solid var(--dg-border); overflow-x: auto; }
+.dg-tabs { display: flex; align-items: stretch; background: var(--dg-panel-2); border-bottom: 1px solid var(--dg-border); overflow-x: auto; flex: none; }
 .dg-tab {
   display: flex; align-items: center; gap: 7px; padding: 7px 12px; cursor: pointer;
   border-right: 1px solid var(--dg-border); font-size: 12.5px; color: var(--dg-muted);
@@ -108,11 +113,11 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-tab-add { padding: 7px 12px; cursor: pointer; color: var(--dg-muted); background: none; border: none; font-size: 15px; }
 .dg-tab-add:hover { color: var(--dg-text); }
 
-.dg-editor { position: relative; overflow: hidden; border-bottom: 1px solid var(--dg-border); min-height: 0; }
+.dg-editor { position: relative; overflow: hidden; flex: none; min-height: 0; }
 .dg-editor-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dg-muted); }
 
 /* ---------- 结果区 ---------- */
-.dg-results { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.dg-results { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 .dg-confirm {
   background: #3a2c22; border-bottom: 1px solid #6b4a2f; padding: 10px 14px; overflow: auto;
 }

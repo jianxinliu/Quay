@@ -138,6 +138,11 @@ class TestSqlConsole:
         d = tc.get("/admin/sql/connections").json()
         assert d["ok"] and any(c["value"] == "demo/main" for c in d["connections"])
 
+    def test_databases_endpoint_sqlite_empty(self, client):
+        tc, _ = client
+        d = tc.get("/admin/sql/databases", params={"conn": "demo/main"}).json()
+        assert d["ok"] and d["databases"] == []
+
     def test_tables_and_table_meta(self, client):
         tc, _ = client
         tbls = tc.get("/admin/sql/tables", params={"conn": "demo/main"}).json()

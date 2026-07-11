@@ -1006,13 +1006,25 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 })
         return JSONResponse({"ok": True, "connections": conns})
 
+    @mcp.custom_route("/admin/sql/databases", methods=["GET"])
+    @guard
+    async def _sql_databases(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            dbs = await anyio.to_thread.run_sync(
+                service.list_databases, project, connection, _caller(req))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "databases": dbs})
+
     @mcp.custom_route("/admin/sql/tables", methods=["GET"])
     @guard
     async def _sql_tables(req: Request) -> JSONResponse:
+        schema = req.query_params.get("schema") or None
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             tables = await anyio.to_thread.run_sync(
-                service.list_tables, project, connection, _caller(req))
+                service.list_tables, project, connection, _caller(req), schema)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "tables": tables})
@@ -1020,11 +1032,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @mcp.custom_route("/admin/sql/table", methods=["GET"])
     @guard
     async def _sql_table(req: Request) -> JSONResponse:
+        schema = req.query_params.get("schema") or None
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             table = req.query_params.get("table", "")
             info = await anyio.to_thread.run_sync(
-                service.describe_table, project, connection, table, _caller(req))
+                service.describe_table, project, connection, table, _caller(req), schema)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})

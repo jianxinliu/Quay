@@ -506,17 +506,35 @@ class DbmService:
 
     # ---------- schema 探索 ----------
 
-    def list_tables(self, project: str, connection: str, caller: CallerInfo) -> list[str]:
+    def list_databases(self, project: str, connection: str, caller: CallerInfo) -> list[str]:
+        """列出连接可选的库/schema（MySQL 数据库 / PG schema）。sqlite 无此概念返回 []。"""
         cfg = self.config.get_connection(project, connection)
+        if cfg.engine not in ("mysql", "postgres"):
+            return []
         engine = self.pool.get(project, connection, cfg)
-        return self._audited(project, connection, cfg, "list_tables", "", caller,
-                             lambda: engines.list_tables(engine))
+        return self._audited(project, connection, cfg, "list_databases", "", caller,
+                             lambda: engines.list_databases(engine))
 
-    def describe_table(self, project: str, connection: str, table: str, caller: CallerInfo) -> dict:
+    def list_tables(
+        self, project: str, connection: str, caller: CallerInfo, schema: str | None = None
+    ) -> list[str]:
+        cfg = self.config.get_connection(project, connection)
+        # 未绑定默认库的 MySQL/PG，不带 schema 反射会崩（默认 schema 为 None）→ 明确报错引导
+        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres"):
+            raise ValueError("此连接未绑定默认库，请先选择一个库（schema）再列表")
+        engine = self.pool.get(project, connection, cfg)
+        return self._audited(project, connection, cfg, "list_tables", schema or "", caller,
+                             lambda: engines.list_tables(engine, schema))
+
+    def describe_table(
+        self, project: str, connection: str, table: str, caller: CallerInfo,
+        schema: str | None = None,
+    ) -> dict:
         cfg = self.config.get_connection(project, connection)
         engine = self.pool.get(project, connection, cfg)
-        return self._audited(project, connection, cfg, "describe_table", table, caller,
-                             lambda: engines.describe_table(engine, table))
+        detail = f"{schema}.{table}" if schema else table
+        return self._audited(project, connection, cfg, "describe_table", detail, caller,
+                             lambda: engines.describe_table(engine, table, schema))
 
     def sample_rows(self, project: str, connection: str, table: str, limit: int, caller: CallerInfo) -> dict:
         cfg = self.config.get_connection(project, connection)

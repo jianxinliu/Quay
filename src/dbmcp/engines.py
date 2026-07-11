@@ -335,13 +335,28 @@ def explain(engine: SAEngine, sql: str, engine_kind: str) -> str | None:
         return None
 
 
-def list_tables(engine: SAEngine) -> list[str]:
-    return sorted(inspect(engine).get_table_names())
+# 列库/schema 时过滤掉系统库，减少噪音
+_SYSTEM_SCHEMAS = {
+    "information_schema", "performance_schema", "mysql", "sys", "pg_catalog", "pg_toast",
+}
 
 
-def describe_table(engine: SAEngine, table: str) -> dict:
+def list_databases(engine: SAEngine) -> list[str]:
+    """列出可选的库 / schema（MySQL 是数据库，PG 是 schema），过滤系统库。
+
+    用于未绑定默认库的连接：先选库，再在该库下列表（避免 no-database 反射崩溃）。
+    """
+    names = inspect(engine).get_schema_names()
+    return sorted(n for n in names if n and n.lower() not in _SYSTEM_SCHEMAS)
+
+
+def list_tables(engine: SAEngine, schema: str | None = None) -> list[str]:
+    return sorted(inspect(engine).get_table_names(schema=schema))
+
+
+def describe_table(engine: SAEngine, table: str, schema: str | None = None) -> dict:
     insp = inspect(engine)
-    _ensure_table_exists(insp, table)
+    _ensure_table_exists(insp, table, schema)
     columns = [
         {
             "name": c["name"],
@@ -350,14 +365,15 @@ def describe_table(engine: SAEngine, table: str) -> dict:
             "default": _jsonable(c.get("default")),
             "comment": c.get("comment"),
         }
-        for c in insp.get_columns(table)
+        for c in insp.get_columns(table, schema=schema)
     ]
     indexes = [
         {"name": i.get("name"), "columns": i.get("column_names"), "unique": i.get("unique")}
-        for i in insp.get_indexes(table)
+        for i in insp.get_indexes(table, schema=schema)
     ]
-    pk = insp.get_pk_constraint(table)
-    return {"table": table, "columns": columns, "indexes": indexes, "primary_key": pk.get("constrained_columns", [])}
+    pk = insp.get_pk_constraint(table, schema=schema)
+    return {"table": table, "schema": schema, "columns": columns, "indexes": indexes,
+            "primary_key": pk.get("constrained_columns", [])}
 
 
 def sample_rows(
@@ -371,8 +387,8 @@ def sample_rows(
     return run_query(engine, f"SELECT * FROM {quoted}", max_rows=limit, max_cell_chars=max_cell_chars)
 
 
-def _ensure_table_exists(insp, table: str) -> None:  # noqa: ANN001
-    names = insp.get_table_names()
+def _ensure_table_exists(insp, table: str, schema: str | None = None) -> None:  # noqa: ANN001
+    names = insp.get_table_names(schema=schema)
     if table not in names:
         raise ValueError(f"表 {table!r} 不存在，可用表: {', '.join(sorted(names)) or '（无）'}")
 

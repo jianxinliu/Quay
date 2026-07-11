@@ -160,6 +160,25 @@ class TestAdminConsole:
             service.admin_export("demo", "main", "DELETE FROM users", "csv", CALLER)
 
 
+class TestNoDatabaseSchema:
+    """未绑定默认库的连接：不带 schema 列表要给清晰报错（而非 SQLAlchemy 反射崩溃）。"""
+
+    def test_list_tables_no_database_mysql_raises_clean(self, tmp_path):
+        from dbmcp.audit.log import AuditStore
+        from dbmcp.config import AppConfig
+        cfg = AppConfig.model_validate({"projects": {"p": {"connections": {
+            "nodb": {"engine": "mysql", "host": "h", "user": "u", "password": "plain://x",
+                     "environment": "dev"}}}}})
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+        # 守卫在建连之前触发，无需真实连接
+        with pytest.raises(ValueError, match="未绑定默认库"):
+            svc.list_tables("p", "nodb", CALLER)
+        svc.close()
+
+    def test_list_databases_sqlite_returns_empty(self, service):
+        assert service.list_databases("demo", "main", CALLER) == []
+
+
 class TestNoDatabaseHint:
     def test_no_database_error_detection(self):
         from dbmcp.service import _is_no_database_error
