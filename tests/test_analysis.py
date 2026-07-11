@@ -178,6 +178,36 @@ class TestWorkflow:
         failed = [s for s in out["steps"] if not s["ok"]]
         assert failed and "not_exist" in failed[0]["step"]
 
+    def test_chart_config_roundtrip(self, svc_wf):
+        """图表配置随 workflow 保存/读取（P3 可视化）；不传则为 None；老库自动加列。"""
+        svc = svc_wf
+        svc.analysis_import("ws1", "u", "demo", "main", "SELECT * FROM users", CALLER)
+        chart = {"type": "bar", "x": "name", "y": "age", "agg": "sum", "view": "chart"}
+        wf = svc.workflow_save("viz", "ws1", "SELECT name, age FROM u", CALLER, chart=chart)
+        assert wf["chart"] == chart
+        assert svc.workflows.get("viz").chart == chart
+        # 覆盖保存可清掉图表配置
+        wf2 = svc.workflow_save("viz", "ws1", "SELECT name, age FROM u", CALLER)
+        assert wf2["chart"] is None
+
+    def test_chart_column_migration(self, tmp_path):
+        """老版本建的表（无 chart 列）打开时自动 ALTER 补列。"""
+        import sqlite3 as s3
+        db = tmp_path / "old.sqlite3"
+        conn = s3.connect(db)
+        conn.execute("CREATE TABLE analysis_workflow (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     " name TEXT NOT NULL UNIQUE, workspace TEXT NOT NULL, script TEXT NOT NULL,"
+                     " sources TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,"
+                     " updated_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO analysis_workflow (name, workspace, script, sources,"
+                     " created_at, updated_at) VALUES ('old', 'ws', 'SELECT 1', '[]', 't', 't')")
+        conn.commit()
+        conn.close()
+        from dbmcp.workflows import WorkflowStore
+        store = WorkflowStore(db)
+        assert store.get("old").chart is None
+        assert store.save("old", "ws", "SELECT 1", [], {"type": "pie"}).chart == {"type": "pie"}
+
     def test_list_delete(self, svc_wf):
         svc = svc_wf
         svc.analysis_import("ws1", "u", "demo", "main", "SELECT 1 AS x", CALLER)

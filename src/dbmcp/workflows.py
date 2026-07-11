@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS analysis_workflow (
     workspace   TEXT NOT NULL,
     script      TEXT NOT NULL,
     sources     TEXT NOT NULL DEFAULT '[]',   -- JSON：取数配方列表
+    chart       TEXT NOT NULL DEFAULT '',     -- JSON：图表配置（type/x/y/agg），空 = 无
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -39,12 +40,13 @@ class Workflow:
     workspace: str
     script: str
     sources: list[dict]
+    chart: dict | None
     created_at: str
     updated_at: str
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "workspace": self.workspace,
-                "script": self.script, "sources": self.sources,
+                "script": self.script, "sources": self.sources, "chart": self.chart,
                 "created_at": self.created_at, "updated_at": self.updated_at}
 
 
@@ -58,9 +60,13 @@ class WorkflowStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(analysis_workflow)")}
+            if "chart" not in cols:  # 老库升级
+                self._conn.execute("ALTER TABLE analysis_workflow ADD COLUMN chart TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
 
-    def save(self, name: str, workspace: str, script: str, sources: list[dict]) -> Workflow:
+    def save(self, name: str, workspace: str, script: str, sources: list[dict],
+             chart: dict | None = None) -> Workflow:
         name = (name or "").strip()
         if not name:
             raise WorkflowError("workflow 名称不能为空")
@@ -69,12 +75,13 @@ class WorkflowStore:
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             self._conn.execute(
-                "INSERT INTO analysis_workflow (name, workspace, script, sources, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT INTO analysis_workflow (name, workspace, script, sources, chart, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(name) DO UPDATE SET workspace = excluded.workspace,"
                 " script = excluded.script, sources = excluded.sources,"
-                " updated_at = excluded.updated_at",
-                (name, workspace, script, json.dumps(sources, ensure_ascii=False), now, now))
+                " chart = excluded.chart, updated_at = excluded.updated_at",
+                (name, workspace, script, json.dumps(sources, ensure_ascii=False),
+                 json.dumps(chart, ensure_ascii=False) if chart else "", now, now))
             self._conn.commit()
             row = self._conn.execute(
                 "SELECT * FROM analysis_workflow WHERE name = ?", (name,)).fetchone()
@@ -109,6 +116,7 @@ class WorkflowStore:
 def _row(row: sqlite3.Row) -> Workflow:
     return Workflow(id=row["id"], name=row["name"], workspace=row["workspace"],
                     script=row["script"], sources=json.loads(row["sources"] or "[]"),
+                    chart=json.loads(row["chart"]) if row["chart"] else None,
                     created_at=row["created_at"], updated_at=row["updated_at"])
 
 

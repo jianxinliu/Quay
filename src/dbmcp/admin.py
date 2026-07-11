@@ -542,6 +542,9 @@ def _console_body() -> str:
         '<link rel="stylesheet" href="/admin/static/console.css">'
         '<div id="dbm-console"></div>'
         '<script src="/admin/static/vue.global.prod.js"></script>'
+        # echarts 必须先于 Monaco 的 AMD loader：loader.js 定义 define.amd 后，
+        # echarts 的 UMD 会走 AMD 注册而不挂 window.echarts
+        '<script src="/admin/static/echarts.min.js"></script>'
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         '<script src="/admin/static/console.js"></script>'
     )
@@ -1049,7 +1052,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return Response("not found", status_code=404)
         ct = _STATIC_CT.get(target.suffix.lstrip(".").lower(), "application/octet-stream")
         # 自家 console.* 迭代频繁 → no-cache（每次校验新鲜度）；vendor（monaco/vue）不变 → 长缓存
-        vendor = rel.startswith("monaco/") or rel.startswith("vue.")
+        vendor = rel.startswith("monaco/") or rel.startswith("vue.") or rel.startswith("echarts")
         cache = "public, max-age=86400" if vendor else "no-cache"
         return Response(target.read_bytes(), media_type=ct,
                         headers={"Cache-Control": cache})
@@ -1144,12 +1147,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @mcp.custom_route("/admin/workflows/save", methods=["POST"])
     @guard
     async def _wf_save(req: Request) -> JSONResponse:
+        import json as _json
+
         from .workflows import WorkflowError
         f = await req.form()
+        chart_raw = str(f.get("chart") or "")
         try:
+            chart = _json.loads(chart_raw) if chart_raw else None
+            if chart is not None and not isinstance(chart, dict):
+                chart = None
             wf = await anyio.to_thread.run_sync(
                 service.workflow_save, str(f.get("name") or ""),
-                str(f.get("workspace") or ""), str(f.get("script") or ""), _caller(req))
+                str(f.get("workspace") or ""), str(f.get("script") or ""), _caller(req), chart)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "workflow": wf})

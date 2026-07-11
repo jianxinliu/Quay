@@ -404,11 +404,12 @@ class DbmService:
             raise WorkflowError("workflow 存储未启用（需 serve 模式运行）")
         return self.workflows
 
-    def workflow_save(self, name: str, workspace: str, script: str, caller: CallerInfo) -> dict:
-        """保存 workflow：脚本 + 工作区当前各数据集的取数配方（自动收集）。"""
+    def workflow_save(self, name: str, workspace: str, script: str, caller: CallerInfo,
+                      chart: dict | None = None) -> dict:
+        """保存 workflow：脚本 + 工作区当前各数据集的取数配方（自动收集）+ 图表配置。"""
         store = self._require_workflows()
         sources = self._require_analysis().get_provenance(workspace)
-        wf = store.save(name, workspace, script, sources)
+        wf = store.save(name, workspace, script, sources, chart)
         rec = self._analysis_record(workspace, "workflow_save", script[:500], caller)
         rec.status = "ok"
         rec.detail = f"workflow={name} sources={len(sources)}"

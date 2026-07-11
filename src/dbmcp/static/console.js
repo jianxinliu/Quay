@@ -22,6 +22,8 @@
   var colCache = {};          // "conn|schema|table" -> columns
   var seq = 1;
   var STORE_KEY = "dbm-console-v2";
+  var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
+  var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
 
   var RESERVED = {};
   ("where on group order by having limit join inner left right full outer cross " +
@@ -359,6 +361,20 @@
         var m = this.connMeta;
         var head = { value: "", label: m && m.database ? "默认（" + m.database + "）" : "未指定" };
         return [head].concat(this.databases.map(function (d) { return { value: d, label: d }; }));
+      },
+      chartTypeOptions: function () {
+        return [{ value: "bar", label: "柱状" }, { value: "line", label: "折线" },
+                { value: "pie", label: "饼图" }, { value: "scatter", label: "散点" }];
+      },
+      chartAggOptions: function () {
+        return [{ value: "", label: "不聚合" }, { value: "sum", label: "SUM" },
+                { value: "count", label: "COUNT" }, { value: "avg", label: "AVG" },
+                { value: "min", label: "MIN" }, { value: "max", label: "MAX" }];
+      },
+      chartColOptions: function () {
+        var t = this.activeTab;
+        if (!t || !t.result) return [];
+        return t.result.columns.map(function (c) { return { value: c, label: c }; });
       }
     },
     methods: {
@@ -410,7 +426,8 @@
                     // data tab：WHERE 条 / ORDER BY 表达式（走 SQL 重查，跨页正确）
                     where: opts.where || "", orderBy: "", lastPage: 0,
                     pendingSql: null, readSql: null, explain: null, edit: null,
-                    wfName: opts.wfName || "", wfSteps: null, vsel: null };
+                    wfName: opts.wfName || "", wfSteps: null, vsel: null,
+                    view: "table", chart: null };
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -439,6 +456,7 @@
         if (t && t.conn !== this.lastLoadedConn) this.loadTree();
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
+        if (t && t.view === "chart" && t.result) this.renderChart(); else this.disposeChart();
       },
       onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
       onTabDrop: function (targetId) {
@@ -703,13 +721,16 @@
       confirmSaveWorkflow: function () {
         var self = this, t = this.activeTab, a = this.wfAsk;
         if (!a || !a.name.trim()) { this.flash("请填写 workflow 名称"); return; }
+        // 图表配置随 workflow 保存（含当前视图，载入/重跑时原样恢复）
+        var chart = t.chart ? JSON.stringify(Object.assign({ view: t.view || "table" }, t.chart)) : "";
         apiPost("/admin/workflows/save", { name: a.name.trim(), workspace: a.ws,
-                                           script: this.currentSql() })
+                                           script: this.currentSql(), chart: chart })
           .then(function (d) {
             if (!d.ok) { self.flash(d.error); return; }
             t.wfName = a.name.trim(); self.wfAsk = null;
             self.flash("已保存 workflow「" + d.workflow.name + "」（含 "
-                       + d.workflow.sources.length + " 个数据源配方）");
+                       + d.workflow.sources.length + " 个数据源配方"
+                       + (d.workflow.chart ? "，含图表" : "") + "）");
             self.loadWorkflows();
           });
       },
@@ -720,6 +741,7 @@
         var t = this.activeTab;
         if (!t || t.conn !== conn) t = this.newTab({ title: "▶ " + wf.name, conn: conn, sql: wf.script });
         t.running = true; t.err = null; t.ok = null; t.result = null; t.confirm = null; t.wfName = wf.name;
+        this.applyWfChart(t, wf);
         apiPost("/admin/workflows/run", { name: wf.name }).then(function (d) {
           if (!d.ok) { t.running = false; t.err = d.error; return; }
           t.jobId = d.job_id; t.jobPage = 0; self.persist();
@@ -729,6 +751,13 @@
       loadWorkflow: function (wf) {
         var t = this.newTab({ title: wf.name, conn: "analysis/" + wf.workspace, sql: wf.script });
         t.wfName = wf.name;
+        this.applyWfChart(t, wf);
+      },
+      applyWfChart: function (t, wf) {
+        if (!wf.chart) return;
+        t.chart = { type: wf.chart.type || "bar", x: wf.chart.x || "",
+                    y: wf.chart.y || "", agg: wf.chart.agg || "" };
+        t.view = wf.chart.view || "chart";
       },
       askDeleteWf: function (name) {
         if (this.delWf !== name) {
@@ -759,6 +788,102 @@
                      + (d.truncated_to_limit ? "（达行数上限）" : ""));
         }).catch(function (e) { p.running = false; self.flash("" + e); });
       },
+
+      // ---------- 结果可视化（表格/图表切换，ECharts）----------
+      setView: function (v) {
+        var t = this.activeTab;
+        if (!t) return;
+        t.view = v;
+        if (v === "chart" && !t.chart) t.chart = this.defaultChart(t.result);
+        this.persist();
+        if (v === "chart") this.renderChart(); else this.disposeChart();
+      },
+      // 默认配置猜测：X = 第一列，Y = 第一个数值列
+      defaultChart: function (res) {
+        var cols = (res && res.columns) || [];
+        var y = "";
+        if (res && res.rows.length) {
+          for (var i = 0; i < cols.length; i++) {
+            if (typeof res.rows[0][i] === "number" && i !== 0) { y = cols[i]; break; }
+          }
+        }
+        return { type: "bar", x: cols[0] || "", y: y || cols[1] || cols[0] || "", agg: "" };
+      },
+      setChartOpt: function (k, v) {
+        var t = this.activeTab;
+        if (!t || !t.chart) return;
+        t.chart[k] = v;
+        this.persist();
+        this.renderChart();
+      },
+      // 结果集 → [[x, y]]；agg 非空时按 X 分组聚合（COUNT 计所有行，其余只计数值）
+      chartRows: function (t) {
+        var res = t.result, c = t.chart;
+        var xi = res.columns.indexOf(c.x), yi = res.columns.indexOf(c.y);
+        if (xi < 0 || yi < 0) return [];
+        function num(v) { return typeof v === "string" && v !== "" && !isNaN(+v) ? +v : v; }
+        if (!c.agg) return res.rows.map(function (r) { return [r[xi], num(r[yi])]; });
+        var groups = {}, order = [];
+        res.rows.forEach(function (r) {
+          var k = r[xi] === null ? "NULL" : String(r[xi]);
+          if (!(k in groups)) { groups[k] = []; order.push(k); }
+          groups[k].push(num(r[yi]));
+        });
+        return order.map(function (k) {
+          var vals = groups[k].filter(function (v) { return typeof v === "number"; });
+          var v;
+          if (c.agg === "count") v = groups[k].length;
+          else if (!vals.length) v = 0;
+          else if (c.agg === "sum") v = vals.reduce(function (a, b) { return a + b; }, 0);
+          else if (c.agg === "avg") v = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+          else if (c.agg === "min") v = Math.min.apply(null, vals);
+          else v = Math.max.apply(null, vals);
+          return [k, Math.round(v * 1000) / 1000];
+        });
+      },
+      renderChart: function () {
+        var self = this;
+        this.$nextTick(function () {
+          var t = self.activeTab;
+          if (!t || t.view !== "chart" || !t.result || !t.chart || !window.echarts) return;
+          var el = self.$refs.chartEl;
+          if (!el) return;
+          if (chartInst && chartInst.getDom() !== el) { chartInst.dispose(); chartInst = null; }
+          if (!chartInst) chartInst = window.echarts.init(el);
+          var data = self.chartRows(t), c = t.chart;
+          var axis = { axisLabel: { color: "#9aa0a8" }, axisLine: { lineStyle: { color: "#45484e" } },
+                       splitLine: { lineStyle: { color: "#2e3033" } } };
+          var opt = { backgroundColor: "transparent", color: CHART_PALETTE,
+                      textStyle: { color: "#bcbec4" },
+                      tooltip: { trigger: c.type === "bar" || c.type === "line" ? "axis" : "item",
+                                 backgroundColor: "#2b2d30", borderColor: "#393b40",
+                                 textStyle: { color: "#bcbec4" } },
+                      grid: { left: 16, right: 24, top: 28, bottom: 12, containLabel: true } };
+          if (c.type === "pie") {
+            opt.series = [{ type: "pie", radius: ["28%", "66%"],
+                            label: { color: "#9aa0a8" },
+                            data: data.map(function (d) { return { name: String(d[0]), value: d[1] }; }) }];
+          } else if (c.type === "scatter") {
+            opt.xAxis = Object.assign({ type: "value", name: c.x }, axis);
+            opt.yAxis = Object.assign({ type: "value", name: c.y }, axis);
+            opt.series = [{ type: "scatter", symbolSize: 9,
+                            data: data.map(function (d) {
+                              var x = typeof d[0] === "number" ? d[0] : +d[0];
+                              return [isNaN(x) ? 0 : x, d[1]];
+                            }) }];
+          } else {
+            opt.xAxis = Object.assign({ type: "category",
+                                        data: data.map(function (d) { return String(d[0]); }) }, axis);
+            opt.yAxis = Object.assign({ type: "value" }, axis);
+            opt.series = [{ type: c.type, data: data.map(function (d) { return d[1]; }),
+                            smooth: c.type === "line",
+                            barMaxWidth: 42 }];
+          }
+          chartInst.setOption(opt, true);
+          chartInst.resize();
+        });
+      },
+      disposeChart: function () { if (chartInst) { chartInst.dispose(); chartInst = null; } },
 
       // ---------- 运行 / 分页 / 导出 ----------
       // data tab 的查询由 表 + WHERE 条 + 列头排序 构建（DataGrip Table Data 行为，走 SQL 跨页正确）
@@ -839,6 +964,7 @@
             else self.refreshTree();
           }
           self.persist();
+          if (t2.id === self.activeId && t2.view === "chart" && t2.result) self.renderChart();
         }).catch(function () {  // 网络抖动：稍后重试
           setTimeout(function () { self.pollJob(tabId, jobId, page); }, 1200);
         });
@@ -1078,7 +1204,8 @@
                      where: t.where || "", orderBy: t.orderBy || "",
                      lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
-                     wfName: t.wfName || "", wfSteps: t.wfSteps || null };
+                     wfName: t.wfName || "", wfSteps: t.wfSteps || null,
+                     view: t.view || "table", chart: t.chart || null };
           }, this);
           var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH };
@@ -1107,6 +1234,7 @@
                      jobId: t.jobId || null, jobPage: t.jobPage || 0,
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null, vsel: null,
+                     view: t.view || "table", chart: t.chart || null,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -1132,6 +1260,7 @@
           window.removeEventListener("mouseup", up);
           document.body.style.userSelect = "";
           self.persist();
+          if (chartInst) chartInst.resize();
         }
         window.addEventListener("mousemove", move);
         window.addEventListener("mouseup", up);
@@ -1274,6 +1403,10 @@
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
       document.addEventListener("click", function () { self.closeCtx(); self.exportOpen = false; });
+      window.addEventListener("resize", function () { if (chartInst) chartInst.resize(); });
+      // 恢复的活动 tab 若在图表视图，重画
+      var at = this.activeTab;
+      if (at && at.view === "chart" && at.result) this.renderChart();
     },
     template: `
 <div class="dg-root">
@@ -1482,10 +1615,28 @@
             </span>
             <span v-else-if="activeTab.result.truncated" style="color:var(--dg-amber)">已截断到 max_rows</span>
             <span v-if="activeTab.result.columns.length" class="exp">
+              <span class="vswitch">
+                <button :class="{on: (activeTab.view||'table')==='table'}" @click="setView('table')">表格</button>
+                <button :class="{on: activeTab.view==='chart'}" @click="setView('chart')">图表</button>
+              </span>
               <button @click="exportAs('csv')">CSV</button><button @click="exportAs('json')">JSON</button><button @click="exportAs('markdown')">MD</button><button @click="exportAs('xlsx')">XLSX</button>
             </span>
           </div>
           <div v-if="!activeTab.result.columns.length" class="dg-res-empty">语句已执行，无结果集。</div>
+          <template v-else-if="activeTab.view==='chart' && activeTab.chart">
+            <div class="dg-chart-bar">
+              <label>类型 <dg-select :model-value="activeTab.chart.type" :options="chartTypeOptions"
+                                     @update:model-value="setChartOpt('type', $event)"/></label>
+              <label>X <dg-select :model-value="activeTab.chart.x" :options="chartColOptions"
+                                  @update:model-value="setChartOpt('x', $event)"/></label>
+              <label>Y <dg-select :model-value="activeTab.chart.y" :options="chartColOptions"
+                                  @update:model-value="setChartOpt('y', $event)"/></label>
+              <label>聚合 <dg-select :model-value="activeTab.chart.agg||''" :options="chartAggOptions"
+                                     @update:model-value="setChartOpt('agg', $event)"/></label>
+              <span class="hint" v-if="activeTab.result.paginated">仅当前页数据</span>
+            </div>
+            <div class="dg-chart" ref="chartEl"></div>
+          </template>
           <div v-else class="dg-res-body">
           <div class="dg-res-scroll"><table class="dg-rt">
             <thead><tr>
