@@ -135,3 +135,53 @@ class TestService:
         service.analysis_sql("ws1", "CREATE VIEW adults AS SELECT * FROM u WHERE age >= 30", CALLER)
         service.analysis_sql("ws1", "DELETE FROM u WHERE age < 28", CALLER)  # 沙箱内 DELETE 直接执行
         assert service.analysis_sql("ws1", "SELECT count(*) FROM u", CALLER)["rows"][0][0] == 2
+
+
+class TestWorkflow:
+    @pytest.fixture
+    def svc_wf(self, service, tmp_path):
+        from dbmcp.workflows import WorkflowStore
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        return service
+
+    def test_split_statements(self):
+        from dbmcp.workflows import split_statements
+        out = split_statements("SELECT 1; -- c;\nSELECT 'a;b'; CREATE VIEW v AS SELECT 2")
+        assert len(out) == 3 and out[1].endswith("SELECT 'a;b'")  # 语句携带前导注释
+
+    def test_save_run_rerun(self, svc_wf):
+        svc = svc_wf
+        # 导入(自动记 provenance)→ 保存 workflow(脚本两步)
+        svc.analysis_import("ws1", "u", "demo", "main", "SELECT * FROM users", CALLER, limit=10)
+        wf = svc.workflow_save("adults", "ws1",
+                               "CREATE OR REPLACE VIEW grown AS SELECT * FROM u WHERE age >= 30;"
+                               "SELECT count(*) AS n FROM grown", CALLER)
+        assert wf["sources"][0]["dataset"] == "u" and wf["sources"][0]["kind"] == "connection"
+        # 重跑:重拉 + 逐步执行,输出为最后的 SELECT
+        out = svc.workflow_run("adults", CALLER)
+        assert out["ok"] is True
+        assert out["steps"][0]["step"].startswith("导入 u") and out["steps"][0]["rows"] == 3
+        assert out["output"]["rows"][0][0] == 2
+        # 源数据变化后重跑结果随之更新(模拟:直接改工作区数据不行——改源库)
+        import sqlite3
+        db = svc.config.get_connection("demo", "main").database
+        c = sqlite3.connect(db); c.execute("INSERT INTO users (name, age) VALUES ('dave', 50)"); c.commit(); c.close()
+        out2 = svc.workflow_run("adults", CALLER)
+        assert out2["output"]["rows"][0][0] == 3  # 重拉后 3 个成年人
+
+    def test_run_stops_on_failed_step(self, svc_wf):
+        svc = svc_wf
+        svc.analysis_import("ws1", "u", "demo", "main", "SELECT * FROM users", CALLER)
+        svc.workflow_save("bad", "ws1", "SELECT * FROM not_exist; SELECT 1", CALLER)
+        out = svc.workflow_run("bad", CALLER)
+        assert out["ok"] is False
+        failed = [s for s in out["steps"] if not s["ok"]]
+        assert failed and "not_exist" in failed[0]["step"]
+
+    def test_list_delete(self, svc_wf):
+        svc = svc_wf
+        svc.analysis_import("ws1", "u", "demo", "main", "SELECT 1 AS x", CALLER)
+        svc.workflow_save("w1", "ws1", "SELECT 1", CALLER)
+        assert any(w["name"] == "w1" for w in svc.workflow_list())
+        svc.workflow_delete("w1")
+        assert not any(w["name"] == "w1" for w in svc.workflow_list())

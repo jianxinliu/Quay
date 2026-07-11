@@ -385,3 +385,11 @@ table.dg-rt td.editable { cursor: cell; }
   margin-left: 4px;
 }
 .dg-imp-in:focus { outline: none; border-color: var(--dg-accent); }
+
+/* workflow 运行步骤清单 */
+.dg-wfsteps {
+  padding: 8px 14px; border-bottom: 1px solid var(--dg-border); background: var(--dg-panel-2);
+  font-family: var(--dg-mono); font-size: 12px; flex: none; max-height: 30%; overflow: auto;
+}
+.dg-wfsteps .okline { color: var(--dg-green); padding: 1px 0; }
+.dg-wfsteps .errline { color: var(--dg-red); padding: 1px 0; }

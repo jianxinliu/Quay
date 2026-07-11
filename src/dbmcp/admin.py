@@ -1136,6 +1136,58 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
 
+    @mcp.custom_route("/admin/workflows", methods=["GET"])
+    @guard
+    async def _wf_list(_req: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "workflows": service.workflow_list()})
+
+    @mcp.custom_route("/admin/workflows/save", methods=["POST"])
+    @guard
+    async def _wf_save(req: Request) -> JSONResponse:
+        from .workflows import WorkflowError
+        f = await req.form()
+        try:
+            wf = await anyio.to_thread.run_sync(
+                service.workflow_save, str(f.get("name") or ""),
+                str(f.get("workspace") or ""), str(f.get("script") or ""), _caller(req))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "workflow": wf})
+
+    @mcp.custom_route("/admin/workflows/delete", methods=["POST"])
+    @guard
+    async def _wf_delete(req: Request) -> JSONResponse:
+        f = await req.form()
+        try:
+            await anyio.to_thread.run_sync(service.workflow_delete, str(f.get("name") or ""))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True})
+
+    @mcp.custom_route("/admin/workflows/run", methods=["POST"])
+    @guard
+    async def _wf_run(req: Request) -> JSONResponse:
+        f = await req.form()
+        name = str(f.get("name") or "")
+        caller = _caller(req)
+        _jobs_gc()
+        job_id = _uuid.uuid4().hex[:12]
+        with _jobs_lock:
+            _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
+
+        def _work_wf() -> None:
+            try:
+                out = service.workflow_run(name, caller)
+                with _jobs_lock:
+                    _jobs[job_id].update(status="done", ts=_time.time(),
+                                         result={"kind": "workflow", **out})
+            except Exception as e:  # noqa: BLE001
+                with _jobs_lock:
+                    _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
+
+        _threading.Thread(target=_work_wf, name="dbm-adminjob", daemon=True).start()
+        return JSONResponse({"ok": True, "job_id": job_id})
+
     @mcp.custom_route("/admin/analysis/import", methods=["POST"])
     @guard
     async def _analysis_import(req: Request) -> JSONResponse:

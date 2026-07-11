@@ -65,7 +65,8 @@ class DbmService:
         self.metadata = metadata
         self.config_path = config_path
         self.snippets = snippets
-        self.analysis = None  # AnalysisStore（serve 时注入；未启用则分析功能不可用）
+        self.analysis = None   # AnalysisStore（serve 时注入；未启用则分析功能不可用）
+        self.workflows = None  # WorkflowStore（serve 时注入）
         self._housekeeping_stop: threading.Event | None = None
 
     # ---------- 元信息 ----------
@@ -347,7 +348,10 @@ class DbmService:
         n = min(limit or DEFAULT_SNAPSHOT_ROWS, MAX_SNAPSHOT_ROWS)
         run_sql, _, _ = engines.paginate_sql(source_sql, cfg.engine, n, 0)
         result = self._read(project, connection, cfg, run_sql, caller, n, schema=schema)
-        imported = store.import_rows(workspace, dataset, result["columns"], result["rows"])
+        spec = {"kind": "connection", "project": project, "connection": connection,
+                "sql": source_sql, "limit": n, "schema": schema}
+        imported = store.import_rows(workspace, dataset, result["columns"], result["rows"],
+                                     spec=spec)
         rec = self._analysis_record(workspace, "analysis_import", source_sql, caller)
         rec.status = "ok"
         rec.detail = f"{project}/{connection} → {workspace}.{dataset}"
@@ -391,6 +395,69 @@ class DbmService:
         rec.row_count = out["row_count"]
         self.store.record(rec)
         return out
+
+    # ---------- 分析 workflow（保存取数配方 + 脚本，一键重跑）----------
+
+    def _require_workflows(self):
+        if self.workflows is None:
+            from .workflows import WorkflowError
+            raise WorkflowError("workflow 存储未启用（需 serve 模式运行）")
+        return self.workflows
+
+    def workflow_save(self, name: str, workspace: str, script: str, caller: CallerInfo) -> dict:
+        """保存 workflow：脚本 + 工作区当前各数据集的取数配方（自动收集）。"""
+        store = self._require_workflows()
+        sources = self._require_analysis().get_provenance(workspace)
+        wf = store.save(name, workspace, script, sources)
+        rec = self._analysis_record(workspace, "workflow_save", script[:500], caller)
+        rec.status = "ok"
+        rec.detail = f"workflow={name} sources={len(sources)}"
+        self.store.record(rec)
+        return wf.to_dict()
+
+    def workflow_list(self) -> list[dict]:
+        if self.workflows is None:
+            return []
+        return [w.to_dict() for w in self.workflows.list()]
+
+    def workflow_delete(self, name: str) -> None:
+        self._require_workflows().delete(name)
+
+    def workflow_run(self, name: str, caller: CallerInfo) -> dict:
+        """一键重跑：按 sources 重拉数据 → 逐条执行脚本 → 最后一个结果集作为输出。
+
+        任一步失败即停，标注在哪一步。全程审计（取数走 _read，脚本走 analysis_sql）。
+        """
+        from .workflows import split_statements
+        wf = self._require_workflows().get(name)
+        steps: list[dict] = []
+        # 1) 重拉数据源
+        for src in wf.sources:
+            label = f"导入 {src.get('dataset')}"
+            try:
+                if src.get("kind") == "file":
+                    out = self.analysis_import_file(wf.workspace, src["dataset"], src["path"], caller)
+                else:
+                    out = self.analysis_import(wf.workspace, src["dataset"], src["project"],
+                                               src["connection"], src["sql"], caller,
+                                               limit=src.get("limit"), schema=src.get("schema"))
+                steps.append({"step": label, "ok": True, "rows": out["rows"]})
+            except Exception as e:  # noqa: BLE001
+                steps.append({"step": label, "ok": False, "error": str(e)})
+                return {"workflow": name, "steps": steps, "output": None, "ok": False}
+        # 2) 逐条执行脚本
+        output = None
+        for i, stmt in enumerate(split_statements(wf.script), 1):
+            label = f"步骤 {i}: {stmt[:60]}"
+            try:
+                res = self.analysis_sql(wf.workspace, stmt, caller)
+                steps.append({"step": label, "ok": True, "rows": res["row_count"]})
+                if res["columns"]:
+                    output = res
+            except Exception as e:  # noqa: BLE001
+                steps.append({"step": label, "ok": False, "error": str(e)})
+                return {"workflow": name, "steps": steps, "output": output, "ok": False}
+        return {"workflow": name, "steps": steps, "output": output, "ok": True}
 
     # ---------- SQL 片段库（查询台保存/加载）----------
 

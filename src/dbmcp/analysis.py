@@ -67,13 +67,34 @@ class AnalysisStore:
 
     # ---------- 数据集 ----------
 
+    def _save_provenance(self, con, dataset: str, spec: dict) -> None:
+        """记录数据集的取数配方（workflow 重跑用）。"""
+        import json
+        con.execute("CREATE TABLE IF NOT EXISTS __provenance (dataset VARCHAR PRIMARY KEY, spec VARCHAR)")
+        con.execute("DELETE FROM __provenance WHERE dataset = ?", [dataset])
+        con.execute("INSERT INTO __provenance VALUES (?, ?)", [dataset, json.dumps(spec, ensure_ascii=False)])
+
+    def get_provenance(self, workspace: str) -> list[dict]:
+        """工作区各数据集的取数配方（无记录返回空）。"""
+        import json
+        con = self._connect(workspace)
+        try:
+            try:
+                rows = con.execute("SELECT dataset, spec FROM __provenance ORDER BY dataset").fetchall()
+            except Exception:
+                return []
+            return [{"dataset": r[0], **json.loads(r[1])} for r in rows]
+        finally:
+            con.close()
+
     def list_datasets(self, workspace: str) -> list[dict]:
-        """工作区内的表与视图（数据集 + 虚拟表）。"""
+        """工作区内的表与视图（数据集 + 虚拟表；内部 __ 表不展示）。"""
         con = self._connect(workspace)
         try:
             rows = con.execute(
                 "SELECT table_name, table_type FROM information_schema.tables"
-                " WHERE table_schema = 'main' ORDER BY table_name"
+                " WHERE table_schema = 'main' AND table_name NOT LIKE '~_~_%' ESCAPE '~'"
+                " ORDER BY table_name"
             ).fetchall()
             out = []
             for name, ttype in rows:
@@ -87,7 +108,7 @@ class AnalysisStore:
 
     def import_rows(
         self, workspace: str, dataset: str, columns: list[str], rows: list[list[Any]],
-        replace: bool = True,
+        replace: bool = True, spec: dict | None = None,
     ) -> int:
         """把（service 从源库拉到的）行集落成工作区的表。列类型按前 200 行推断。"""
         _valid_name(dataset, "数据集")
@@ -105,11 +126,14 @@ class AnalysisStore:
                 ph = ", ".join(["?"] * len(columns))
                 con.executemany(f'INSERT INTO "{dataset}" VALUES ({ph})',
                                 [_coerce_row(r, types) for r in rows])
+            if spec:
+                self._save_provenance(con, dataset, spec)
             return len(rows)
         finally:
             con.close()
 
-    def import_file(self, workspace: str, dataset: str, path: str, replace: bool = True) -> int:
+    def import_file(self, workspace: str, dataset: str, path: str, replace: bool = True,
+                    record_spec: bool = True) -> int:
         """导入本地 CSV / Parquet / JSON 文件（DuckDB 原生读取，类型自动推断）。"""
         _valid_name(dataset, "数据集")
         p = Path(path).expanduser()
@@ -132,6 +156,8 @@ class AnalysisStore:
                 con.execute(f'DROP TABLE IF EXISTS "{dataset}"')
                 con.execute(f'DROP VIEW IF EXISTS "{dataset}"')
             con.execute(f'CREATE TABLE "{dataset}" AS SELECT * FROM {reader}', [str(p)])
+            if record_spec:
+                self._save_provenance(con, dataset, {"kind": "file", "path": str(p)})
             return int(con.execute(f'SELECT count(*) FROM "{dataset}"').fetchone()[0])
         finally:
             con.close()

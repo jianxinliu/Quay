@@ -235,14 +235,16 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise ToolError(str(e)) from e
 
     @mcp.tool
-    def analysis_workspaces() -> list[dict]:
-        """列出分析工作区及其中的数据集（DuckDB 沙箱，跨源数据分析用）。
+    def analysis_workspaces() -> dict:
+        """列出分析工作区（含数据集）与已保存的 workflow（DuckDB 沙箱，跨源数据分析用）。
 
         适用场景：跨连接 JOIN、大结果集聚合、多步分析——把数据快照进工作区后
         用 analysis_sql 自由分析，只把小结果带回上下文。简单单表查询请直接用 query。
         """
         try:
-            return service.analysis_overview()
+            return {"workspaces": service.analysis_overview(),
+                    "workflows": [{"name": w["name"], "workspace": w["workspace"]}
+                                  for w in service.workflow_list()]}
         except Exception as e:
             raise ToolError(str(e)) from e
 
@@ -292,6 +294,22 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise ToolError(str(e)) from e
         except Exception as e:  # noqa: BLE001
             raise ToolError(f"{type(e).__name__}: {e}") from e
+
+    @mcp.tool
+    async def run_workflow(
+        name: Annotated[str, Field(description="workflow 名称（人或 agent 之前保存的分析流程）")],
+        ctx: Context | None = None,
+    ) -> dict:
+        """一键重跑已保存的分析 workflow：重新拉取源数据 → 逐步执行 SQL 脚本 → 返回
+        每步状态与最终输出预览。人沉淀的分析，agent 可按需重跑并解读结果。
+        可用 workflow 列表见 analysis_workspaces 工具或询问用户。
+        """
+        caller = _caller_from_ctx(ctx)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: service.workflow_run(name, caller))
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(str(e)) from e
 
     @mcp.tool
     def test_connection(project: str, connection: str, ctx: Context | None = None) -> dict:

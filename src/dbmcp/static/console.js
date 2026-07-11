@@ -287,7 +287,7 @@
   var app = Vue.createApp({
     data: function () {
       return {
-        connections: [], workspaces: [], tabs: [], activeId: null,
+        connections: [], workspaces: [], wfs: [], tabs: [], activeId: null,
         importPlan: null,  // {t, db, workspace, dataset, limit} 导入到分析工作区的内联表单
         // 树状态（当前连接）
         databases: [], tablesByDb: {}, tableMeta: {}, tableSizes: {},
@@ -298,7 +298,7 @@
         dragId: null,
         ctx: { show: false, x: 0, y: 0, table: "", schema: "", multi: false },
         dropPlan: null,         // {items:[{t,db}], running, results}
-        delSnip: null,
+        delSnip: null, delWf: null, wfAsk: null,
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, editorReady: false, toast: "",
@@ -408,7 +408,8 @@
                     pinned: false,
                     // data tab：WHERE 条 / ORDER BY 表达式（走 SQL 重查，跨页正确）
                     where: opts.where || "", orderBy: "", lastPage: 0,
-                    pendingSql: null, readSql: null, explain: null, edit: null };
+                    pendingSql: null, readSql: null, explain: null, edit: null,
+                    wfName: opts.wfName || "", wfSteps: null };
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -471,6 +472,7 @@
         return apiGet("/admin/sql/connections").then(function (d) {
           self.connections = (d && d.connections) || [];
           self.workspaces = (d && d.workspaces) || [];
+          self.loadWorkflows();
           if (!self.tabs.length) self.newTab({});
           else if (self.activeTab) self.loadTree();
         });
@@ -687,6 +689,58 @@
         });
       },
 
+      loadWorkflows: function () {
+        var self = this;
+        apiGet("/admin/workflows").then(function (d) { self.wfs = d && d.ok ? d.workflows : []; });
+      },
+      saveWorkflow: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !this.isAnalysis) { this.flash("请先切到分析工作区连接"); return; }
+        var name = t.wfName || "";
+        this.wfAsk = { name: name, ws: t.conn.split("/")[1] };
+      },
+      confirmSaveWorkflow: function () {
+        var self = this, t = this.activeTab, a = this.wfAsk;
+        if (!a || !a.name.trim()) { this.flash("请填写 workflow 名称"); return; }
+        apiPost("/admin/workflows/save", { name: a.name.trim(), workspace: a.ws,
+                                           script: this.currentSql() })
+          .then(function (d) {
+            if (!d.ok) { self.flash(d.error); return; }
+            t.wfName = a.name.trim(); self.wfAsk = null;
+            self.flash("已保存 workflow「" + d.workflow.name + "」（含 "
+                       + d.workflow.sources.length + " 个数据源配方）");
+            self.loadWorkflows();
+          });
+      },
+      runWorkflow: function (wf) {
+        // 在（或新开）该工作区的 tab 里跑：结果走异步 job，kind=workflow
+        var self = this;
+        var conn = "analysis/" + wf.workspace;
+        var t = this.activeTab;
+        if (!t || t.conn !== conn) t = this.newTab({ title: "▶ " + wf.name, conn: conn, sql: wf.script });
+        t.running = true; t.err = null; t.ok = null; t.result = null; t.confirm = null; t.wfName = wf.name;
+        apiPost("/admin/workflows/run", { name: wf.name }).then(function (d) {
+          if (!d.ok) { t.running = false; t.err = d.error; return; }
+          t.jobId = d.job_id; t.jobPage = 0; self.persist();
+          self.pollJob(t.id, d.job_id, 0);
+        });
+      },
+      loadWorkflow: function (wf) {
+        var t = this.newTab({ title: wf.name, conn: "analysis/" + wf.workspace, sql: wf.script });
+        t.wfName = wf.name;
+      },
+      askDeleteWf: function (name) {
+        if (this.delWf !== name) {
+          this.delWf = name; this.flash("再点一次确认删除 workflow");
+          var self = this; setTimeout(function () { if (self.delWf === name) self.delWf = null; }, 3000);
+          return;
+        }
+        this.delWf = null;
+        var self2 = this;
+        apiPost("/admin/workflows/delete", { name: name }).then(function (d) {
+          if (!d.ok) { self2.flash(d.error); return; } self2.flash("已删除"); self2.loadWorkflows();
+        });
+      },
       confirmImport: function () {
         var self = this, p = this.importPlan, tab = this.activeTab;
         if (!p || p.running || !tab) return;
@@ -741,7 +795,7 @@
         if (!sql.trim()) { this.flash("请输入 SQL"); return; }
         page = page || 0;
         t.pendingSql = sql;
-        t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null;
+        t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null; t.wfSteps = null;
         if (page === 0) t.result = null;
         // 异步任务：查询在服务端线程池执行，切页/刷新不中断；job_id 持久化，回来续接轮询
         apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
@@ -769,7 +823,14 @@
           t2.running = false; t2.jobId = null;
           if (d.status === "error") { t2.err = d.error; self.persist(); return; }
           var r = d.result || {};
-          if (r.kind === "read") { t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page; }
+          if (r.kind === "workflow") {
+            // workflow 运行结果：步骤清单 + 输出预览（输出复用结果表格）
+            t2.wfSteps = r.steps || [];
+            if (r.output) t2.result = Object.assign({ paginated: false }, r.output);
+            else if (!r.ok) t2.err = (r.steps.filter(function (x) { return !x.ok; })[0] || {}).error || "运行失败";
+            self.flash(r.ok ? "workflow 运行完成" : "workflow 运行失败（见步骤）");
+          }
+          else if (r.kind === "read") { t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page; }
           else if (r.kind === "confirm") t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
           else if (r.kind === "write") {
             t2.ok = r;
@@ -969,7 +1030,8 @@
                      result: t.result, ok: t.ok, err: t.err, pinned: !!t.pinned,
                      where: t.where || "", orderBy: t.orderBy || "",
                      lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
-                     jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql };
+                     jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
+                     wfName: t.wfName || "", wfSteps: t.wfSteps || null };
           }, this);
           var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH };
@@ -997,6 +1059,7 @@
                      lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0,
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
+                     wfName: t.wfName || "", wfSteps: t.wfSteps || null,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -1219,6 +1282,14 @@
             @ctxmenu="e=>openCtx(e,t,'')"/>
         </template>
       </template>
+      <div class="dg-sec-hd" style="margin-top:8px"><span>工作流</span><span class="act" @click="loadWorkflows" title="刷新">↻</span></div>
+      <div v-if="!wfs.length" class="dg-empty">（暂无，工作区里写好脚本点「存工作流」）</div>
+      <div v-for="w in wfs" :key="w.name" class="dg-snip" @click="loadWorkflow(w)" :title="'工作区 '+w.workspace+' · 点击载入脚本'">
+        <div class="t"><span>⚙ {{ w.name }}</span>
+          <span class="x" style="opacity:1;color:var(--dg-green)" @click.stop="runWorkflow(w)" title="重跑（重拉数据+执行脚本）">▶</span>
+          <span class="x" :class="{arm: delWf===w.name}" @click.stop="askDeleteWf(w.name)">{{ delWf===w.name ? "确认?" : "✕" }}</span></div>
+        <div class="c">⚗ {{ w.workspace }} · {{ w.sources.length }} 源 · {{ fmtTs(w.updated_at) }}</div>
+      </div>
       <div class="dg-sec-hd" style="margin-top:8px"><span>历史</span>
         <span class="act" @click="showHistory=!showHistory">{{ showHistory ? "收起" : "展开" }}</span>
         <span class="act" @click="loadHistory" title="刷新">↻</span></div>
@@ -1258,6 +1329,7 @@
         </div>
       </div>
       <button class="dg-btn" @click="saveSqlFile">保存 .sql</button>
+      <button v-if="isAnalysis" class="dg-btn" @click="saveWorkflow" title="把当前脚本 + 工作区取数配方存为可重跑的 workflow">存工作流</button>
       <span class="sp"></span>
       <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres')" class="dg-schema-pick">执行 schema
         <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
@@ -1300,6 +1372,14 @@
         <button class="dg-btn" :disabled="importPlan.running" @click="importPlan=null">取消</button>
       </div>
     </div>
+    <div v-if="wfAsk" class="dg-drop" style="background:#22301f;border-color:#3d5a35">
+      <div class="hd" style="color:#a8d99b">保存 workflow：当前脚本 + 工作区 <code>{{ wfAsk.ws }}</code> 的取数配方（重跑时自动重拉数据）</div>
+      <div class="acts" style="align-items:center">
+        <label style="font-size:12px;color:var(--dg-muted)">名称 <input v-model="wfAsk.name" class="dg-imp-in" style="width:200px" @keydown.enter="confirmSaveWorkflow"></label>
+        <button class="dg-btn run" @click="confirmSaveWorkflow">保存</button>
+        <button class="dg-btn" @click="wfAsk=null">取消</button>
+      </div>
+    </div>
     <div class="dg-editor-row" v-show="activeTab && activeTab.type!=='data'" :style="editorRowStyle">
       <div class="dg-estatus" :class="execState.cls" :title="execState.tip"><span>{{ execState.icon }}</span></div>
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
@@ -1335,6 +1415,11 @@
           <div class="kv"><span>影响表：{{ (activeTab.confirm.risk.tables||[]).join(", ")||"—" }}</span><span>表行量级：{{ numOr(activeTab.confirm.risk.row_estimate) }}</span><span>含 WHERE：{{ boolText(activeTab.confirm.risk.has_where) }}</span><span>命中索引：{{ boolText(activeTab.confirm.risk.uses_index) }}</span></div>
           <div class="reasons" v-for="r in (activeTab.confirm.risk.reasons||[])" :key="r">• {{ r }}</div>
           <div class="acts"><button class="dg-btn ok" @click="confirmRun">确认执行</button><button class="dg-btn" @click="cancelConfirm">取消</button></div>
+        </div>
+        <div v-if="activeTab.wfSteps && activeTab.wfSteps.length" class="dg-wfsteps">
+          <div v-for="(st,si) in activeTab.wfSteps" :key="si" :class="st.ok?'okline':'errline'">
+            {{ st.ok ? "✓" : "✗" }} {{ st.step }}<template v-if="st.rows!=null">（{{ st.rows }} 行）</template>
+            <template v-if="st.error">— {{ st.error }}</template></div>
         </div>
         <div v-if="activeTab.err" class="dg-res-err">⚠ {{ activeTab.err }}</div>
         <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{ activeTab.ok.affected_rows }} 行 · {{ activeTab.ok.duration_ms }} ms</div>
