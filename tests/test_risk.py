@@ -40,6 +40,11 @@ class TestCritical:
         r = assess("garbage ??? sql", "mysql", provider({}))
         assert r.level == "CRITICAL"
 
+    def test_tokenize_error_is_critical_not_raised(self):
+        # 引号不闭合 → TokenizeError（非 ParseError）：应降级为 CRITICAL 而非抛异常
+        r = assess("UPDATE t SET x='unterminated WHERE id=1", "mysql", provider({}))
+        assert r.level == "CRITICAL" and r.statement_kind == "Unparseable"
+
 
 class TestHigh:
     def test_delete_where_unindexed_column(self):

@@ -77,6 +77,13 @@ class TestBypassAttemptsRejected:
         assert not classify("", "mysql").readonly
         assert not classify("   ", "postgres").readonly
 
+    def test_tokenize_error_rejected_not_raised(self):
+        # 引号不闭合走 sqlglot 分词阶段（TokenizeError，非 ParseError）：
+        # 必须默认拒绝而非抛异常冒泡（否则 agent/后台会 500）
+        verdict = classify("update t set x='unterminated where id=1", "mysql")
+        assert not verdict.readonly
+        assert "解析失败" in verdict.reason
+
     def test_unknown_engine_rejected(self):
         assert not classify("SELECT 1", "redis").readonly
 

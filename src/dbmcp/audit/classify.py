@@ -55,8 +55,11 @@ def classify(sql: str, engine: str) -> Verdict:
 
     try:
         statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
-    except sqlglot.errors.ParseError as e:
-        return Verdict(False, f"SQL 解析失败，按写操作处理: {e.errors[0]['description'] if e.errors else e}")
+    except sqlglot.errors.SqlglotError as e:
+        # 解析/分词均失败（含引号不闭合等 TokenizeError）→ 默认拒绝，按写操作处理
+        errs = getattr(e, "errors", None)
+        desc = errs[0].get("description") if errs else str(e)
+        return Verdict(False, f"SQL 解析失败，按写操作处理: {desc}")
 
     if not statements:
         return Verdict(False, "空语句")

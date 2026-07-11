@@ -121,6 +121,45 @@ class TestMeta:
         assert service.test_connection("demo", "main", CALLER)["ok"] is True
 
 
+class TestAdminConsole:
+    """后台查询台入口：读直跑 / 写二次确认 / 确认后执行 / 导出。"""
+
+    def test_read_returns_rows(self, service):
+        out = service.admin_run_sql("demo", "main", "SELECT id, name FROM users ORDER BY id", CALLER)
+        assert out["kind"] == "read"
+        assert out["columns"] == ["id", "name"]
+
+    def test_write_without_confirm_returns_risk_not_executed(self, service):
+        out = service.admin_run_sql("demo", "main", "DELETE FROM users WHERE name='bob'", CALLER)
+        assert out["kind"] == "confirm"
+        assert "risk" in out and "level" in out["risk"]
+        # 未执行：bob 还在
+        res = service.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)
+        assert res["rows"][0][0] == 3
+
+    def test_write_with_confirm_executes(self, service):
+        out = service.admin_run_sql(
+            "demo", "main", "DELETE FROM users WHERE name='bob'", CALLER, confirm=True
+        )
+        assert out["kind"] == "write"
+        assert out["affected_rows"] == 1
+        # 落审计：admin_execute（写操作后立即检查，最新一条即是）
+        assert service.store.recent()[0]["tool"] == "admin_execute"
+        res = service.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)
+        assert res["rows"][0][0] == 2
+
+    def test_export_read_result_as_csv(self, service):
+        data, media_type, ext = service.admin_export(
+            "demo", "main", "SELECT id, name FROM users ORDER BY id", "csv", CALLER
+        )
+        assert ext == "csv" and data.startswith(b"\xef\xbb\xbf")
+        assert b"id,name" in data
+
+    def test_export_rejects_write_sql(self, service):
+        with pytest.raises(QueryRejected, match="只读"):
+            service.admin_export("demo", "main", "DELETE FROM users", "csv", CALLER)
+
+
 class TestNoDatabaseHint:
     def test_no_database_error_detection(self):
         from dbmcp.service import _is_no_database_error

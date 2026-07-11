@@ -151,6 +151,61 @@ class DbmService:
             )
         return out
 
+    # ---------- 管理后台查询台（人已认证，写操作二次确认后直接执行）----------
+
+    def admin_run_sql(
+        self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False
+    ) -> dict:
+        """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
+
+        - 只读语句：直接跑 reader 出结果（等价 query，含脱敏/截断策略）。
+        - 写语句 + confirm=False：评估风险并返回风险报告，**不执行**。
+        - 写语句 + confirm=True：经人工二次确认，直接用 writer 账号执行并落审计。
+          这是后台专属旁路（不进审批单）；红线「拒绝—重提」只约束 agent 的 execute。
+        """
+        cfg = self.config.get_connection(project, connection)
+        verdict = classify(sql, cfg.engine)
+        if verdict.readonly:
+            return {"kind": "read", **self.query(project, connection, sql, caller)}
+
+        if not confirm:
+            report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
+            report_dict = report.to_dict()
+            plan = self._try_explain(project, connection, cfg, sql)
+            if plan:
+                report_dict["explain"] = plan
+            return {"kind": "confirm", "risk": report_dict,
+                    "statement_kind": verdict.statement_kind}
+
+        rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
+        try:
+            engine = self.pool.get(project, connection, cfg, role="writer")
+            result = engines.run_write(engine, sql)
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+        rec.status = "ok"
+        rec.detail = "后台查询台直接执行（已二次确认）"
+        rec.row_count = result.row_count
+        rec.duration_ms = result.duration_ms
+        self.store.record(rec)
+        return {"kind": "write", "affected_rows": result.row_count,
+                "duration_ms": result.duration_ms}
+
+    def admin_export(
+        self, project: str, connection: str, sql: str, fmt: str, caller: CallerInfo
+    ) -> tuple[bytes, str, str]:
+        """导出只读查询结果为文件，返回 (字节, media_type, 扩展名)。仅限只读语句。"""
+        from .export import export_result
+
+        cfg = self.config.get_connection(project, connection)
+        if not classify(sql, cfg.engine).readonly:
+            raise QueryRejected("导出仅支持只读查询（SELECT/SHOW/...）的结果")
+        result = self.query(project, connection, sql, caller)
+        return export_result(result["columns"], result["rows"], fmt)
+
     # ---------- 写操作（拒绝—重提 + change_id 放行）----------
 
     def execute(

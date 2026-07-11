@@ -108,6 +108,83 @@ def test_index_redirects(client):
     assert "/admin/approvals" in resp.headers["location"]
 
 
+class TestSqlConsole:
+    """查询台：页面渲染 + 静态资源 + 元信息 + 读/写执行 + 导出。"""
+
+    def test_page_renders_with_connection_and_codemirror(self, client):
+        tc, _ = client
+        r = tc.get("/admin/sql")
+        assert r.status_code == 200
+        assert "查询台" in r.text
+        assert "demo/main" in r.text  # 连接下拉
+        assert "/admin/static/codemirror.min.js" in r.text
+
+    def test_static_asset_served(self, client):
+        tc, _ = client
+        r = tc.get("/admin/static/codemirror.min.js")
+        assert r.status_code == 200
+        assert "javascript" in r.headers["content-type"]
+        # 目录穿越防护
+        assert tc.get("/admin/static/..%2f..%2fconfig").status_code in (400, 404)
+
+    def test_tables_and_table_meta(self, client):
+        tc, _ = client
+        tbls = tc.get("/admin/sql/tables", params={"conn": "demo/main"}).json()
+        assert tbls["ok"] and "users" in tbls["tables"]
+        meta = tc.get("/admin/sql/table", params={"conn": "demo/main", "table": "users"}).json()
+        assert meta["ok"]
+        assert [c["name"] for c in meta["columns"]] == ["id", "name", "active"]
+
+    def test_run_read_returns_rows(self, client):
+        tc, _ = client
+        d = tc.post("/admin/sql/run",
+                    data={"conn": "demo/main", "sql": "SELECT id, name FROM users ORDER BY id"}).json()
+        assert d["ok"] and d["kind"] == "read"
+        assert d["columns"] == ["id", "name"]
+        assert len(d["rows"]) == 2
+
+    def test_run_write_confirm_flow(self, client):
+        tc, svc = client
+        # 未确认 → 风险报告，不执行
+        d1 = tc.post("/admin/sql/run",
+                     data={"conn": "demo/main", "sql": "DELETE FROM users WHERE id=1"}).json()
+        assert d1["ok"] and d1["kind"] == "confirm" and "risk" in d1
+        assert svc.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)["rows"][0][0] == 2
+        # 确认 → writer 直接执行
+        d2 = tc.post("/admin/sql/run",
+                     data={"conn": "demo/main", "sql": "DELETE FROM users WHERE id=1", "confirm": "1"}).json()
+        assert d2["ok"] and d2["kind"] == "write" and d2["affected_rows"] == 1
+        assert svc.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)["rows"][0][0] == 1
+
+    def test_format_endpoint(self, client):
+        tc, _ = client
+        d = tc.post("/admin/sql/format",
+                    data={"conn": "demo/main", "sql": "select 1 from users"}).json()
+        assert d["ok"] and "SELECT" in d["sql"]
+
+    def test_export_csv_download(self, client):
+        tc, _ = client
+        r = tc.post("/admin/sql/export",
+                    data={"conn": "demo/main", "sql": "SELECT id, name FROM users", "format": "csv"})
+        assert r.status_code == 200
+        assert "attachment" in r.headers["content-disposition"]
+        assert r.content.startswith(b"\xef\xbb\xbf")
+        assert b"id,name" in r.content
+
+    def test_export_rejects_write(self, client):
+        tc, _ = client
+        r = tc.post("/admin/sql/export",
+                    data={"conn": "demo/main", "sql": "DELETE FROM users", "format": "csv"})
+        assert r.status_code == 400
+        assert not r.json()["ok"]
+
+    def test_sql_routes_require_auth(self, client):
+        tc, _ = client
+        tc.get("/admin/logout")
+        for path in ("/admin/sql", "/admin/static/codemirror.min.js"):
+            assert tc.get(path, follow_redirects=False).status_code == 303
+
+
 class TestAuth:
     def _fresh_app(self, tmp_path):
         import sqlite3

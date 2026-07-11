@@ -77,7 +77,8 @@ def assess(sql: str, engine: str, meta_provider: MetaProvider) -> RiskReport:
     dialect = _DIALECTS.get(engine)
     try:
         statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
-    except sqlglot.errors.ParseError:
+    except sqlglot.errors.SqlglotError:
+        # 解析/分词均失败（含引号不闭合等 TokenizeError）→ 按最高风险处理
         return RiskReport(
             level="CRITICAL",
             statement_kind="Unparseable",

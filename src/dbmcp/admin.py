@@ -15,8 +15,10 @@ import hmac
 import html
 from collections.abc import Awaitable, Callable
 from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio.to_thread
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
@@ -218,6 +220,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
   <nav>
+   <a href="/admin/sql"><span class="dot"></span>查询台</a>
    <a href="/admin/approvals"><span class="dot"></span>审批中心{nav_badge}</a>
    <a href="/admin/audit"><span class="dot"></span>操作审计</a>
    <a href="/admin/connections"><span class="dot"></span>连接管理</a>
@@ -498,6 +501,282 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
   }});
 }})();
 </script>"""
+
+
+# 查询台页面：CodeMirror 编辑器 + 表结构侧栏 + 结果表格 + 导出 + 写确认弹窗。
+# 纯字符串模板（非 f-string，避免 JS 花括号转义）；仅两个占位符由服务端注入。
+_SQL_CONSOLE_TEMPLATE = r"""
+<link rel="stylesheet" href="/admin/static/codemirror.min.css">
+<link rel="stylesheet" href="/admin/static/show-hint.min.css">
+<style>
+ .sqltop{display:flex;gap:12px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+ .sqltop select{padding:8px 11px;min-width:280px}
+ .sqlgrid{display:grid;grid-template-columns:248px 1fr;gap:16px;align-items:start}
+ .schema{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 12px 14px;
+   max-height:74vh;overflow:auto;position:sticky;top:18px}
+ .schema .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+ .schema .hd b{font-size:12px;font-family:var(--mono);letter-spacing:.6px;text-transform:uppercase;color:var(--faint)}
+ .schema .hd a{font-size:12px;cursor:pointer}
+ .tbl-item{padding:5px 8px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12.5px;
+   color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .tbl-item:hover{background:var(--accent-soft);color:var(--accent-ink)}
+ .editor-wrap{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+ .editor-wrap .CodeMirror{height:280px;font-family:var(--mono);font-size:13px;line-height:1.5}
+ .toolbar{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:#fafbfc;
+   flex-wrap:wrap;align-items:center}
+ .toolbar .btn{padding:7px 13px;font-size:13px}
+ .toolbar .hint{margin-left:auto;font-size:12px;color:var(--faint);font-family:var(--mono)}
+ .results{margin-top:18px}
+ .res-meta{font-size:13px;color:var(--muted);margin-bottom:9px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+ .export-bar{display:flex;gap:6px;margin-left:auto}
+ .export-bar .btn{padding:5px 11px;font-size:12.5px}
+ .rt-wrap{overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:10px}
+ table.rt{border-collapse:collapse;font-size:12.5px;width:max-content;min-width:100%}
+ table.rt th,table.rt td{border:1px solid var(--line);padding:6px 11px;white-space:nowrap;
+   max-width:440px;overflow:hidden;text-overflow:ellipsis;vertical-align:top}
+ table.rt th{position:sticky;top:0;background:#f4f5f7;font-family:var(--mono);font-size:11px;
+   letter-spacing:.4px;color:var(--faint);z-index:1}
+ table.rt tbody tr:nth-child(even){background:#fafbfc}
+ .cell-null{color:var(--faint);font-style:italic}
+ .okbox{background:#f0fdf4;border:1px solid #86efac;color:#166534;padding:12px 15px;border-radius:10px;font-size:14px}
+ .modal-bg{position:fixed;inset:0;background:rgba(15,20,27,.55);display:none;align-items:center;
+   justify-content:center;z-index:60;padding:20px}
+ .modal-bg .modal{background:#fff;border-radius:14px;padding:24px 26px;max-width:600px;width:100%;
+   max-height:88vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+ .modal .kv{grid-template-columns:auto 1fr}
+ #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;
+   padding:10px 18px;border-radius:9px;font-size:13.5px;z-index:80;display:none;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+</style>
+<div class="sqltop">
+ <select id="conn"><option value="">选择连接…</option>__CONN_OPTIONS__</select>
+ <span class="muted">选连接 → 写 SQL → Ctrl/⌘+Enter 运行。写操作会弹二次确认。</span>
+</div>
+<input type="hidden" id="sel-conn" value="__SEL_CONN__">
+<div class="sqlgrid">
+ <aside class="schema">
+  <div class="hd"><b>表</b><a id="reload-tables">刷新</a></div>
+  <div id="schema-body"><div class="muted">先选择连接</div></div>
+ </aside>
+ <div>
+  <div class="editor-wrap">
+   <textarea id="sql" placeholder="SELECT ..."></textarea>
+   <div class="toolbar">
+    <button class="btn btn-primary" id="btn-run">运行 ▸</button>
+    <button class="btn btn-ghost" id="btn-format">格式化</button>
+    <button class="btn btn-ghost" id="btn-save">保存 .sql</button>
+    <button class="btn btn-ghost" id="btn-clear">清空</button>
+    <span class="hint">Ctrl/⌘+Enter 运行 · Ctrl+Space 补全</span>
+   </div>
+  </div>
+  <div class="results" id="results"></div>
+ </div>
+</div>
+<div class="modal-bg" id="modal"><div class="modal"></div></div>
+<div id="toast"></div>
+<script src="/admin/static/codemirror.min.js"></script>
+<script src="/admin/static/sql.min.js"></script>
+<script src="/admin/static/matchbrackets.min.js"></script>
+<script src="/admin/static/show-hint.min.js"></script>
+<script src="/admin/static/sql-hint.min.js"></script>
+<script>
+(function(){
+  var CM = window.CodeMirror;
+  var editor = CM.fromTextArea(document.getElementById('sql'), {
+    mode:'text/x-sql', lineNumbers:true, matchBrackets:true, lineWrapping:true,
+    extraKeys:{'Ctrl-Enter':function(){run(false);}, 'Cmd-Enter':function(){run(false);},
+               'Ctrl-Space':'autocomplete'}
+  });
+  var connEl = document.getElementById('conn');
+  var resultsEl = document.getElementById('results');
+  var modal = document.getElementById('modal');
+  var toastT;
+
+  function conn(){ return connEl.value; }
+  function engine(){ var o=connEl.selectedOptions[0]; return o?(o.getAttribute('data-engine')||''):''; }
+  function sqlText(){ return editor.getValue(); }
+  function esc(s){ var d=document.createElement('div'); d.textContent=(s==null?'':String(s)); return d.innerHTML; }
+  function toast(m){ var t=document.getElementById('toast'); t.textContent=m; t.style.display='block';
+    clearTimeout(toastT); toastT=setTimeout(function(){t.style.display='none';},2600); }
+  function openModal(h){ modal.querySelector('.modal').innerHTML=h; modal.style.display='flex'; }
+  function closeModal(){ modal.style.display='none'; }
+  modal.addEventListener('click',function(e){ if(e.target===modal) closeModal(); });
+
+  function form(extra){ var fd=new FormData(); fd.append('conn',conn()); fd.append('sql',sqlText());
+    if(extra) for(var k in extra) fd.append(k,extra[k]); return fd; }
+
+  // ---- 运行 ----
+  function run(confirm){
+    if(!conn()){ toast('请先选择连接'); return; }
+    if(!sqlText().trim()){ toast('请输入 SQL'); return; }
+    var btn=document.getElementById('btn-run'); btn.disabled=true;
+    resultsEl.innerHTML='<div class="muted">执行中…</div>';
+    fetch('/admin/sql/run',{method:'POST',headers:{'Accept':'application/json'},
+      body:form(confirm?{confirm:'1'}:null)})
+      .then(function(r){return r.json();})
+      .then(function(d){ btn.disabled=false;
+        if(!d.ok){ showError(d.error); return; }
+        if(d.kind==='read') renderRead(d);
+        else if(d.kind==='confirm') showConfirm(d.risk, d.statement_kind);
+        else if(d.kind==='write') renderWrite(d);
+      }).catch(function(e){ btn.disabled=false; showError(''+e); });
+  }
+  function showError(msg){ resultsEl.innerHTML='<div class="errbar">⚠ '+esc(msg)+'</div>'; }
+
+  function cellHtml(v){
+    if(v===null||v===undefined) return '<span class="cell-null">NULL</span>';
+    if(typeof v==='object'){ if('__bytes_base64__' in v) return esc('base64:'+v.__bytes_base64__);
+      return esc(JSON.stringify(v)); }
+    return esc(v);
+  }
+  function renderRead(d){
+    var cols=d.columns||[], rows=d.rows||[];
+    var meta='<span><b>'+rows.length+'</b> 行</span>'
+      +(d.duration_ms!=null?'<span>'+d.duration_ms+' ms</span>':'')
+      +(d.truncated?'<span style="color:#b45309">已截断到 max_rows，导出/查看更多请加 LIMIT/OFFSET</span>':'');
+    var exp='';
+    if(cols.length){ exp='<div class="export-bar">'
+      +['csv','json','markdown','xlsx'].map(function(f){
+        return '<button class="btn btn-ghost" data-exp="'+f+'">'+(f==='markdown'?'MD':f.toUpperCase())+'</button>';
+      }).join('')+'</div>'; }
+    if(!cols.length){ resultsEl.innerHTML='<div class="okbox">语句已执行，无结果集。</div>'; return; }
+    var thead='<tr>'+cols.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr>';
+    var tbody=rows.map(function(row){
+      return '<tr>'+row.map(function(v){return '<td title="'+esc(typeof v==='object'&&v?JSON.stringify(v):v)+'">'+cellHtml(v)+'</td>';}).join('')+'</tr>';
+    }).join('') || '<tr><td colspan="'+cols.length+'" class="muted">（空）</td></tr>';
+    resultsEl.innerHTML='<div class="res-meta">'+meta+exp+'</div>'
+      +'<div class="rt-wrap"><table class="rt"><thead>'+thead+'</thead><tbody>'+tbody+'</tbody></table></div>';
+    resultsEl.querySelectorAll('[data-exp]').forEach(function(b){
+      b.addEventListener('click',function(){ exportAs(b.getAttribute('data-exp')); }); });
+  }
+  function renderWrite(d){
+    resultsEl.innerHTML='<div class="okbox">✓ 执行成功，影响 <b>'+d.affected_rows+'</b> 行 · 耗时 '+d.duration_ms+' ms</div>';
+    if(conn()) loadTables();
+  }
+
+  // ---- 写操作二次确认 ----
+  function showConfirm(risk, kind){
+    risk=risk||{};
+    resultsEl.innerHTML='';  // 清掉“执行中…”占位，避免取消/脱靶后残留
+    function b(v){ return v===true?'<span class="pill pill-yes">是</span>':v===false?'<span class="pill pill-no">否</span>':'<span class="pill pill-na">未知</span>'; }
+    function n(v){ return v==null?'<span class="muted">未知</span>':('约 '+v); }
+    var tables=(risk.tables||[]).map(function(t){return '<span class="tag">'+esc(t)+'</span>';}).join('')||'<span class="muted">—</span>';
+    var reasons=(risk.reasons||[]).map(function(r){return '<li>'+esc(r)+'</li>';}).join('');
+    var warns=(risk.warnings||[]).map(function(w){return '<li>⚠️ '+esc(w)+'</li>';}).join('');
+    var level=risk.level||'?';
+    var color={CRITICAL:'#b00020',HIGH:'#e65100',MEDIUM:'#f9a825',LOW:'#2e7d32'}[level]||'#666';
+    var explain=risk.explain?'<div class="sec-title">执行计划</div><pre>'+esc(risk.explain)+'</pre>':'';
+    openModal(
+      '<h3 style="margin-top:0">确认执行写操作 <span class="badge" style="background:'+color+'">'+esc(level)+'</span> <span class="tag">'+esc(kind||'')+'</span></h3>'
+      +'<p class="muted">该操作将用 writer 账号<b>直接执行</b>并记入审计（后台旁路，不进审批单）。请确认影响范围：</p>'
+      +'<dl class="kv"><dt>影响表</dt><dd>'+tables+'</dd>'
+      +'<dt>表行数量级</dt><dd>'+n(risk.row_estimate)+'</dd>'
+      +'<dt>预估影响行数</dt><dd>'+(risk.affected_estimate==null?'<span class="muted">未知（取决于运行时数据）</span>':('约 '+risk.affected_estimate))+'</dd>'
+      +'<dt>含 WHERE</dt><dd>'+b(risk.has_where)+'</dd><dt>命中索引</dt><dd>'+b(risk.uses_index)+'</dd></dl>'
+      +(reasons?'<div class="sec-title">判定依据</div><ul>'+reasons+'</ul>':'')
+      +(warns?'<div class="sec-title">告警</div><ul>'+warns+'</ul>':'')
+      +explain
+      +'<div style="margin-top:18px;display:flex;gap:10px;justify-content:flex-end">'
+      +'<button class="btn btn-ghost" id="cf-no">取消</button>'
+      +'<button class="btn btn-reject" id="cf-yes">确认执行</button></div>'
+    );
+    document.getElementById('cf-no').onclick=closeModal;
+    document.getElementById('cf-yes').onclick=function(){ closeModal(); run(true); };
+  }
+
+  // ---- 导出 ----
+  function download(blob,name){ var u=URL.createObjectURL(blob); var a=document.createElement('a');
+    a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){URL.revokeObjectURL(u);},1500); }
+  function exportAs(fmt){
+    var fd=form({format:fmt});
+    fetch('/admin/sql/export',{method:'POST',body:fd}).then(function(r){
+      if(!r.ok) return r.json().then(function(d){throw new Error(d.error||'导出失败');});
+      var dispo=r.headers.get('Content-Disposition')||''; var m=/filename="?([^"]+)"?/.exec(dispo);
+      var name=m?m[1]:('export.'+fmt);
+      return r.blob().then(function(bl){ download(bl,name); toast('已导出 '+name); });
+    }).catch(function(e){ toast(''+(e.message||e)); });
+  }
+
+  // ---- 格式化 / 保存 / 清空 ----
+  document.getElementById('btn-run').onclick=function(){ run(false); };
+  document.getElementById('btn-format').onclick=function(){
+    fetch('/admin/sql/format',{method:'POST',headers:{'Accept':'application/json'},body:form()})
+      .then(function(r){return r.json();}).then(function(d){ if(d.ok&&d.sql!=null) editor.setValue(d.sql); });
+  };
+  document.getElementById('btn-save').onclick=function(){
+    var name=prompt('保存为文件名','query.sql'); if(!name) return;
+    if(!/\.sql$/i.test(name)) name+='.sql';
+    download(new Blob([sqlText()],{type:'application/sql'}), name);
+  };
+  document.getElementById('btn-clear').onclick=function(){ editor.setValue(''); resultsEl.innerHTML=''; };
+
+  // ---- 表结构侧栏 ----
+  function loadTables(){
+    var box=document.getElementById('schema-body');
+    if(!conn()){ box.innerHTML='<div class="muted">先选择连接</div>'; return; }
+    box.innerHTML='<div class="muted">加载中…</div>';
+    fetch('/admin/sql/tables?conn='+encodeURIComponent(conn())).then(function(r){return r.json();})
+      .then(function(d){
+        if(!d.ok){ box.innerHTML='<div class="muted">'+esc(d.error)+'</div>'; return; }
+        if(!d.tables.length){ box.innerHTML='<div class="muted">（无表）</div>'; return; }
+        box.innerHTML='';
+        d.tables.forEach(function(t){
+          var el=document.createElement('div'); el.className='tbl-item'; el.textContent=t;
+          el.title='点击查看结构'; el.onclick=function(){ showTable(t); }; box.appendChild(el);
+        });
+        try{ editor.setOption('hintOptions',{tables:d.tables.reduce(function(a,t){a[t]=[];return a;},{})}); }catch(e){}
+      }).catch(function(){ box.innerHTML='<div class="muted">加载失败</div>'; });
+  }
+  function showTable(t){
+    fetch('/admin/sql/table?conn='+encodeURIComponent(conn())+'&table='+encodeURIComponent(t))
+      .then(function(r){return r.json();}).then(function(d){
+        if(!d.ok){ toast(d.error); return; }
+        var cols=(d.columns||[]).map(function(c){
+          return '<tr><td class="mono">'+esc(c.name)+'</td><td class="mono muted">'+esc(c.type)+'</td>'
+            +'<td>'+(c.nullable?'<span class="muted">可空</span>':'NOT NULL')+'</td>'
+            +'<td class="muted">'+esc(c.comment||'')+'</td></tr>'; }).join('');
+        var pk=(d.primary_key||[]).join(', ')||'—';
+        var idx=(d.indexes||[]).map(function(i){return esc(i.name)+' ('+((i.columns||[]).join(', '))+')'+(i.unique?' · UNIQUE':'');}).join('<br>')||'—';
+        openModal('<h3 style="margin-top:0">'+esc(t)+'</h3>'
+          +'<div class="tablewrap"><table><tr><th>列</th><th>类型</th><th>可空</th><th>注释</th></tr>'+cols+'</table></div>'
+          +'<div class="sec-title">主键</div><div class="mono">'+esc(pk)+'</div>'
+          +'<div class="sec-title">索引</div><div class="mono" style="line-height:1.7">'+idx+'</div>'
+          +'<div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">'
+          +'<button class="btn btn-primary" id="mi-sel">SELECT * → 编辑器</button>'
+          +'<button class="btn btn-ghost" id="mi-name">插入表名</button>'
+          +'<button class="btn btn-ghost" id="mi-close">关闭</button></div>');
+        document.getElementById('mi-sel').onclick=function(){ editor.replaceSelection('SELECT * FROM '+t+' LIMIT 100;'); editor.focus(); closeModal(); };
+        document.getElementById('mi-name').onclick=function(){ editor.replaceSelection(t); editor.focus(); closeModal(); };
+        document.getElementById('mi-close').onclick=closeModal;
+      }).catch(function(e){ toast(''+e); });
+  }
+  document.getElementById('reload-tables').onclick=loadTables;
+
+  // ---- 连接切换：记住选择、刷新表列表 ----
+  connEl.addEventListener('change',function(){
+    try{ localStorage.setItem('dbm-sql-conn',conn()); }catch(e){}
+    resultsEl.innerHTML=''; loadTables();
+  });
+  var initSel=document.getElementById('sel-conn').value;
+  if(!initSel){ try{ initSel=localStorage.getItem('dbm-sql-conn')||''; }catch(e){} }
+  if(initSel && [].some.call(connEl.options,function(o){return o.value===initSel;})){ connEl.value=initSel; }
+  if(conn()) loadTables();
+})();
+</script>
+"""
+
+
+def _conn_options(service: "DbmService", sel: str) -> str:
+    """按项目分组的连接下拉 <optgroup>，option 带 data-engine 供前端取方言。"""
+    groups = []
+    for pname, proj in sorted(service.config.projects.items()):
+        inner = "".join(
+            f"<option value='{_esc(pname)}/{_esc(cname)}' data-engine='{_esc(c.engine)}'"
+            f"{' selected' if f'{pname}/{cname}' == sel else ''}>{_esc(cname)} · {_esc(c.engine)}</option>"
+            for cname, c in sorted(proj.connections.items())
+        )
+        groups.append(f"<optgroup label='{_esc(pname)}'>{inner}</optgroup>")
+    return "".join(groups)
 
 
 def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None:
@@ -940,3 +1219,114 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         res = service.probe_ssh_fields(_form_fields(f))
         return JSONResponse({"ok": res.ok, "message": res.message})
+
+    # ---------- 查询台（DataGrip 风格：元信息浏览 + SQL 执行 + 导出）----------
+
+    def _resolve_conn(raw: str) -> tuple[str, str]:
+        """解析 "project/connection"，校验存在，返回 (project, connection)。"""
+        if not raw or "/" not in raw:
+            raise KeyError("请选择连接")
+        project, connection = raw.split("/", 1)
+        service.config.get_connection(project, connection)  # 不存在会抛
+        return project, connection
+
+    _STATIC_DIR = Path(__file__).parent / "static"
+    _STATIC_CT = {"js": "application/javascript; charset=utf-8", "css": "text/css; charset=utf-8"}
+
+    @mcp.custom_route("/admin/static/{name}", methods=["GET"])
+    @guard
+    async def _static(req: Request) -> Response:
+        name = req.path_params["name"]
+        path = _STATIC_DIR / name
+        if "/" in name or ".." in name or not path.is_file():
+            return Response("not found", status_code=404)
+        ct = _STATIC_CT.get(name.rsplit(".", 1)[-1], "application/octet-stream")
+        return Response(path.read_bytes(), media_type=ct,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+    @mcp.custom_route("/admin/sql", methods=["GET"])
+    @guard
+    async def _sql_console(req: Request) -> HTMLResponse:
+        sel = req.query_params.get("conn", "")
+        body = (_SQL_CONSOLE_TEMPLATE
+                .replace("__CONN_OPTIONS__", _conn_options(service, sel))
+                .replace("__SEL_CONN__", _esc(sel)))
+        return _shell("查询台", _pagehead("SQL Console", "查询台",
+                      "浏览表结构、执行 SQL、导出结果；写操作需二次确认后由 writer 直接执行") + body)
+
+    @mcp.custom_route("/admin/sql/tables", methods=["GET"])
+    @guard
+    async def _sql_tables(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            tables = await anyio.to_thread.run_sync(
+                service.list_tables, project, connection, _caller(req))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "tables": tables})
+
+    @mcp.custom_route("/admin/sql/table", methods=["GET"])
+    @guard
+    async def _sql_table(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            table = req.query_params.get("table", "")
+            info = await anyio.to_thread.run_sync(
+                service.describe_table, project, connection, table, _caller(req))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **info})
+
+    @mcp.custom_route("/admin/sql/run", methods=["POST"])
+    @guard
+    async def _sql_run(req: Request) -> JSONResponse:
+        from .service import QueryRejected
+        f = await req.form()
+        sql = str(f.get("sql") or "")
+        confirm = str(f.get("confirm") or "") in ("1", "on", "true")
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            result = await anyio.to_thread.run_sync(
+                service.admin_run_sql, project, connection, sql, _caller(req), confirm)
+        except (QueryRejected, KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, **result})
+
+    @mcp.custom_route("/admin/sql/format", methods=["POST"])
+    @guard
+    async def _sql_format(req: Request) -> JSONResponse:
+        f = await req.form()
+        sql = str(f.get("sql") or "")
+        engine = ""
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            engine = service.config.get_connection(project, connection).engine
+        except Exception:
+            pass
+        return JSONResponse({"ok": True, "sql": _format_sql(sql, engine)})
+
+    @mcp.custom_route("/admin/sql/export", methods=["POST"])
+    @guard
+    async def _sql_export(req: Request) -> Response:
+        from .export import ExportError
+        from .service import QueryRejected
+        f = await req.form()
+        sql = str(f.get("sql") or "")
+        fmt = str(f.get("format") or "csv")
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            data, media_type, ext = await anyio.to_thread.run_sync(
+                service.admin_export, project, connection, sql, fmt, _caller(req))
+        except (QueryRejected, KeyError, ValueError, ExportError) as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
+        import re
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        slug = re.sub(r"[^A-Za-z0-9_.-]", "-", f"{project}-{connection}")
+        fname = f"{slug}-{stamp}.{ext}"
+        return Response(data, media_type=media_type,
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
