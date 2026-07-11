@@ -580,6 +580,17 @@ class DbmService:
         return self._audited(project, connection, cfg, "describe_table", detail, caller,
                              lambda: engines.describe_table(engine, table, schema))
 
+    def get_table_ddl(
+        self, project: str, connection: str, table: str, caller: CallerInfo,
+        schema: str | None = None,
+    ) -> str:
+        """取建表语句（查询台「查看 DDL」）。"""
+        cfg = self.config.get_connection(project, connection)
+        engine = self.pool.get(project, connection, cfg)
+        detail = f"{schema}.{table}" if schema else table
+        return self._audited(project, connection, cfg, "table_ddl", detail, caller,
+                             lambda: engines.get_table_ddl(engine, cfg.engine, table, schema))
+
     def sample_rows(self, project: str, connection: str, table: str, limit: int, caller: CallerInfo) -> dict:
         cfg = self.config.get_connection(project, connection)
         limit = min(limit, cfg.policy.max_rows)

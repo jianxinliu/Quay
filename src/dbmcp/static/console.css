@@ -49,6 +49,13 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-item .mini { margin-left: auto; opacity: 0; color: var(--dg-muted); font-size: 11px; }
 .dg-item:hover .mini { opacity: 1; }
 .dg-item .mini:hover { color: var(--dg-accent); }
+.dg-item.sel { background: var(--dg-accent-soft); }
+.dg-item.sel .nm { color: #d7e3ff; }
+.dg-item .cnt { margin-left: auto; color: var(--dg-faint); font-size: 10.5px; padding-right: 4px; }
+.dg-item .ic.fold { color: #8a95d8; }
+.dg-sec-hd .selinfo { color: var(--dg-amber); font-size: 10.5px; margin-left: auto; margin-right: 8px; }
+.dg-sec-hd .selinfo a { color: var(--dg-muted); cursor: pointer; margin-left: 4px; }
+.dg-sec-hd .selinfo a:hover { color: var(--dg-text); }
 .dg-cols { background: var(--dg-panel-2); }
 .dg-col { display: flex; gap: 8px; padding: 3px 12px 3px 34px; font-family: var(--dg-mono); font-size: 11.5px; }
 .dg-col .cn { color: var(--dg-text); }
@@ -118,6 +125,21 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-tab .x { color: var(--dg-faint); font-size: 13px; }
 .dg-tab .x:hover { color: var(--dg-red); }
 .dg-tab .dot { color: var(--dg-amber); }
+.dg-tab .ticon { color: #8a95d8; font-size: 11px; }
+/* 批量 DROP 二次确认条（红，内联非弹框） */
+.dg-drop { background: #3a2224; border-bottom: 1px solid #7c3a3a; padding: 10px 14px; flex: none; }
+.dg-drop .hd { font-size: 13px; color: #f1b8b4; margin-bottom: 6px; }
+.dg-drop .list { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.dg-drop .list code { background: #4a2b2d; color: #ffd9d6; border: 1px solid #7c3a3a; border-radius: 5px;
+  padding: 2px 8px; font-size: 12px; font-family: var(--dg-mono); }
+.dg-drop .res { font-family: var(--dg-mono); font-size: 12px; margin-bottom: 8px; }
+.dg-drop .res .okline { color: var(--dg-green); }
+.dg-drop .res .errline { color: var(--dg-red); }
+.dg-drop .acts { display: flex; gap: 8px; }
+.dg-btn.danger { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
+.dg-ctx .sep { height: 1px; background: var(--dg-border); margin: 4px 6px; }
+.dg-ctx button.danger { color: #ff8a80; }
+.dg-ctx button.danger:hover { background: #4a2b2d; }
 .dg-tab-add { padding: 7px 12px; cursor: pointer; color: var(--dg-muted); background: none; border: none; font-size: 15px; }
 .dg-tab-add:hover { color: var(--dg-text); }
 

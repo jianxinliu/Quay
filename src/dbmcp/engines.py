@@ -422,6 +422,51 @@ def describe_table(engine: SAEngine, table: str, schema: str | None = None) -> d
             "primary_key": pk.get("constrained_columns", [])}
 
 
+def get_table_ddl(engine: SAEngine, engine_kind: str, table: str, schema: str | None = None) -> str:
+    """取建表语句。MySQL/SQLite 取服务器原文；PG 无内建语句，反射拼近似 DDL。
+
+    表名先经存在性校验，再用方言引用符包裹，杜绝注入。
+    """
+    insp = inspect(engine)
+    _ensure_table_exists(insp, table, schema)
+    preparer = engine.dialect.identifier_preparer
+
+    if engine_kind == "mysql":
+        q = (preparer.quote(schema) + "." if schema else "") + preparer.quote(table)
+        with engine.connect() as conn:
+            row = conn.execute(text(f"SHOW CREATE TABLE {q}")).fetchone()
+        return str(row[1]) if row and len(row) > 1 else ""
+
+    if engine_kind == "sqlite":
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT sql FROM sqlite_master WHERE tbl_name = :t AND sql IS NOT NULL"),
+                {"t": table},
+            ).fetchall()
+        return ";\n\n".join(str(r[0]) for r in rows)
+
+    # PG 等：无 SHOW CREATE TABLE，由反射信息生成近似 DDL（注释标明非服务器原文）
+    info = describe_table(engine, table, schema)
+    body = []
+    for c in info["columns"]:
+        line = f"  {c['name']} {c['type']}"
+        if not c.get("nullable", True):
+            line += " NOT NULL"
+        if c.get("default") is not None:
+            line += f" DEFAULT {c['default']}"
+        body.append(line)
+    if info.get("primary_key"):
+        body.append("  PRIMARY KEY (" + ", ".join(info["primary_key"]) + ")")
+    qname = f"{schema}.{table}" if schema else table
+    out = ["-- 由表结构反射生成的近似 DDL（该引擎无 SHOW CREATE TABLE）",
+           f"CREATE TABLE {qname} (", ",\n".join(body), ");"]
+    for i in info.get("indexes", []):
+        uniq = "UNIQUE " if i.get("unique") else ""
+        cols = ", ".join(i.get("columns") or [])
+        out.append(f"CREATE {uniq}INDEX {i['name']} ON {qname} ({cols});")
+    return "\n".join(out)
+
+
 def sample_rows(
     engine: SAEngine, table: str, limit: int, max_cell_chars: int = 4096
 ) -> QueryResult:

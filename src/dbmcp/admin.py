@@ -1092,6 +1092,19 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
 
+    @mcp.custom_route("/admin/sql/ddl", methods=["GET"])
+    @guard
+    async def _sql_ddl(req: Request) -> JSONResponse:
+        schema = req.query_params.get("schema") or None
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            table = req.query_params.get("table", "")
+            ddl = await anyio.to_thread.run_sync(
+                service.get_table_ddl, project, connection, table, _caller(req), schema)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "ddl": ddl})
+
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard
     async def _sql_run(req: Request) -> JSONResponse:

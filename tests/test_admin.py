@@ -143,6 +143,16 @@ class TestSqlConsole:
         d = tc.get("/admin/sql/databases", params={"conn": "demo/main"}).json()
         assert d["ok"] and d["databases"] == []
 
+    def test_ddl_endpoint(self, client):
+        tc, _ = client
+        d = tc.get("/admin/sql/ddl", params={"conn": "demo/main", "table": "users"}).json()
+        assert d["ok"] and "CREATE TABLE" in d["ddl"] and "users" in d["ddl"]
+
+    def test_ddl_missing_table(self, client):
+        tc, _ = client
+        d = tc.get("/admin/sql/ddl", params={"conn": "demo/main", "table": "nope"}).json()
+        assert not d["ok"] and "不存在" in d["error"]
+
     def test_tables_and_table_meta(self, client):
         tc, _ = client
         tbls = tc.get("/admin/sql/tables", params={"conn": "demo/main"}).json()
