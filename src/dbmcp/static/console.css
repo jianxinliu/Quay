@@ -377,3 +377,11 @@ table.dg-rt td.editable { cursor: cell; }
   border: 1px solid var(--dg-border); padding: 9px 16px; border-radius: 8px; font-size: 13px; z-index: 90;
   box-shadow: 0 8px 26px rgba(0,0,0,.5);
 }
+
+/* 导入到分析工作区的内联条输入 */
+.dg-imp-in {
+  background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-border);
+  border-radius: 5px; padding: 4px 8px; font-size: 12px; font-family: var(--dg-mono);
+  margin-left: 4px;
+}
+.dg-imp-in:focus { outline: none; border-color: var(--dg-accent); }

@@ -1017,6 +1017,10 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
 
     # ---------- 查询台（DataGrip 风格：元信息浏览 + SQL 执行 + 导出）----------
 
+    def _analysis_ws(raw: str) -> str | None:
+        """conn 形如 "analysis/<workspace>" 时返回工作区名（查询台把工作区当连接用）。"""
+        return raw.split("/", 1)[1] if raw.startswith("analysis/") else None
+
     def _resolve_conn(raw: str) -> tuple[str, str]:
         """解析 "project/connection"，校验存在，返回 (project, connection)。"""
         if not raw or "/" not in raw:
@@ -1066,7 +1070,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                     "engine": c.engine, "environment": c.environment or "",
                     "database": c.database or "",
                 })
-        return JSONResponse({"ok": True, "connections": conns})
+        workspaces = []
+        if service.analysis is not None:
+            try:
+                workspaces = [w["workspace"] for w in service.analysis.list_workspaces()]
+            except Exception:
+                workspaces = []
+        return JSONResponse({"ok": True, "connections": conns, "workspaces": workspaces})
 
     @mcp.custom_route("/admin/sql/databases", methods=["GET"])
     @guard
@@ -1083,6 +1093,15 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @guard
     async def _sql_tables(req: Request) -> JSONResponse:
         schema = req.query_params.get("schema") or None
+        ws = _analysis_ws(req.query_params.get("conn", ""))
+        if ws:
+            try:
+                datasets = await anyio.to_thread.run_sync(service.analysis.list_datasets, ws)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)})
+            return JSONResponse({"ok": True,
+                                 "tables": [d["name"] for d in datasets],
+                                 "sizes": {}})
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             tables = await anyio.to_thread.run_sync(
@@ -1100,6 +1119,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @guard
     async def _sql_table(req: Request) -> JSONResponse:
         schema = req.query_params.get("schema") or None
+        ws = _analysis_ws(req.query_params.get("conn", ""))
+        if ws:
+            try:
+                info = await anyio.to_thread.run_sync(
+                    service.analysis.describe_dataset, ws, req.query_params.get("table", ""))
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)})
+            return JSONResponse({"ok": True, **info})
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             table = req.query_params.get("table", "")
@@ -1109,10 +1136,35 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
 
+    @mcp.custom_route("/admin/analysis/import", methods=["POST"])
+    @guard
+    async def _analysis_import(req: Request) -> JSONResponse:
+        from .service import QueryRejected
+        f = await req.form()
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            limit_raw = str(f.get("limit") or "").strip()
+            out = await anyio.to_thread.run_sync(
+                service.analysis_import,
+                str(f.get("workspace") or ""), str(f.get("dataset") or ""),
+                project, connection, str(f.get("sql") or ""), _caller(req),
+                int(limit_raw) if limit_raw else None,
+                str(f.get("schema") or "").strip() or None)
+        except (QueryRejected, KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        return JSONResponse({"ok": True, **out})
+
     @mcp.custom_route("/admin/sql/history", methods=["GET"])
     @guard
     async def _sql_history(req: Request) -> JSONResponse:
         try:
+            ws = _analysis_ws(req.query_params.get("conn", ""))
+            if ws:
+                items = await anyio.to_thread.run_sync(
+                    service.admin_query_history, "analysis", ws)
+                return JSONResponse({"ok": True, "items": items})
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             items = await anyio.to_thread.run_sync(
                 service.admin_query_history, project, connection)
@@ -1141,6 +1193,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @guard
     async def _sql_ddl(req: Request) -> JSONResponse:
         schema = req.query_params.get("schema") or None
+        ws = _analysis_ws(req.query_params.get("conn", ""))
+        if ws:
+            try:
+                ddl = await anyio.to_thread.run_sync(
+                    service.analysis.get_ddl, ws, req.query_params.get("table", ""))
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)})
+            return JSONResponse({"ok": True, "ddl": ddl})
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             table = req.query_params.get("table", "")
@@ -1179,6 +1239,26 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             page = 0
         schema = str(f.get("schema") or "").strip() or None
         caller = _caller(req)
+        ws = _analysis_ws(str(f.get("conn") or ""))
+        if ws:
+            # 分析工作区：沙箱内任意 SQL 自由执行（不需确认流），同样走异步 job
+            _jobs_gc()
+            job_id = _uuid.uuid4().hex[:12]
+            with _jobs_lock:
+                _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
+
+            def _work_ws() -> None:
+                try:
+                    out = service.analysis_sql(ws, sql, caller)
+                    with _jobs_lock:
+                        _jobs[job_id].update(status="done", ts=_time.time(),
+                                             result={"kind": "read", "paginated": False, **out})
+                except Exception as e:  # noqa: BLE001
+                    with _jobs_lock:
+                        _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
+
+            _threading.Thread(target=_work_ws, name="dbm-adminjob", daemon=True).start()
+            return JSONResponse({"ok": True, "job_id": job_id})
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
         except Exception as e:
@@ -1235,6 +1315,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except ValueError:
             page = 0
         schema = str(f.get("schema") or "").strip() or None
+        ws = _analysis_ws(str(f.get("conn") or ""))
+        if ws:
+            try:
+                out = await anyio.to_thread.run_sync(
+                    service.analysis_sql, ws, sql, _caller(req))
+            except Exception as e:  # noqa: BLE001
+                return JSONResponse({"ok": False, "error": str(e)})
+            # 沙箱 DDL/DML 无结果集时按 write 形态返回（批量 DROP 等复用前端逻辑）
+            if not out["columns"]:
+                return JSONResponse({"ok": True, "kind": "write", "affected_rows": 0,
+                                     "duration_ms": 0})
+            return JSONResponse({"ok": True, "kind": "read", "paginated": False, **out})
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             result = await anyio.to_thread.run_sync(
@@ -1268,10 +1360,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         sql = str(f.get("sql") or "")
         fmt = str(f.get("format") or "csv")
         schema = str(f.get("schema") or "").strip() or None
+        ws = _analysis_ws(str(f.get("conn") or ""))
         try:
-            project, connection = _resolve_conn(str(f.get("conn") or ""))
-            data, media_type, ext = await anyio.to_thread.run_sync(
-                service.admin_export, project, connection, sql, fmt, _caller(req), schema)
+            if ws:
+                from .export import export_result
+                out = await anyio.to_thread.run_sync(
+                    service.analysis_sql, ws, sql, _caller(req), 100_000)
+                data, media_type, ext = export_result(out["columns"], out["rows"], fmt)
+                project, connection = "analysis", ws
+            else:
+                project, connection = _resolve_conn(str(f.get("conn") or ""))
+                data, media_type, ext = await anyio.to_thread.run_sync(
+                    service.admin_export, project, connection, sql, fmt, _caller(req), schema)
         except (QueryRejected, KeyError, ValueError, ExportError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:

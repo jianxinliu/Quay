@@ -65,6 +65,7 @@ class DbmService:
         self.metadata = metadata
         self.config_path = config_path
         self.snippets = snippets
+        self.analysis = None  # AnalysisStore（serve 时注入；未启用则分析功能不可用）
         self._housekeeping_stop: threading.Event | None = None
 
     # ---------- 元信息 ----------
@@ -303,6 +304,93 @@ class DbmService:
             return {"format": fmt, "columns": res.columns, "rows": res.rows}
 
         return self._audited(project, connection, cfg, "explain", stmt, caller, _run)
+
+    # ---------- 分析工作台（DuckDB 沙箱，设计见 ANALYSIS.md）----------
+    # 边界：工作区内任意 SQL 自由执行（本地草稿纸，不需审批）；
+    # 从源库取数走 _read（reader 只读 + 审计 + 行数上限），生产红线不动。
+
+    def _require_analysis(self):
+        if self.analysis is None:
+            raise QueryRejected("分析工作台未启用（需 serve 模式运行）")
+        return self.analysis
+
+    def _analysis_record(self, workspace: str, tool: str, sql: str, caller: CallerInfo) -> AuditRecord:
+        return AuditRecord(project="analysis", connection=workspace, tool=tool, status="",
+                           agent=caller.agent, session_id=caller.session_id,
+                           environment="local", engine="duckdb", sql=sql)
+
+    def analysis_overview(self) -> list[dict]:
+        """工作区列表（含数据集摘要）。"""
+        store = self._require_analysis()
+        out = []
+        for ws in store.list_workspaces():
+            try:
+                ws["datasets"] = store.list_datasets(ws["workspace"])
+            except Exception:
+                ws["datasets"] = []
+            out.append(ws)
+        return out
+
+    def analysis_import(
+        self, workspace: str, dataset: str, project: str, connection: str, source_sql: str,
+        caller: CallerInfo, limit: int | None = None, schema: str | None = None,
+    ) -> dict:
+        """从某连接把查询结果快照进工作区（source_sql 也可为 `SELECT * FROM 表`）。
+
+        只读校验 + 注入 LIMIT 上限 + reader 拉数（全程审计），随后落成 DuckDB 表。
+        """
+        from .analysis import DEFAULT_SNAPSHOT_ROWS, MAX_SNAPSHOT_ROWS
+        store = self._require_analysis()
+        cfg = self.config.get_connection(project, connection)
+        if not classify(source_sql, cfg.engine).readonly:
+            raise QueryRejected("快照导入仅支持只读查询（SELECT/SHOW/...）")
+        n = min(limit or DEFAULT_SNAPSHOT_ROWS, MAX_SNAPSHOT_ROWS)
+        run_sql, _, _ = engines.paginate_sql(source_sql, cfg.engine, n, 0)
+        result = self._read(project, connection, cfg, run_sql, caller, n, schema=schema)
+        imported = store.import_rows(workspace, dataset, result["columns"], result["rows"])
+        rec = self._analysis_record(workspace, "analysis_import", source_sql, caller)
+        rec.status = "ok"
+        rec.detail = f"{project}/{connection} → {workspace}.{dataset}"
+        rec.row_count = imported
+        self.store.record(rec)
+        return {"workspace": workspace, "dataset": dataset, "rows": imported,
+                "truncated_to_limit": imported >= n}
+
+    def analysis_import_file(
+        self, workspace: str, dataset: str, path: str, caller: CallerInfo
+    ) -> dict:
+        store = self._require_analysis()
+        rec = self._analysis_record(workspace, "analysis_import_file", path, caller)
+        try:
+            n = store.import_file(workspace, dataset, path)
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+        rec.status = "ok"
+        rec.row_count = n
+        self.store.record(rec)
+        return {"workspace": workspace, "dataset": dataset, "rows": n}
+
+    def analysis_sql(
+        self, workspace: str, sql: str, caller: CallerInfo, max_rows: int | None = None
+    ) -> dict:
+        """在工作区执行任意 SQL（沙箱，自由写）。审计留痕。"""
+        from .analysis import MAX_RESULT_ROWS
+        store = self._require_analysis()
+        rec = self._analysis_record(workspace, "analysis_sql", sql, caller)
+        try:
+            out = store.run_sql(workspace, sql, max_rows or MAX_RESULT_ROWS)
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+        rec.status = "ok"
+        rec.row_count = out["row_count"]
+        self.store.record(rec)
+        return out
 
     # ---------- SQL 片段库（查询台保存/加载）----------
 

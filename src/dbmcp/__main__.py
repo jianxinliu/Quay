@@ -80,6 +80,8 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     service = DbmService(config, store, approvals, config_path=args.config)
     service.metadata = MetadataCache(db_path, service.pool)
     service.snippets = SnippetStore(db_path)
+    from .analysis import AnalysisStore
+    service.analysis = AnalysisStore(Path(args.data_dir) / "analysis")
     service.start_housekeeping(retention_days=args.retention_days)
     mcp = build_mcp(service)
 

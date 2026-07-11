@@ -235,6 +235,65 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise ToolError(str(e)) from e
 
     @mcp.tool
+    def analysis_workspaces() -> list[dict]:
+        """列出分析工作区及其中的数据集（DuckDB 沙箱，跨源数据分析用）。
+
+        适用场景：跨连接 JOIN、大结果集聚合、多步分析——把数据快照进工作区后
+        用 analysis_sql 自由分析，只把小结果带回上下文。简单单表查询请直接用 query。
+        """
+        try:
+            return service.analysis_overview()
+        except Exception as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool
+    async def analysis_import(
+        workspace: Annotated[str, Field(description="工作区名（不存在则自动创建）")],
+        dataset: Annotated[str, Field(description="导入后的数据集（表）名")],
+        project: str,
+        connection: str,
+        sql: Annotated[str, Field(description="只读取数 SQL，如 SELECT * FROM t 或聚合查询")],
+        limit: Annotated[int | None, Field(description="快照行数上限（默认 20 万，硬上限 50 万）")] = None,
+        schema: Annotated[str | None, Field(description="执行 schema（未绑库连接需指定）")] = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """从某个连接把查询结果快照进分析工作区（reader 只读拉取，全程审计，带行数上限）。
+
+        跨源分析第一步：把各源的表/查询结果导成工作区数据集，再用 analysis_sql JOIN。
+        同名数据集会被替换（重跑友好）。
+        """
+        caller = _caller_from_ctx(ctx)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: service.analysis_import(workspace, dataset, project, connection,
+                                                sql, caller, limit, schema))
+        except (QueryRejected, KeyError, ValueError) as e:
+            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(f"{type(e).__name__}: {e}") from e
+
+    @mcp.tool
+    async def analysis_sql(
+        workspace: str,
+        sql: Annotated[str, Field(description="工作区内任意 SQL：JOIN/聚合/建 VIEW/DDL 均可（本地沙箱，不碰生产）")],
+        max_rows: Annotated[int, Field(ge=1, le=5000, description="返回行数上限")] = 200,
+        ctx: Context | None = None,
+    ) -> dict:
+        """在分析工作区执行 SQL（DuckDB 方言，完整支持 JOIN/窗口函数/CTE）。
+
+        工作区是本地沙箱：建视图、建中间表、改数据都不需要审批——它不影响任何
+        生产库。把中间结果存成 VIEW/TABLE，多步分析时上下文只需携带最终小结果。
+        """
+        caller = _caller_from_ctx(ctx)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: service.analysis_sql(workspace, sql, caller, max_rows))
+        except (QueryRejected, KeyError, ValueError) as e:
+            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(f"{type(e).__name__}: {e}") from e
+
+    @mcp.tool
     def test_connection(project: str, connection: str, ctx: Context | None = None) -> dict:
         """测试连接连通性（执行 SELECT 1）。"""
         try:

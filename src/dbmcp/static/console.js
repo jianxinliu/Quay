@@ -287,7 +287,8 @@
   var app = Vue.createApp({
     data: function () {
       return {
-        connections: [], tabs: [], activeId: null,
+        connections: [], workspaces: [], tabs: [], activeId: null,
+        importPlan: null,  // {t, db, workspace, dataset, limit} 导入到分析工作区的内联表单
         // 树状态（当前连接）
         databases: [], tablesByDb: {}, tableMeta: {}, tableSizes: {},
         openDb: {}, openTf: {}, openTbl: {}, openSub: {},
@@ -342,10 +343,16 @@
         return { height: this.editorH + "px" };
       },
       connOptions: function () {
-        return [{ value: "", label: "选择连接…" }].concat(this.connections.map(function (c) {
+        var opts = [{ value: "", label: "选择连接…" }].concat(this.connections.map(function (c) {
           return { value: c.value,
                    label: c.connection + " · " + c.engine + (c.environment ? " (" + c.environment + ")" : "") };
         }));
+        return opts.concat(this.workspaces.map(function (w) {
+          return { value: "analysis/" + w, label: "⚗ " + w + " · 分析工作区" };
+        }));
+      },
+      isAnalysis: function () {
+        var t = this.activeTab; return !!t && (t.conn || "").indexOf("analysis/") === 0;
       },
       schemaOptions: function () {
         var m = this.connMeta;
@@ -463,6 +470,7 @@
         var self = this;
         return apiGet("/admin/sql/connections").then(function (d) {
           self.connections = (d && d.connections) || [];
+          self.workspaces = (d && d.workspaces) || [];
           if (!self.tabs.length) self.newTab({});
           else if (self.activeTab) self.loadTree();
         });
@@ -645,6 +653,10 @@
             .then(function () { self.flash("已复制 " + text.slice(0, 60)); })
             .catch(function () { self.flash(text); });
         }
+        else if (act === "toanalysis") {
+          this.importPlan = { t: t, db: s, workspace: this.workspaces[0] || "ws1",
+                              dataset: t, limit: 200000, running: false };
+        }
         else if (act === "drop") {
           var items = multi ? Object.values(this.selected) : [{ t: t, db: s }];
           this.dropPlan = { items: items, running: false, results: null };
@@ -673,6 +685,24 @@
           self.clearSel();
           self.refreshTree();
         });
+      },
+
+      confirmImport: function () {
+        var self = this, p = this.importPlan, tab = this.activeTab;
+        if (!p || p.running || !tab) return;
+        p.running = true;
+        var q = p.db ? p.db + "." + p.t : p.t;
+        apiPost("/admin/analysis/import", {
+          conn: tab.conn, workspace: p.workspace, dataset: p.dataset,
+          sql: "SELECT * FROM " + q, limit: p.limit,
+        }).then(function (d) {
+          p.running = false;
+          if (!d.ok) { self.flash(d.error); return; }
+          self.importPlan = null;
+          if (self.workspaces.indexOf(p.workspace) < 0) self.workspaces.push(p.workspace);
+          self.flash("已导入 " + d.rows + " 行 → ⚗" + p.workspace + "." + p.dataset
+                     + (d.truncated_to_limit ? "（达行数上限）" : ""));
+        }).catch(function (e) { p.running = false; self.flash("" + e); });
       },
 
       // ---------- 运行 / 分页 / 导出 ----------
@@ -1259,6 +1289,17 @@
         <button v-else class="dg-btn" @click="dropPlan=null">关闭</button>
       </div>
     </div>
+    <div v-if="importPlan" class="dg-drop" style="background:#1f2d3a;border-color:#2f4a63">
+      <div class="hd" style="color:#9fc6ee">导入 <code>{{ importPlan.db ? importPlan.db + "." + importPlan.t : importPlan.t }}</code> 快照到分析工作区（reader 拉取，受审计与行数上限）</div>
+      <div class="acts" style="flex-wrap:wrap;gap:10px;align-items:center">
+        <label style="font-size:12px;color:var(--dg-muted)">工作区 <input v-model="importPlan.workspace" list="dg-ws-list" style="width:130px" class="dg-imp-in"></label>
+        <datalist id="dg-ws-list"><option v-for="w in workspaces" :key="w" :value="w"></option></datalist>
+        <label style="font-size:12px;color:var(--dg-muted)">数据集名 <input v-model="importPlan.dataset" style="width:150px" class="dg-imp-in"></label>
+        <label style="font-size:12px;color:var(--dg-muted)">行数上限 <input v-model.number="importPlan.limit" type="number" style="width:100px" class="dg-imp-in"></label>
+        <button class="dg-btn run" :disabled="importPlan.running" @click="confirmImport">{{ importPlan.running ? "导入中…" : "导入" }}</button>
+        <button class="dg-btn" :disabled="importPlan.running" @click="importPlan=null">取消</button>
+      </div>
+    </div>
     <div class="dg-editor-row" v-show="activeTab && activeTab.type!=='data'" :style="editorRowStyle">
       <div class="dg-estatus" :class="execState.cls" :title="execState.tip"><span>{{ execState.icon }}</span></div>
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
@@ -1347,6 +1388,7 @@
       <button @click="ctxAction('select')">SELECT * → 编辑器</button>
       <button @click="ctxAction('count')">统计行数</button>
       <button @click="ctxAction('copy')">复制表名</button>
+      <button v-if="!isAnalysis" @click="ctxAction('toanalysis')">导入到分析工作区…</button>
     </template>
     <template v-else>
       <button @click="ctxAction('copy')">复制表名列表</button>
