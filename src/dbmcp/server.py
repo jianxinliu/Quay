@@ -94,7 +94,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             "跨源 JOIN、大结果集聚合、多步分析请用分析工作台（DuckDB 本地沙箱）："
             "analysis_import 把各源查询结果快照为工作区数据集（reader 拉取、带行数上限），"
             "analysis_sql 在工作区自由 JOIN/聚合/建 VIEW（不需审批），只把小结果带回上下文。"
-            "人或 agent 沉淀的分析流程（多语句脚本或可视化 DAG）可用 run_workflow 一键重跑："
+            "做完的分析可用 save_workflow 沉淀为可重跑流程，"
+            "人或 agent 沉淀的流程（多语句脚本或后台画布 DAG）用 run_workflow 一键重跑："
             "自动重拉源数据 → 逐步执行 → 返回每步状态与输出，"
             "可用列表见 analysis_workspaces。所有操作都会被审计记录。"
         ),
@@ -316,6 +317,28 @@ def build_mcp(service: DbmService) -> FastMCP:
         try:
             return await anyio.to_thread.run_sync(
                 lambda: service.workflow_run(name, caller))
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(str(e)) from e
+
+    @mcp.tool
+    async def save_workflow(
+        name: Annotated[str, Field(description="workflow 名称（已存在的脚本式同名会被覆盖更新）")],
+        workspace: Annotated[str, Field(description="分析工作区名（数据集所在的工作区）")],
+        script: Annotated[str, Field(description="多语句 SQL 脚本（分号分隔，DuckDB 方言），"
+                                                 "引用工作区里的数据集；最后一条 SELECT 作为输出")],
+        ctx: Context | None = None,
+    ) -> dict:
+        """把当前分析沉淀为可重跑的 workflow：脚本 + 工作区各数据集的取数配方（自动收集）。
+
+        先用 analysis_import 把数据导入工作区、analysis_sql 验证脚本可行，再保存；
+        之后人或 agent 都可用 run_workflow 一键重跑（自动重拉最新源数据）。
+        同名的管理后台画布（DAG）workflow 不允许覆盖。
+        """
+        caller = _caller_from_ctx(ctx)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: service.workflow_save(name, workspace, script, caller,
+                                              allow_replace_graph=False))
         except Exception as e:  # noqa: BLE001
             raise ToolError(str(e)) from e
 

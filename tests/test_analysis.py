@@ -302,6 +302,24 @@ class TestGraph:
         prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
         assert prev["rows"][0][0] == 2
 
+    def test_agent_save_workflow_guard(self, service, tmp_path):
+        """agent 侧保存（allow_replace_graph=False）：可建/覆盖脚本式，不可覆盖人画的 DAG。"""
+        from dbmcp.workflows import WorkflowStore
+        svc = service
+        svc.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        svc.analysis_import("ws1", "u", "demo", "main", "SELECT * FROM users", CALLER)
+        # agent 创建 + 迭代覆盖自己的脚本式 workflow
+        svc.workflow_save("agent-wf", "ws1", "SELECT 1", CALLER, allow_replace_graph=False)
+        wf = svc.workflow_save("agent-wf", "ws1", "SELECT 2", CALLER, allow_replace_graph=False)
+        assert wf["script"] == "SELECT 2"
+        # 人画的 DAG：agent 同名保存被拒
+        g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT 1")], "edges": []}
+        svc.workflow_save("human-dag", "ws1", "", CALLER, graph=g)
+        with pytest.raises(ValueError, match="不允许覆盖"):
+            svc.workflow_save("human-dag", "ws1", "SELECT 1", CALLER, allow_replace_graph=False)
+        # 后台侧（默认 allow_replace_graph=True）不受限
+        svc.workflow_save("human-dag", "ws1", "", CALLER, graph=g)
+
     def test_seed_examples(self, tmp_path):
         """首次启动播种内置示例；已有 workflow 或已播种过则不动。"""
         from dbmcp.examples import EXAMPLE_NAME, seed_examples

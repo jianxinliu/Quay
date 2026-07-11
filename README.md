@@ -69,10 +69,14 @@ tail -f ~/Library/Logs/db-manage-mcp.log
 | `query(project, connection, sql)` | 只读 SQL；非只读语句一律拒绝并审计；缺 LIMIT 自动注入兜底 |
 | `execute(project, connection, sql, reason?, change_id?)` | 写操作：首次提交生成审批单返回 change_id；批准后带 change_id 重提执行 |
 | `get_change_status(change_id)` | 审批单状态与风险报告 |
-| `redis_command(...)` | Redis：读命令直通；写命令走授权；FLUSHDB/KEYS/EVAL 按 CRITICAL 管控 |
+| `redis_command(project, connection, command, reason?, change_id?)` | Redis：读命令直通；写命令走授权；FLUSHDB/KEYS/EVAL 按 CRITICAL 管控 |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
 | `test_connection` | 连通性检查 |
-| `analysis_workspaces` / `analysis_import` / `analysis_sql` | **分析沙箱**：跨源快照导入 + 自由 SQL 分析，见 [ANALYSIS.md](ANALYSIS.md) |
+| `analysis_workspaces` | 列出分析工作区、数据集及已保存 workflow |
+| `analysis_import(workspace, dataset, project, connection, sql, limit?, schema?)` | 从某连接把查询结果快照进工作区（reader 拉取，带行数上限，受审计） |
+| `analysis_sql(workspace, sql, max_rows?)` | 在工作区执行 SQL（DuckDB 方言，自由 JOIN/聚合，不需审批） |
+| `save_workflow(name, workspace, script)` | 把分析脚本沉淀为可重跑 workflow（取数配方自动随存；不可覆盖人画的 DAG） |
+| `run_workflow(name)` | 一键重跑已保存的分析 workflow（脚本式或 DAG 画布） |
 
 ## 查询台（/admin/sql）
 

@@ -153,12 +153,13 @@ agent 调 execute(conn, sql, reason?, change_id?)
 | 工具 | 说明 |
 |---|---|
 | `list_projects` / `list_connections` | 浏览可用连接（不含密钥） |
-| `query(conn, sql)` | 强制只读：非只读语句直接报错，不进审批 |
-| `execute(conn, sql, reason?, change_id?)` | 统一入口，走完整审计+授权流程；批准后带 change_id 重提放行（见第六节） |
+| `query(project, connection, sql)` | 强制只读：非只读语句直接报错，不进审批 |
+| `execute(project, connection, sql, reason?, change_id?)` | 统一入口，走完整审计+授权流程；批准后带 change_id 重提放行（见第六节） |
 | `get_change_status(change_id)` | 查询审批单状态 |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
-| `redis_command(conn, command)` | Redis 命令入口，同样走命令分类+授权 |
-| `test_connection(conn)` | 连通性检查（含隧道建立） |
+| `redis_command(project, connection, command, reason?, change_id?)` | Redis 命令入口，同样走命令分类+授权 |
+| `test_connection(project, connection)` | 连通性检查（含隧道建立） |
+| `analysis_workspaces` / `analysis_import` / `analysis_sql` / `run_workflow` | 分析工作台（见第十二节与 ANALYSIS.md） |
 
 resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 
@@ -197,3 +198,27 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 3. **[已完成] M3 管控**：审计引擎（sqlglot + 元数据风险报告）+ 拒绝—重提审批流（change_id 放行、writer 双账号）+ 管理后台（审计查看 + 审批中心）
 4. **[已完成] M4 增强**：elicitation 快捷审批（local/dev 默认开、prod 默认关，审批单始终留痕）+ Redis 适配（命令分类 + 同一套审批流）+ 敏感字段脱敏（内置模式 + mask_columns）+ CLI 审批兜底（dbm approvals/approve/reject）
 5. **待定** goInception 可选集成：需实例联调，接入点预留在 audit/risk.py
+
+## 十三、后续演进（已实现功能补充）
+
+本设计文档撰写于项目早期（M1~M4 阶段）。随后实现的功能如下（详见 ANALYSIS.md 与 USER_GUIDE.md）：
+
+**查询台**（`/admin/sql`）：
+- **深色 IDE**：Vue 3 + Monaco 编辑器，库→表→列三级对象树（表容量展示、拖拽分隔条、库多时 schema 过滤）
+- **执行与导航**：光标处执行、多语句语境分离、上下文感知补全（FROM 后补表、SELECT/WHERE 补列、别名补字段）
+- **结果可视化**：分页+LIMIT 兜底（防大表拉挂）、表格/图表切换（ECharts：柱/折线/饼/散点 + X/Y/聚合）、CSV/JSON/Markdown/XLSX 导出
+- **表数据页**：双击表打开数据网格；WHERE 条与 ORDER BY 表达式走 SQL 重查（跨页正确）；双击单元格就地编辑（按主键生成 UPDATE，走写确认流）；Value 面板编辑长文本/JSON、设为 NULL
+- **多 tab 管理**：查询/表数据/DDL/流程四类；可拖拽排序、pin 防误关；全部状态（含结果集）持久保活、关页面/刷新原样恢复；查询在服务端异步执行（不中断）
+- **SQL 工具**：EXPLAIN 可视化计划树、查询历史（按连接去重）、SQL 片段库（存取快捷）、执行 schema 上下文选择
+- **管理员旁路**：写操作弹风险报告后可直接执行（writer 账号），免进审批流
+
+**分析工作台**（DuckDB 本地沙箱）：
+- **跨源数据导入**：右键表「导入到分析工作区」或 MCP `analysis_import` 工具（reader 拉取、审计、行数上限 20 万/硬上限 50 万）
+- **自由分析**：工作区内任意 SQL（JOIN/聚合/建 VIEW/建表）不需审批，计算下推模式
+- **工作流沉淀**：脚本式（多语句 SQL）与可视化 DAG（取数/文件/过滤/JOIN/聚合/SQL/输出七类节点）
+- **一键重跑**：MCP `run_workflow` 工具支持，自动重拉源数据→按序执行→返回逐步状态
+- **内置示例**：首次启动播种「示例 · 渠道ROI分析」，展示全部 DAG 节点类型与流程
+- **结果可视化**：输出结果区支持图表配置（配置随 workflow 保存、重跑自动出图）
+
+
+详细设计见 **[ANALYSIS.md](ANALYSIS.md) 分析工作台** 和 **[USER_GUIDE.md](USER_GUIDE.md) 用户手册**。

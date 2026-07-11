@@ -405,14 +405,23 @@ class DbmService:
         return self.workflows
 
     def workflow_save(self, name: str, workspace: str, script: str, caller: CallerInfo,
-                      chart: dict | None = None, graph: dict | None = None) -> dict:
+                      chart: dict | None = None, graph: dict | None = None,
+                      allow_replace_graph: bool = True) -> dict:
         """保存 workflow：脚本/DAG + 取数配方 + 图表配置。
 
         DAG workflow 的取数配方在图的 source 节点里（编译时校验图合法）；
         纯脚本 workflow 从工作区 provenance 自动收集。
+        allow_replace_graph=False（agent 侧）：同名 workflow 若是人画的 DAG，
+        拒绝覆盖——agent 只允许创建/迭代脚本式 workflow。
         """
         from .workflows import compile_graph
         store = self._require_workflows()
+        if not allow_replace_graph:
+            existing = next((w for w in self.workflow_list() if w["name"] == name.strip()), None)
+            if existing and existing.get("graph"):
+                raise ValueError(
+                    f"workflow {name!r} 是管理后台画布创建的 DAG，不允许覆盖；"
+                    "请换一个名字，或让用户在后台修改")
         if graph:
             sources = compile_graph(graph)["sources"]  # 校验 + 配方以图为准
         else:
