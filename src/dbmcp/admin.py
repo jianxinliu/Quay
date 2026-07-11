@@ -1089,7 +1089,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 service.list_tables, project, connection, _caller(req), schema)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
-        return JSONResponse({"ok": True, "tables": tables})
+        try:  # 表容量（树右侧分级展示）：拿不到不阻断表列表
+            sizes = await anyio.to_thread.run_sync(
+                service.admin_table_sizes, project, connection, _caller(req), schema)
+        except Exception:
+            sizes = {}
+        return JSONResponse({"ok": True, "tables": tables, "sizes": sizes})
 
     @mcp.custom_route("/admin/sql/table", methods=["GET"])
     @guard

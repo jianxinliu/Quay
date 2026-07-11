@@ -148,6 +148,13 @@ class TestSqlConsole:
         d = tc.get("/admin/sql/ddl", params={"conn": "demo/main", "table": "users"}).json()
         assert d["ok"] and "CREATE TABLE" in d["ddl"] and "users" in d["ddl"]
 
+    def test_tables_endpoint_includes_sizes(self, client):
+        tc, _ = client
+        d = tc.get("/admin/sql/tables", params={"conn": "demo/main"}).json()
+        assert d["ok"] and "users" in d["tables"]
+        # sizes 为 dict（sqlite 无 dbstat 支持时为空，不阻断）
+        assert isinstance(d["sizes"], dict)
+
     def test_ddl_missing_table(self, client):
         tc, _ = client
         d = tc.get("/admin/sql/ddl", params={"conn": "demo/main", "table": "nope"}).json()

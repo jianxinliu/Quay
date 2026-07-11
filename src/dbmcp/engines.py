@@ -422,6 +422,35 @@ def describe_table(engine: SAEngine, table: str, schema: str | None = None) -> d
             "primary_key": pk.get("constrained_columns", [])}
 
 
+def table_sizes(engine: SAEngine, engine_kind: str, schema: str | None = None) -> dict[str, int]:
+    """按表返回存储容量（字节，数据+索引），供树右侧分级展示。
+
+    一次查询拿整个库（不逐表），取不到（引擎不支持/权限不足）返回空 dict 不阻断。
+    """
+    try:
+        with engine.connect() as conn:
+            if engine_kind == "mysql":
+                rows = conn.execute(text(
+                    "SELECT table_name, COALESCE(data_length,0)+COALESCE(index_length,0)"
+                    " FROM information_schema.tables"
+                    " WHERE table_schema = COALESCE(:s, DATABASE())"), {"s": schema}).fetchall()
+            elif engine_kind == "postgres":
+                rows = conn.execute(text(
+                    "SELECT c.relname, pg_total_relation_size(c.oid)"
+                    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE c.relkind IN ('r','p')"
+                    " AND n.nspname = COALESCE(:s, current_schema())"), {"s": schema}).fetchall()
+            elif engine_kind == "sqlite":
+                # dbstat 虚表需编译开启（macOS/多数发行版默认有）；无则走 except 返回空
+                rows = conn.execute(text(
+                    "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name")).fetchall()
+            else:
+                return {}
+        return {str(r[0]): int(r[1] or 0) for r in rows}
+    except Exception:
+        return {}
+
+
 def get_table_ddl(engine: SAEngine, engine_kind: str, table: str, schema: str | None = None) -> str:
     """取建表语句。MySQL/SQLite 取服务器原文；PG 无内建语句，反射拼近似 DDL。
 

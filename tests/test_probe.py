@@ -76,7 +76,10 @@ class TestSSHProbe:
         assert not r.ok
         assert "未配置 SSH 跳板" in r.message
 
-    def test_unreachable_jump_fails(self):
+    def test_unreachable_jump_fails(self, monkeypatch):
+        # 缩短隧道就绪等待：ssh 对无效主机名的失败速度依赖 DNS/网络环境（曾把全量
+        # 拖到 15s+ 被误判为挂死），压到 2s 让用例确定性快速失败
+        monkeypatch.setattr("dbmcp.tunnel._READY_TIMEOUT_S", 2.0)
         cfg = ConnectionConfig(engine="mysql", host="10.0.0.1", port=3306,
                                environment="prod", user="u", password="plain://x",
                                jump_hosts=["127.0.0.1:1"])

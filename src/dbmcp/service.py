@@ -633,6 +633,15 @@ class DbmService:
         return self._audited(project, connection, cfg, "describe_table", detail, caller,
                              lambda: engines.describe_table(engine, table, schema))
 
+    def admin_table_sizes(
+        self, project: str, connection: str, caller: CallerInfo, schema: str | None = None
+    ) -> dict[str, int]:
+        """查询台树右侧的表容量（字节）。取不到返回空 dict，不阻断列表。"""
+        cfg = self.config.get_connection(project, connection)
+        engine = self.pool.get(project, connection, cfg)
+        return self._audited(project, connection, cfg, "table_sizes", schema or "", caller,
+                             lambda: engines.table_sizes(engine, cfg.engine, schema))
+
     def get_table_ddl(
         self, project: str, connection: str, table: str, caller: CallerInfo,
         schema: str | None = None,

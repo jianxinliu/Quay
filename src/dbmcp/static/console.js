@@ -114,7 +114,7 @@
 
   // ---------- 表节点组件（表行 + columns/keys/indexes 子层） ----------
   var TblNode = {
-    props: ["tname", "meta", "open", "sub", "selected", "pad"],
+    props: ["tname", "meta", "open", "sub", "selected", "pad", "size"],
     emits: ["toggle", "togglesub", "rowclick", "opendata", "ctxmenu"],
     computed: {
       pkset: function () {
@@ -130,6 +130,7 @@
        @contextmenu.prevent="$emit('ctxmenu', $event)" title="双击打开数据 · 右键菜单 · ⌘点多选">
     <span class="tw" @click.stop="$emit('toggle')">{{ open ? "▾" : "▸" }}</span>
     <span class="ic ic-table"></span><span class="nm">{{ tname }}</span>
+    <span v-if="size" class="sz">{{ size }}</span>
   </div>
   <template v-if="open">
     <div v-if="!meta" class="dg-empty" :style="{paddingLeft:(pad+22)+'px'}">加载中…</div>
@@ -258,7 +259,7 @@
       return {
         connections: [], tabs: [], activeId: null,
         // 树状态（当前连接）
-        databases: [], tablesByDb: {}, tableMeta: {},
+        databases: [], tablesByDb: {}, tableMeta: {}, tableSizes: {},
         openDb: {}, openTf: {}, openTbl: {}, openSub: {},
         tablesLoading: false, lastLoadedConn: null, schemaFilter: "",
         treeCache: {},          // conn -> 树快照（切连接/切页保活）
@@ -334,6 +335,14 @@
         function p(n) { return n < 10 ? "0" + n : "" + n; }
         return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " "
           + p(d.getHours()) + ":" + p(d.getMinutes());
+      },
+      // 表容量分级：M / G / T（小于 0.05M 显示 <0.1 M）
+      fmtSize: function (b) {
+        if (b == null) return "";
+        var m = b / 1048576;
+        if (m >= 1048576) return (m / 1048576).toFixed(1) + " T";
+        if (m >= 1024) return (m / 1024).toFixed(1) + " G";
+        return (m < 0.05 ? "<0.1" : m.toFixed(1)) + " M";
       },
       cellText: function (v) {
         if (v == null) return "";
@@ -434,6 +443,7 @@
         if (!this.lastLoadedConn) return;
         this.treeCache[this.lastLoadedConn] = {
           databases: this.databases, tablesByDb: this.tablesByDb, tableMeta: this.tableMeta,
+          tableSizes: this.tableSizes,
           openDb: this.openDb, openTf: this.openTf, openTbl: this.openTbl, openSub: this.openSub,
           schemaFilter: this.schemaFilter,
         };
@@ -450,7 +460,7 @@
       loadTree: function (force) {
         var self = this; var t = this.activeTab;
         this.stashTree();
-        this.databases = []; this.tablesByDb = {}; this.tableMeta = {};
+        this.databases = []; this.tablesByDb = {}; this.tableMeta = {}; this.tableSizes = {};
         this.openDb = {}; this.openTf = {}; this.openTbl = {}; this.openSub = {};
         this.schemaFilter = ""; this.selected = {};
         if (!t || !t.conn) { this.lastLoadedConn = null; currentTables = []; currentConn = ""; return; }
@@ -459,7 +469,8 @@
         var cached = !force && this.treeCache[t.conn];
         if (cached) {  // 快照恢复：不发任何请求
           this.databases = cached.databases; this.tablesByDb = cached.tablesByDb;
-          this.tableMeta = cached.tableMeta; this.openDb = cached.openDb;
+          this.tableMeta = cached.tableMeta; this.tableSizes = cached.tableSizes || {};
+          this.openDb = cached.openDb;
           this.openTf = cached.openTf; this.openTbl = cached.openTbl; this.openSub = cached.openSub;
           this.schemaFilter = cached.schemaFilter || "";
           this.rebuildCompletion();
@@ -502,6 +513,10 @@
           self.tablesLoading = false;
           if (!d.ok) { self.flash(d.error); self.tablesByDb[db] = []; return; }
           self.tablesByDb[db] = d.tables || [];
+          var sz = d.sizes || {};
+          (d.tables || []).forEach(function (tb) {
+            if (sz[tb] != null) self.tableSizes[self.mk(tb, db)] = sz[tb];
+          });
           // 已展开但缺元数据的表（刷新后）自动补拉，避免停在「加载中…」
           (d.tables || []).forEach(function (tb) {
             var k = self.mk(tb, db);
@@ -1038,6 +1053,7 @@
               <tbl-node v-else v-for="t in tablesByDb[db]" :key="db+'.'+t"
                 :tname="t" :meta="tableMeta[mk(t,db)]" :open="!!openTbl[mk(t,db)]"
                 :sub="openSub[mk(t,db)]||{}" :selected="!!selected[mk(t,db)]" :pad="38"
+                :size="fmtSize(tableSizes[mk(t,db)])"
                 @toggle="toggleTbl(t,db)" @togglesub="s=>toggleSub(t,db,s)"
                 @rowclick="e=>clickTable(e,t,db)" @opendata="openTableTab(t,db)"
                 @ctxmenu="e=>openCtx(e,t,db)"/>
@@ -1055,6 +1071,7 @@
           <tbl-node v-else v-for="t in tablesByDb['']" :key="t"
             :tname="t" :meta="tableMeta[mk(t,'')]" :open="!!openTbl[mk(t,'')]"
             :sub="openSub[mk(t,'')]||{}" :selected="!!selected[mk(t,'')]" :pad="22"
+            :size="fmtSize(tableSizes[mk(t,'')])"
             @toggle="toggleTbl(t,'')" @togglesub="s=>toggleSub(t,'',s)"
             @rowclick="e=>clickTable(e,t,'')" @opendata="openTableTab(t,'')"
             @ctxmenu="e=>openCtx(e,t,'')"/>

@@ -116,6 +116,16 @@ class SSHTunnel:
             if self._port_open():
                 return
             time.sleep(_READY_POLL_INTERVAL_S)
+        # 超时：必须先终止 ssh 再读 stderr——进程活着时 stderr.read() 会一直阻塞到
+        # ssh 自行退出（如 DNS 解析挂起时长达数分钟），曾把探测/测试整个卡死
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
         stderr = self._drain_stderr()
         self.close()
         raise TunnelError(
