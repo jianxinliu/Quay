@@ -99,16 +99,18 @@ class DbmService:
 
     def _read(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
-        caller: CallerInfo, max_rows: int,
+        caller: CallerInfo, max_rows: int, schema: str | None = None,
     ) -> dict:
         """执行一条已判定只读的 SQL：跑 reader、落审计、脱敏，返回结果 dict。
 
         max_rows 由调用方决定（query 用连接策略；查询台分页用 page_size+1 以探测下一页），
-        与 truncated 检测解耦，便于复用。
+        与 truncated 检测解耦，便于复用。schema 为查询台的执行 schema 上下文。
         """
         rec = self._base_record(project, connection, cfg, "query", sql, caller)
+        if schema:
+            rec.detail = f"schema={schema}"
         try:
-            engine = self.pool.get(project, connection, cfg)
+            engine = self.pool.get(project, connection, cfg, schema=schema)
             result = engines.run_query(engine, sql, max_rows,
                                         max_cell_chars=cfg.policy.max_cell_chars)
         except QueryRejected:
@@ -157,7 +159,7 @@ class DbmService:
             )
 
         # 兜底：缺 LIMIT 的 SELECT 注入 LIMIT max_rows+1，防大表全量缓冲把 DB/进程拖挂
-        run_sql, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
+        run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
         out = self._read(project, connection, cfg, run_sql, caller, cfg.policy.max_rows)
         out["statement_kind"] = verdict.statement_kind
         if out["truncated"]:
@@ -171,7 +173,7 @@ class DbmService:
 
     def admin_run_sql(
         self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False,
-        page: int = 0, page_size: int | None = None,
+        page: int = 0, page_size: int | None = None, schema: str | None = None,
     ) -> dict:
         """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
 
@@ -180,40 +182,46 @@ class DbmService:
         - 写语句 + confirm=False：评估风险并返回风险报告，**不执行**。
         - 写语句 + confirm=True：经人工二次确认，直接用 writer 账号执行并落审计。
           这是后台专属旁路（不进审批单）；红线「拒绝—重提」只约束 agent 的 execute。
+        - schema：执行 schema 上下文（右上角选择），未限定表名的 SQL 在该库下执行。
         """
         cfg = self.config.get_connection(project, connection)
         verdict = classify(sql, cfg.engine)
         if verdict.readonly:
             page = max(page, 0)
             size = min(page_size or ADMIN_PAGE_SIZE, cfg.policy.max_rows)
-            paged_sql, paginated = engines.paginate_sql(sql, cfg.engine, size + 1, page * size)
+            paged_sql, paginated, ordered = engines.paginate_sql(
+                sql, cfg.engine, size + 1, page * size)
             if paginated:
                 # 取 size+1 行探测是否有下一页；不受连接 max_rows 二次截断影响
-                out = self._read(project, connection, cfg, paged_sql, caller, size + 1)
+                out = self._read(project, connection, cfg, paged_sql, caller, size + 1,
+                                 schema=schema)
                 rows = out["rows"]
                 out["has_next"] = len(rows) > size
                 out["rows"] = rows[:size]
                 out["row_count"] = len(out["rows"])
-                out.update(paginated=True, page=page, page_size=size)
+                out.update(paginated=True, page=page, page_size=size, ordered=ordered)
                 out.pop("truncated", None)
                 return {"kind": "read", **out}
-            # 自带 LIMIT / 非 SELECT：走常规 query（max_rows + 流式游标兜底），不分页
-            out = self.query(project, connection, sql, caller)
+            # 自带 LIMIT / 非 SELECT：不分页，仍受 max_rows 兜底
+            out = self._read(project, connection, cfg, sql, caller, cfg.policy.max_rows,
+                             schema=schema)
             out["paginated"] = False
             return {"kind": "read", **out}
 
         if not confirm:
             report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
             report_dict = report.to_dict()
-            plan = self._try_explain(project, connection, cfg, sql)
+            plan = self._try_explain(project, connection, cfg, sql, schema=schema)
             if plan:
                 report_dict["explain"] = plan
             return {"kind": "confirm", "risk": report_dict,
                     "statement_kind": verdict.statement_kind}
 
         rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
+        if schema:
+            rec.detail = f"schema={schema}"
         try:
-            engine = self.pool.get(project, connection, cfg, role="writer")
+            engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
             result = engines.run_write(engine, sql)
         except Exception as e:
             rec.status = "error"
@@ -221,7 +229,7 @@ class DbmService:
             self.store.record(rec)
             raise
         rec.status = "ok"
-        rec.detail = "后台查询台直接执行（已二次确认）"
+        rec.detail = "后台查询台直接执行（已二次确认）" + (f" schema={schema}" if schema else "")
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
@@ -229,7 +237,8 @@ class DbmService:
                 "duration_ms": result.duration_ms}
 
     def admin_export(
-        self, project: str, connection: str, sql: str, fmt: str, caller: CallerInfo
+        self, project: str, connection: str, sql: str, fmt: str, caller: CallerInfo,
+        schema: str | None = None,
     ) -> tuple[bytes, str, str]:
         """导出只读查询结果为文件，返回 (字节, media_type, 扩展名)。仅限只读语句。"""
         from .export import export_result
@@ -237,7 +246,9 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         if not classify(sql, cfg.engine).readonly:
             raise QueryRejected("导出仅支持只读查询（SELECT/SHOW/...）的结果")
-        result = self.query(project, connection, sql, caller)
+        run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
+        result = self._read(project, connection, cfg, run_sql, caller,
+                            cfg.policy.max_rows, schema=schema)
         return export_result(result["columns"], result["rows"], fmt)
 
     # ---------- SQL 片段库（查询台保存/加载）----------
@@ -380,7 +391,8 @@ class DbmService:
         }
 
     def _try_explain(
-        self, project: str, connection: str, cfg: ConnectionConfig, sql: str
+        self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
+        schema: str | None = None,
     ) -> str | None:
         """对写语句取执行计划（不带 ANALYZE，不执行）供审批人参考。
 
@@ -391,7 +403,7 @@ class DbmService:
             if role == "writer" and cfg.writer is None:
                 break
             try:
-                engine = self.pool.get(project, connection, cfg, role=role)
+                engine = self.pool.get(project, connection, cfg, role=role, schema=schema)
             except Exception:
                 continue
             plan = engines.explain(engine, sql, cfg.engine)

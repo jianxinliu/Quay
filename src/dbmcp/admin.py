@@ -69,6 +69,17 @@ def _esc(v: object) -> str:
     return html.escape(str(v if v is not None else ""))
 
 
+def _fmt_ts(ts: object) -> str:
+    """ISO 时间（多为 UTC）→ 本机时区 'YYYY-MM-DD HH:MM:SS'；解析失败原样返回。"""
+    if not ts:
+        return ""
+    try:
+        from datetime import datetime  # noqa: PLC0415
+        return datetime.fromisoformat(str(ts)).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(ts)
+
+
 def _format_sql(sql: str, engine: str) -> str:
     """用 sqlglot 美化 SQL（缩进/关键字对齐）；解析失败则原样返回。"""
     if not sql:
@@ -188,12 +199,24 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  .btn-primary{{background:var(--accent)}} .btn-approve{{background:#16794f}} .btn-reject{{background:#c0392b}}
  .btn-ghost{{background:#fff;color:var(--text);border-color:var(--border)}}
  .btn-ghost:hover{{background:#f6f7f9;filter:none}}
- /* 表单 */
+ /* 表单（去原生观感：下拉自绘箭头、checkbox 主题色） */
  input,textarea,select{{font-family:var(--sans);font-size:13.5px;padding:9px 11px;border:1px solid var(--border);
    border-radius:8px;background:#fff;transition:border-color .12s,box-shadow .12s;color:var(--text)}}
  input:focus,textarea:focus,select:focus{{outline:none;border-color:var(--accent);
    box-shadow:0 0 0 3px rgba(13,148,136,.14)}}
  input::placeholder{{color:var(--faint)}}
+ select{{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
+   background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+   background-repeat:no-repeat;background-position:right 10px center}}
+ input[type=checkbox]{{accent-color:var(--accent);width:15px;height:15px;cursor:pointer}}
+ /* 通用弹窗 */
+ .modalbg{{position:fixed;inset:0;background:rgba(15,20,27,.5);display:none;z-index:70;
+   align-items:flex-start;justify-content:center;padding:36px 20px;overflow:auto}}
+ .modalbg.open{{display:flex}}
+ .modalbg .modalbox{{background:#fff;border-radius:14px;padding:24px 28px;max-width:800px;width:100%;
+   box-shadow:0 24px 70px rgba(0,0,0,.35);position:relative}}
+ .modalbox .mclose{{position:absolute;top:14px;right:16px;border:none;background:none;font-size:18px;
+   color:var(--faint);cursor:pointer;padding:4px}} .modalbox .mclose:hover{{color:var(--text)}}
  label{{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-weight:500}}
  .errbar{{background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;padding:11px 15px;border-radius:9px;
    margin-bottom:16px;font-size:13.5px}}
@@ -232,6 +255,15 @@ def _page(title: str, body: str, pending: int = 0) -> str:
 <script>
  (function(){{var p=location.pathname;document.querySelectorAll('.side nav a').forEach(function(a){{
    if(p.indexOf(a.getAttribute('href'))===0)a.classList.add('active');}});}})();
+ // 危险操作二次确认（自绘，替代原生 confirm）：首次点击按钮变「确认删除？」，3 秒内再点才提交
+ function dbmConfirm(form){{
+   var btn=form.querySelector('button');
+   if(form.dataset.armed==='1')return true;
+   form.dataset.armed='1';btn.dataset.old=btn.textContent;btn.textContent='确认删除？';
+   btn.style.filter='brightness(1.25)';
+   setTimeout(function(){{form.dataset.armed='';btn.textContent=btn.dataset.old;btn.style.filter='';}},3000);
+   return false;
+ }}
 </script>
 </body></html>"""
 
@@ -591,7 +623,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                     f"<td>{_badge(c.risk_level, _LEVEL_COLOR)}</td>"
                     f"<td><code>{_esc(c.sql[:80])}</code></td>"
                     f"<td>{_badge(st, _STATUS_COLOR)}</td>"
-                    f"<td class='muted'>{_esc(c.created_at)}</td></tr>"
+                    f"<td class='muted mono'>{_esc(_fmt_ts(c.created_at))}</td></tr>"
                 )
             return "".join(out)
 
@@ -638,7 +670,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         elif c.decided_by:
             actions = (
                 f"<div class='card'>决策: {_badge(st, _STATUS_COLOR)} by {_esc(c.decided_by)} "
-                f"@ {_esc(c.decided_at)}<br>备注: {_esc(c.decision_note) or '—'}</div>"
+                f"@ {_esc(_fmt_ts(c.decided_at))}<br>备注: {_esc(c.decision_note) or '—'}</div>"
             )
 
         body = f"""
@@ -648,7 +680,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
  <dl class="kv">
   <dt>连接</dt><dd><code>{_esc(c.project)}/{_esc(c.connection)}</code> · {_env_badge(c.environment)}</dd>
   <dt>提交 agent</dt><dd>{_esc(c.agent)}</dd>
-  <dt>提交时间</dt><dd>{_esc(c.created_at)} · 有效期至 {_esc(c.expires_at)}</dd>
+  <dt>提交时间</dt><dd>{_esc(_fmt_ts(c.created_at))} · 有效期至 {_esc(_fmt_ts(c.expires_at))}</dd>
   <dt>变更原因</dt><dd>{_esc(c.reason) or '—'}</dd>
  </dl>
  <div class="sec-title">SQL</div><pre>{_esc(c.sql)}</pre>
@@ -723,22 +755,22 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 sqlcell = (f"<code class='cell-sql sql-toggle' data-i='{i}' title='点击展开完整 SQL'>"
                            f"{truncated}</code>")
                 expand_row = (f"<tr class='sql-full' id='sqlfull-{i}' style='display:none'>"
-                              f"<td colspan='7'><pre>{_esc(_format_sql(raw_sql, r['engine'] or ''))}</pre></td></tr>")
+                              f"<td colspan='8'><pre>{_esc(_format_sql(raw_sql, r['engine'] or ''))}</pre></td></tr>")
             else:
                 sqlcell = "<span class='muted'>—</span>"
                 expand_row = ""
             trs.append(
-                f"<tr><td class='muted mono' style='white-space:nowrap'>{_esc(r['ts'])}</td>"
+                f"<tr><td style='white-space:nowrap'><code>{_esc(r['project'])}/{_esc(r['connection'])}</code></td>"
+                f"<td>{_env_badge(r['environment']) if r['environment'] else '<span class=muted>—</span>'}</td>"
                 f"<td class='mono'>{_esc(r['agent'])}</td>"
-                f"<td><code>{_esc(r['project'])}/{_esc(r['connection'])}</code>"
-                f"{(' ' + _env_badge(r['environment'])) if r['environment'] else ''}</td>"
-                f"<td class='mono muted'>{_esc(r['tool'])}</td>"
+                f"<td class='mono muted' style='white-space:nowrap'>{_esc(r['tool'])}</td>"
                 f"<td>{sqlcell}</td>"
                 f"<td>{_badge(r['status'], _STATUS_COLOR)}</td>"
+                f"<td class='muted mono' style='white-space:nowrap'>{_esc(_fmt_ts(r['ts']))}</td>"
                 f"<td class='muted'>{statline}{dline}</td></tr>"
                 f"{expand_row}"
             )
-        table_rows = "".join(trs) or '<tr><td colspan="7" class="muted">（无匹配记录）</td></tr>'
+        table_rows = "".join(trs) or '<tr><td colspan="8" class="muted">（无匹配记录）</td></tr>'
 
         # 筛选下拉
         def _sel(name: str, label: str, values: list[str]) -> str:
@@ -777,10 +809,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                  f"{next_btn}</div>")
 
         body = (
-            _pagehead("Audit Log", "操作审计", "每次数据库操作的完整留痕：谁、何时、在哪个库、跑了什么、结果如何")
+            # 审计表信息密度高：本页放开 main 宽度限制，表格占满可用宽度、列宽自适应
+            "<style>main{max-width:none}</style>"
+            + _pagehead("Audit Log", "操作审计", "每次数据库操作的完整留痕：谁、何时、在哪个库、跑了什么、结果如何")
             + f"<div class='card'>{filter_bar}"
-            f"<div class='tablewrap'><table class='audit'><tr><th>时间</th><th>agent</th><th>连接</th><th>工具</th>"
-            f"<th>SQL</th><th>状态</th><th>结果</th></tr>{table_rows}</table></div>{pager}</div>"
+            f"<div class='tablewrap'><table class='audit'><tr>"
+            f"<th>连接</th><th>环境</th><th>agent</th><th>工具</th>"
+            f"<th>SQL</th><th>状态</th><th>时间</th><th>结果</th></tr>{table_rows}</table></div>{pager}</div>"
             "<script>(function(){"
             "var box=document.getElementById('auto-refresh');"
             "if(box){var on=localStorage.getItem('dbm-audit-refresh')==='1';box.checked=on;"
@@ -824,7 +859,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                     f"<td>{db}</td><td class='muted mono'>{_esc(jump)}</td>"
                     f"<td style='white-space:nowrap'><a href='/admin/connections?edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
                     f"<form method='post' action='/admin/connections/delete' style='display:inline' "
-                    f"onsubmit='return confirm(\"删除连接 {_esc(pname)}/{_esc(cname)}？\")'>"
+                    f"onsubmit='return dbmConfirm(this)'>"
                     f"<input type='hidden' name='project' value='{_esc(pname)}'>"
                     f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
                     f"<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form></td></tr>"
@@ -836,12 +871,24 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             "请 <code>pip install 'db-manage-mcp[keyring]'</code> 后重启。</p>"
         )
         form = _connection_form(e_project, e_conn, edit_cfg)
+        # 表单放弹窗：新增按钮打开；带 ?edit= 时自动打开（编辑）
+        auto_open = "document.getElementById('conn-modal').classList.add('open');" if edit_cfg else ""
         body = (
             _pagehead("Connections", "连接管理", "主账号应为只读账号；保存时自动校验权限，密码写入系统钥匙串")
-            + f"<div class='card'><h2>连接列表</h2>"
+            + "<div class='card'><div style='display:flex;align-items:center;margin-bottom:14px'>"
+            "<h2 style='margin:0'>连接列表</h2>"
+            "<button class='btn btn-primary' style='margin-left:auto' "
+            "onclick=\"document.getElementById('conn-modal').classList.add('open')\">＋ 新增连接</button></div>"
             f"<div class='tablewrap'><table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
             f"<th>跳板</th><th>操作</th></tr>{table}</table></div></div>"
-            f"<div class='card'><h2>{'编辑' if edit_cfg else '新增'}连接</h2>{keyring_note}{form}</div>"
+            f"<div class='modalbg' id='conn-modal'><div class='modalbox'>"
+            f"<button class='mclose' onclick=\"document.getElementById('conn-modal').classList.remove('open');"
+            f"if(location.search)location.href='/admin/connections'\">✕</button>"
+            f"<h2>{'编辑连接' if edit_cfg else '新增连接'}</h2>{keyring_note}{form}</div></div>"
+            f"<script>{auto_open}"
+            "document.getElementById('conn-modal').addEventListener('click',function(e){"
+            "if(e.target===this){this.classList.remove('open');"
+            "if(location.search)location.href='/admin/connections';}});</script>"
         )
         return _shell("连接管理", body)
 
@@ -985,8 +1032,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         if not str(target).startswith(str(_STATIC_ROOT) + "/") or not target.is_file():
             return Response("not found", status_code=404)
         ct = _STATIC_CT.get(target.suffix.lstrip(".").lower(), "application/octet-stream")
+        # 自家 console.* 迭代频繁 → no-cache（每次校验新鲜度）；vendor（monaco/vue）不变 → 长缓存
+        vendor = rel.startswith("monaco/") or rel.startswith("vue.")
+        cache = "public, max-age=86400" if vendor else "no-cache"
         return Response(target.read_bytes(), media_type=ct,
-                        headers={"Cache-Control": "public, max-age=86400"})
+                        headers={"Cache-Control": cache})
 
     @mcp.custom_route("/admin/sql", methods=["GET"])
     @guard
@@ -1053,10 +1103,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             page = max(int(str(f.get("page") or "0")), 0)
         except ValueError:
             page = 0
+        schema = str(f.get("schema") or "").strip() or None
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             result = await anyio.to_thread.run_sync(
-                service.admin_run_sql, project, connection, sql, _caller(req), confirm, page)
+                service.admin_run_sql, project, connection, sql, _caller(req),
+                confirm, page, None, schema)
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception as e:
@@ -1084,10 +1136,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         sql = str(f.get("sql") or "")
         fmt = str(f.get("format") or "csv")
+        schema = str(f.get("schema") or "").strip() or None
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             data, media_type, ext = await anyio.to_thread.run_sync(
-                service.admin_export, project, connection, sql, fmt, _caller(req))
+                service.admin_export, project, connection, sql, fmt, _caller(req), schema)
         except (QueryRejected, KeyError, ValueError, ExportError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:

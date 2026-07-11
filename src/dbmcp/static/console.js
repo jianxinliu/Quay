@@ -91,6 +91,8 @@
         tables: [], colsByTable: {}, expanded: {}, tablesLoading: false, lastLoadedConn: null,
         databases: [], dbExpanded: {}, tablesByDb: {},  // 未绑库连接：库→表 两级
         schemaFilter: "", dragId: null,  // 库筛选 / tab 拖拽中的 id
+        ctx: { show: false, x: 0, y: 0, table: "", schema: "" },  // 表右键菜单
+        delSnip: null,  // 片段删除二次确认（不用原生 confirm）
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, editorReady: false, toast: "",
         leftW: 264, editorH: 300,  // 可拖动分隔条控制的尺寸
@@ -117,6 +119,17 @@
         var q = this.schemaFilter.trim().toLowerCase();
         return q ? this.databases.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; })
                  : this.databases;
+      },
+      // 编辑区左侧执行状态：idle / running / ok / error
+      execState: function () {
+        var t = this.activeTab;
+        if (!t) return { cls: "idle", icon: "▷", tip: "未执行" };
+        if (t.running) return { cls: "running", icon: "⟳", tip: "执行中…" };
+        if (t.err) return { cls: "err", icon: "✗", tip: t.err };
+        if (t.ok) return { cls: "ok", icon: "✓", tip: "成功 · 影响 " + t.ok.affected_rows + " 行 · " + t.ok.duration_ms + " ms" };
+        if (t.result) return { cls: "ok", icon: "✓",
+          tip: "成功 · " + t.result.rows.length + " 行 · " + (t.result.duration_ms || 0) + " ms" };
+        return { cls: "idle", icon: "▷", tip: "未执行" };
       }
     },
     methods: {
@@ -143,14 +156,23 @@
       newTab: function (opts) {
         opts = opts || {};
         var def = this.activeTab ? this.activeTab.conn : (this.connections[0] ? this.connections[0].value : "");
+        var defSchema = opts.schema != null ? opts.schema : (this.activeTab ? this.activeTab.schema : "");
         var id = seq++;
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
+                    schema: defSchema || "",
                     sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, running: false };
         this.tabs.push(tab);
         if (monacoReady) { models.set(id, window.monaco.editor.createModel(tab.sql, "sql")); }
         this.switchTab(id);
         this.persist();
         return tab;
+      },
+      // 双击表 / 右键「打开数据」：新 tab 直接跑分页 SELECT
+      openTableTab: function (table, schema) {
+        var q = schema ? schema + "." + table : table;
+        this.newTab({ title: table, sql: "SELECT * FROM " + q, schema: schema || "" });
+        var self = this;
+        this.$nextTick(function () { self.run(false); });
       },
       closeTab: function (id) {
         var i = this.tabs.findIndex(function (t) { return t.id === id; });
@@ -187,13 +209,15 @@
         this.tables = []; this.databases = []; tableSchema = {};
         if (!t || !t.conn) { this.lastLoadedConn = null; currentTables = []; currentConn = ""; return; }
         this.lastLoadedConn = t.conn; currentConn = t.conn; currentTables = [];
-        if (this.needsDb) {  // 未绑库：先列库
+        var m = this.connMeta;
+        if (m && (m.engine === "mysql" || m.engine === "postgres")) {
+          // mysql/pg 一律取库列表：needsDb 时作树的第一级，绑库连接供「执行 schema」选择器
           apiGet("/admin/sql/databases?conn=" + encodeURIComponent(t.conn)).then(function (d) {
             self.databases = d && d.ok ? d.databases : [];
             if (d && !d.ok) self.flash(d.error);
           });
-          return;
         }
+        if (this.needsDb) return;  // 树走库→表两级，表按库懒加载
         this.tablesLoading = true;
         apiGet("/admin/sql/tables?conn=" + encodeURIComponent(t.conn)).then(function (d) {
           self.tablesLoading = false;
@@ -239,6 +263,63 @@
         var q = schema ? schema + "." + name : name;
         this.insertText("SELECT * FROM " + q + " LIMIT 100;");
       },
+      setSchema: function (val) { if (this.activeTab) { this.activeTab.schema = val; this.persist(); } },
+      fmtTs: function (iso) {
+        if (!iso) return "";
+        var d = new Date(iso);
+        if (isNaN(d)) return iso;
+        function p(n) { return n < 10 ? "0" + n : "" + n; }
+        return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " "
+          + p(d.getHours()) + ":" + p(d.getMinutes());
+      },
+
+      // ----- 表右键菜单 -----
+      openCtx: function (e, table, schema) {
+        this.ctx = { show: true, x: Math.min(e.clientX, window.innerWidth - 200),
+                     y: Math.min(e.clientY, window.innerHeight - 240),
+                     table: table, schema: schema || "" };
+      },
+      closeCtx: function () { this.ctx.show = false; },
+      qualified: function () { return this.ctx.schema ? this.ctx.schema + "." + this.ctx.table : this.ctx.table; },
+      ctxAction: function (act) {
+        var t = this.ctx.table, s = this.ctx.schema, q = this.qualified();
+        this.closeCtx();
+        if (act === "open") { this.openTableTab(t, s); }
+        else if (act === "select") { this.insertSelect(t, s); }
+        else if (act === "count") {
+          this.newTab({ title: "count " + t, sql: "SELECT count(*) AS total FROM " + q, schema: s });
+          var self = this; this.$nextTick(function () { self.run(false); });
+        }
+        else if (act === "struct") {
+          if (this.needsDb && !this.dbExpanded[s]) this.toggleDb(s);
+          this.toggleTable(t, s || undefined);
+        }
+        else if (act === "copy") {
+          var self2 = this;
+          (navigator.clipboard ? navigator.clipboard.writeText(q) : Promise.reject())
+            .then(function () { self2.flash("已复制 " + q); })
+            .catch(function () { self2.flash(q); });
+        }
+        else if (act === "ddl") {
+          var m = this.connMeta, ddlSql = "";
+          if (m && m.engine === "mysql") ddlSql = "SHOW CREATE TABLE " + q;
+          else if (m && m.engine === "sqlite")
+            ddlSql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='" + t + "'";
+          if (!ddlSql) { this.flash("该引擎暂不支持查看 DDL"); return; }
+          this.newTab({ title: "DDL " + t, sql: ddlSql, schema: s });
+          var self3 = this; this.$nextTick(function () { self3.run(false); });
+        }
+      },
+      // 片段删除二次确认（自绘，不用原生 confirm）
+      askDeleteSnippet: function (id) {
+        if (this.delSnip !== id) {
+          this.delSnip = id; this.flash("再点一次 ✕ 确认删除");
+          var self = this; setTimeout(function () { if (self.delSnip === id) self.delSnip = null; }, 3000);
+          return;
+        }
+        this.delSnip = null;
+        this.deleteSnippet(id);
+      },
       insertText: function (text) {
         if (!editor) return;
         var sel = editor.getSelection();
@@ -277,7 +358,8 @@
         t.running = true; t.err = null; t.ok = null; t.confirm = null;
         if (page === 0) t.result = null;  // 翻页时保留旧表，避免闪烁
         this.persist();
-        apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null, page: page })
+        apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
+                                    page: page, schema: t.schema || null })
           .then(function (d) {
             t.running = false;
             if (!d.ok) { t.err = d.error; return; }
@@ -309,6 +391,7 @@
         this.exportOpen = false;
         var self = this, t = this.activeTab; if (!t) return;
         var fd = new FormData(); fd.append("conn", t.conn); fd.append("sql", this.currentSql()); fd.append("format", fmt);
+        if (t.schema) fd.append("schema", t.schema);
         fetch("/admin/sql/export", { method: "POST", body: fd }).then(function (r) {
           if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || "导出失败"); });
           var dispo = r.headers.get("Content-Disposition") || "";
@@ -359,7 +442,7 @@
       persist: function () {
         try {
           var data = this.tabs.map(function (t) {
-            return { id: t.id, title: t.title, conn: t.conn, sql: this.sqlOf(t) };
+            return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "", sql: this.sqlOf(t) };
           }, this);
           localStorage.setItem("dbm-console-tabs", JSON.stringify({ tabs: data, activeId: this.activeId }));
         } catch (e) { /* 忽略 */ }
@@ -371,7 +454,7 @@
           var d = JSON.parse(raw);
           if (!d.tabs || !d.tabs.length) return;
           this.tabs = d.tabs.map(function (t) {
-            return { id: t.id, title: t.title, conn: t.conn, sql: t.sql || "",
+            return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "", sql: t.sql || "",
                      result: null, confirm: null, ok: null, err: null, running: false };
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -429,6 +512,7 @@
       this.loadConnections().then(function () { self.loadSnippets(); });
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
+      document.addEventListener("click", function () { self.closeCtx(); self.exportOpen = false; });
     },
     template: [
 '<div class="dg-root">',
@@ -454,7 +538,8 @@
 '            <div v-if="!tablesByDb[db]" class="dg-empty" style="padding-left:28px">加载中…</div>',
 '            <div v-else-if="!tablesByDb[db].length" class="dg-empty" style="padding-left:28px">（无表）</div>',
 '            <template v-for="t in tablesByDb[db]" :key="db+\'.\'+t">',
-'              <div class="dg-item" style="padding-left:24px" @click="toggleTable(t, db)">',
+'              <div class="dg-item" style="padding-left:24px" @click="toggleTable(t, db)"',
+'                   @dblclick="openTableTab(t, db)" @contextmenu.prevent="openCtx($event, t, db)" title="双击打开数据 · 右键更多操作">',
 '                <span class="tw">{{ expanded[colKey(t,db)] ? "▾" : "▸" }}</span><span class="ic">▧</span>',
 '                <span class="nm">{{t}}</span>',
 '                <span class="mini" @click.stop="insertSelect(t, db)" title="SELECT * 到编辑器">↵</span>',
@@ -473,7 +558,8 @@
 '        <div v-if="tablesLoading" class="dg-empty">加载中…</div>',
 '        <div v-else-if="!tables.length" class="dg-empty">（无表）</div>',
 '        <template v-for="t in tables" :key="t">',
-'          <div class="dg-item" @click="toggleTable(t)">',
+'          <div class="dg-item" @click="toggleTable(t)"',
+'               @dblclick="openTableTab(t)" @contextmenu.prevent="openCtx($event, t, null)" title="双击打开数据 · 右键更多操作">',
 '            <span class="tw">{{ expanded[t] ? "▾" : "▸" }}</span><span class="ic">▧</span>',
 '            <span class="nm">{{t}}</span>',
 '            <span class="mini" @click.stop="insertSelect(t)" title="SELECT * 到编辑器">↵</span>',
@@ -494,7 +580,7 @@
 '      </div>',
 '      <div v-if="!snippets.length" class="dg-empty">（暂无片段）</div>',
 '      <div v-for="s in snippets" :key="s.id" class="dg-snip" @click="openSnippet(s)">',
-'        <div class="t"><span>{{s.title}}</span><span class="x" @click.stop="deleteSnippet(s.id)" title="删除">✕</span></div>',
+'        <div class="t"><span>{{s.title}}</span><span class="x" :class="{arm: delSnip===s.id}" @click.stop="askDeleteSnippet(s.id)" :title="delSnip===s.id?\'再点一次确认删除\':\'删除\'">{{delSnip===s.id ? "确认?" : "✕"}}</span></div>',
 '        <div v-if="s.note" class="n">{{s.note}}</div>',
 '        <div class="c">{{s.connection || "—"}}</div>',
 '      </div>',
@@ -506,14 +592,20 @@
 '      <button class="dg-btn run" :disabled="!activeTab || activeTab.running" @click="run(false)">▶ {{ activeTab && activeTab.running ? "执行中…" : "运行" }}</button>',
 '      <button class="dg-btn" @click="formatSql">格式化</button>',
 '      <div class="dg-menu">',
-'        <button class="dg-btn" @click="exportOpen=!exportOpen">导出 ▾</button>',
+'        <button class="dg-btn" @click.stop="exportOpen=!exportOpen">导出 ▾</button>',
 '        <div v-if="exportOpen" class="dg-menu-pop">',
 '          <button @click="exportAs(\'csv\')">CSV</button><button @click="exportAs(\'json\')">JSON</button>',
 '          <button @click="exportAs(\'markdown\')">Markdown</button><button @click="exportAs(\'xlsx\')">Excel (.xlsx)</button>',
 '        </div>',
 '      </div>',
 '      <button class="dg-btn" @click="saveSqlFile">保存 .sql</button>',
-'      <span class="sp"></span><span class="hint">⌘/Ctrl+Enter 运行 · ⌃Space 补全</span>',
+'      <span class="sp"></span>',
+'      <label v-if="connMeta && (connMeta.engine===\'mysql\'||connMeta.engine===\'postgres\')" class="dg-schema-pick">执行 schema',
+'        <select :value="activeTab?activeTab.schema:\'\'" @change="setSchema($event.target.value)">',
+'          <option value="">{{connMeta.database ? "默认（"+connMeta.database+"）" : "未指定"}}</option>',
+'          <option v-for="db in databases" :key="db" :value="db">{{db}}</option>',
+'        </select></label>',
+'      <span class="hint">⌘/Ctrl+Enter 运行 · ⌃Space 补全</span>',
 '    </div>',
 '    <div class="dg-tabs">',
 '      <div v-for="t in tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId, drag: t.id===dragId}" @click="switchTab(t.id)"',
@@ -522,8 +614,11 @@
 '      </div>',
 '      <button class="dg-tab-add" @click="newTab({})" title="新建查询">＋</button>',
 '    </div>',
-'    <div class="dg-editor" :style="{height: editorH + \'px\'}"><div ref="editorEl" style="position:absolute;inset:0"></div>',
-'      <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>',
+'    <div class="dg-editor-row" :style="{height: editorH + \'px\'}">',
+'      <div class="dg-estatus" :class="execState.cls" :title="execState.tip"><span>{{execState.icon}}</span></div>',
+'      <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>',
+'        <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>',
+'      </div>',
 '    </div>',
 '    <div class="dg-hsplit" @mousedown="beginDrag($event, \'y\')"></div>',
 '    <div class="dg-results">',
@@ -539,8 +634,9 @@
 '        <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{activeTab.ok.affected_rows}} 行 · {{activeTab.ok.duration_ms}} ms</div>',
 '        <template v-else-if="activeTab.result">',
 '          <div class="dg-res-meta">',
-'            <span>{{activeTab.result.rows.length}} 行</span>',
+'            <span>{{activeTab.result.paginated ? "本页 " : ""}}{{activeTab.result.rows.length}} 行</span>',
 '            <span v-if="activeTab.result.duration_ms!=null">{{activeTab.result.duration_ms}} ms</span>',
+'            <span v-if="activeTab.result.paginated && activeTab.result.ordered===false" style="color:var(--dg-amber)" title="LIMIT/OFFSET 翻页在无 ORDER BY 时顺序不保证稳定，可能重复或漏行">⚠ 无 ORDER BY</span>',
 '            <span v-if="activeTab.result.paginated" class="pager">',
 '              <button class="pg" :disabled="activeTab.result.page<=0" @click="goPage(activeTab.result.page-1)">‹ 上一页</button>',
 '              <span class="pn">第 {{activeTab.result.page+1}} 页</span>',
@@ -561,6 +657,15 @@
 '      </template>',
 '    </div>',
 '  </section>',
+'  <div v-if="ctx.show" class="dg-ctx" :style="{left: ctx.x+\'px\', top: ctx.y+\'px\'}" @click.stop>',
+'    <div class="hd">{{qualified()}}</div>',
+'    <button @click="ctxAction(\'open\')">打开表数据（分页）</button>',
+'    <button @click="ctxAction(\'select\')">SELECT * → 编辑器</button>',
+'    <button @click="ctxAction(\'count\')">统计行数</button>',
+'    <button @click="ctxAction(\'struct\')">查看结构（展开列）</button>',
+'    <button @click="ctxAction(\'ddl\')">查看建表语句</button>',
+'    <button @click="ctxAction(\'copy\')">复制表名</button>',
+'  </div>',
 '  <div id="dg-toast" v-if="toast">{{toast}}</div>',
 '</div>'
     ].join("")

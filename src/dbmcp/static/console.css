@@ -121,7 +121,19 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-tab-add { padding: 7px 12px; cursor: pointer; color: var(--dg-muted); background: none; border: none; font-size: 15px; }
 .dg-tab-add:hover { color: var(--dg-text); }
 
-.dg-editor { position: relative; overflow: hidden; flex: none; min-height: 0; }
+.dg-editor-row { display: flex; flex: none; min-height: 0; overflow: hidden; }
+/* 编辑区左侧执行状态条（DataGrip gutter 风） */
+.dg-estatus {
+  width: 30px; flex: none; display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 10px; background: var(--dg-panel-2); border-right: 1px solid var(--dg-border);
+  font-size: 14px; cursor: default; user-select: none;
+}
+.dg-estatus.idle span { color: var(--dg-faint); }
+.dg-estatus.ok span { color: var(--dg-green); }
+.dg-estatus.err span { color: var(--dg-red); }
+.dg-estatus.running span { color: var(--dg-accent); display: inline-block; animation: dgspin 1s linear infinite; }
+@keyframes dgspin { to { transform: rotate(360deg); } }
+.dg-editor { position: relative; overflow: hidden; flex: 1; min-width: 0; min-height: 0; }
 .dg-editor-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dg-muted); }
 
 /* ---------- 结果区 ---------- */
@@ -166,6 +178,40 @@ table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 .dg-res-ok { padding: 12px 14px; color: var(--dg-green); }
 .dg-res-err { padding: 12px 14px; color: var(--dg-red); white-space: pre-wrap; font-family: var(--dg-mono); font-size: 12px; }
 .dg-res-empty { padding: 14px; color: var(--dg-faint); }
+
+/* 执行 schema 选择器（topbar 右上） */
+.dg-schema-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dg-muted); }
+.dg-schema-pick select {
+  background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
+  border-radius: 6px; padding: 5px 26px 5px 9px; font-size: 12px; font-family: var(--dg-mono); max-width: 210px;
+}
+
+/* 深色下拉统一自绘箭头（去原生观感） */
+.dg-root select {
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%237a7e85' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 9px center;
+}
+.dg-root select:focus { outline: none; border-color: var(--dg-accent); }
+
+/* 表右键菜单 */
+.dg-ctx {
+  position: fixed; z-index: 95; min-width: 190px; background: var(--dg-panel);
+  border: 1px solid var(--dg-border); border-radius: 9px; padding: 5px;
+  box-shadow: 0 12px 36px rgba(0,0,0,.5); font-size: 12.5px;
+}
+.dg-ctx .hd {
+  padding: 6px 11px 7px; color: var(--dg-faint); font-family: var(--dg-mono); font-size: 11px;
+  border-bottom: 1px solid var(--dg-border); margin-bottom: 4px;
+  max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dg-ctx button {
+  display: block; width: 100%; text-align: left; background: none; border: none; color: var(--dg-text);
+  padding: 7px 11px; border-radius: 6px; cursor: pointer; font-size: 12.5px; font-family: inherit;
+}
+.dg-ctx button:hover { background: var(--dg-hover); }
+
+.dg-snip .t .x.arm { opacity: 1; color: var(--dg-red); font-size: 11px; }
 
 #dg-toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #111214; color: #fff;

@@ -240,14 +240,14 @@ class TestServiceHotReload:
                               writer_password=None, jump_hosts=[], ssh_key_path=None,
                               ssh_options_extra=[], max_rows=10, mask_columns=[])
         svc.query("local", "s", "SELECT 1", CallerInfo(agent="t"))
-        assert ("local", "s", "reader") in svc.pool._entries
+        assert ("local", "s", "reader", "") in svc.pool._entries
         # 改配置 → 池应被回收
         svc.upsert_connection("local", "s", CallerInfo(agent="t"),
                               engine="sqlite", environment="local", host=None, port=None,
                               database=str(db), user=None, password=None, writer_user=None,
                               writer_password=None, jump_hosts=[], ssh_key_path=None,
                               ssh_options_extra=[], max_rows=99, mask_columns=[])
-        assert ("local", "s", "reader") not in svc.pool._entries
+        assert ("local", "s", "reader", "") not in svc.pool._entries
         assert svc.config.get_connection("local", "s").policy.max_rows == 99
         # 审计留痕
         assert any(r["tool"] == "upsert_connection" for r in svc.store.recent())

@@ -55,10 +55,14 @@ class _PooledEngine:
 
 
 class EnginePool:
-    """按 (project, connection, role) 缓存引擎，并托管其 SSH 隧道生命周期。"""
+    """按 (project, connection, role, schema) 缓存引擎，并托管其 SSH 隧道生命周期。
+
+    schema 是查询台的「执行 schema」上下文：MySQL 以该库为默认库建独立引擎、
+    PG 设 search_path——比在共享连接上执行 USE 干净（不污染池内会话状态）。
+    """
 
     def __init__(self, idle_reclaim_s: int = DEFAULT_IDLE_RECLAIM_S):
-        self._entries: dict[tuple[str, str, Role], _PooledEngine] = {}
+        self._entries: dict[tuple[str, str, Role, str], _PooledEngine] = {}
         self._lock = threading.Lock()
         self._idle_reclaim_s = idle_reclaim_s
 
@@ -68,8 +72,9 @@ class EnginePool:
         connection: str,
         cfg: ConnectionConfig,
         role: Role = "reader",
+        schema: str | None = None,
     ) -> SAEngine:
-        key = (project, connection, role)
+        key = (project, connection, role, schema or "")
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None and (entry.tunnel is None or entry.tunnel.is_alive()):
@@ -79,7 +84,7 @@ class EnginePool:
                 # 隧道已死，连引擎一起回收后重建
                 entry.dispose()
                 del self._entries[key]
-            entry = _build_pooled_engine(cfg, role)
+            entry = _build_pooled_engine(cfg, role, schema)
             self._entries[key] = entry
             return entry.engine
 
@@ -117,7 +122,9 @@ def build_probe_engine(cfg: ConnectionConfig, role: Role = "reader") -> _PooledE
     return _build_pooled_engine(cfg, role)
 
 
-def _build_pooled_engine(cfg: ConnectionConfig, role: Role) -> _PooledEngine:
+def _build_pooled_engine(
+    cfg: ConnectionConfig, role: Role, schema: str | None = None
+) -> _PooledEngine:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host, cfg.port
 
@@ -128,7 +135,7 @@ def _build_pooled_engine(cfg: ConnectionConfig, role: Role) -> _PooledEngine:
         host, port = "127.0.0.1", tunnel.local_port
 
     try:
-        engine = _create_readonly_engine(cfg, role, host, port)
+        engine = _create_readonly_engine(cfg, role, host, port, schema)
     except Exception:
         if tunnel is not None:
             tunnel.close()
@@ -164,7 +171,9 @@ def _create_readonly_engine(
     role: Role,
     host: str | None,
     port: int | None,
+    schema: str | None = None,
 ) -> SAEngine:
+    """schema：查询台执行 schema 上下文。MySQL 覆盖默认库；PG 设 search_path。"""
     timeout_s = cfg.policy.statement_timeout_s
 
     if cfg.engine == "sqlite":
@@ -191,7 +200,7 @@ def _create_readonly_engine(
             password=password,
             host=host,
             port=port or 3306,
-            database=cfg.database,
+            database=schema or cfg.database,
         )
         engine = create_engine(
             url,
@@ -230,6 +239,8 @@ def _create_readonly_engine(
         options = f"-c statement_timeout={timeout_s * 1000}"
         if readonly:
             options += " -c default_transaction_read_only=on"
+        if schema:
+            options += f" -c search_path={schema}"
         return create_engine(
             url,
             pool_pre_ping=True,
@@ -242,8 +253,11 @@ def _create_readonly_engine(
 _PAGINATE_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}
 
 
-def paginate_sql(sql: str, engine_kind: str, limit: int, offset: int) -> tuple[str, bool]:
-    """给缺 LIMIT 的顶层 SELECT/UNION 注入 LIMIT/OFFSET，返回 (新SQL, 是否已分页)。
+def paginate_sql(sql: str, engine_kind: str, limit: int, offset: int) -> tuple[str, bool, bool]:
+    """给缺 LIMIT 的顶层 SELECT/UNION 注入 LIMIT/OFFSET。
+
+    返回 (新SQL, 是否已分页, 是否带 ORDER BY)——无 ORDER BY 的 LIMIT/OFFSET 翻页
+    顺序不稳定（可能重复/漏行），调用方据此提示使用者。
 
     分页兜底——防止 `SELECT * FROM 大表` 把全表拉进客户端把 DB/进程跑挂。
     用户自带 LIMIT 则尊重不改；SHOW/DESCRIBE/EXPLAIN 等非 SELECT 不动；解析失败也不动。
@@ -255,15 +269,16 @@ def paginate_sql(sql: str, engine_kind: str, limit: int, offset: int) -> tuple[s
     try:
         expr = sqlglot.parse_one(sql, read=dialect)
     except Exception:
-        return sql, False
+        return sql, False, False
     if not isinstance(expr, (exp.Select, exp.Union)):
-        return sql, False
+        return sql, False, False
+    ordered = expr.args.get("order") is not None
     if expr.args.get("limit"):
-        return sql, False
+        return sql, False, ordered
     expr = expr.limit(limit)
     if offset:
         expr = expr.offset(offset)
-    return expr.sql(dialect=dialect), True
+    return expr.sql(dialect=dialect), True, ordered
 
 
 def run_query(
