@@ -216,12 +216,24 @@ class AnalysisStore:
             con.close()
 
 
+def _numeric_str(v: Any) -> bool:
+    """DECIMAL 等类型经 _jsonable 会变成数字字符串；识别出来才能聚合（sum/avg）。"""
+    if not isinstance(v, str) or not v:
+        return False
+    try:
+        float(v)
+    except ValueError:
+        return False
+    return True
+
+
 def _infer_types(columns: list[str], rows: list[list[Any]]) -> list[str]:
     """按前 200 行推断列类型（值是 engines._jsonable 产物：int/float/bool/str/None）。"""
     types = []
     sample = rows[:200]
     for i in range(len(columns)):
         seen_int = seen_float = seen_bool = seen_str = False
+        all_numeric_str = True
         for r in sample:
             v = r[i] if i < len(r) else None
             if v is None:
@@ -234,8 +246,11 @@ def _infer_types(columns: list[str], rows: list[list[Any]]) -> list[str]:
                 seen_float = True
             else:
                 seen_str = True
+                if not _numeric_str(v):
+                    all_numeric_str = False
         if seen_str:
-            types.append("VARCHAR")
+            # 全是数字字符串（典型：MySQL DECIMAL → str）→ 按 DOUBLE 导入，否则无法 sum/avg
+            types.append("DOUBLE" if all_numeric_str else "VARCHAR")
         elif seen_float:
             types.append("DOUBLE")
         elif seen_int:

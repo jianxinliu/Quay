@@ -50,6 +50,16 @@ class TestStore:
         ds = {d["name"]: d for d in store.list_datasets("ws1")}
         assert ds["city_amt"]["type"] == "view" and ds["orders"]["rows"] == 3
 
+    def test_decimal_strings_become_double(self, store):
+        """MySQL DECIMAL 经 _jsonable 变数字字符串——必须推断为 DOUBLE 才能聚合。"""
+        store.import_rows("ws1", "amt", ["ch", "amount"],
+                          [["a", "12.50"], ["b", "3.00"], ["a", None]])
+        info = store.describe_dataset("ws1", "amt")
+        types = {c["name"]: c["type"] for c in info["columns"]}
+        assert types["amount"] == "DOUBLE" and types["ch"] == "VARCHAR"
+        out = store.run_sql("ws1", "SELECT sum(amount) FROM amt")
+        assert out["rows"][0][0] == 15.5
+
     def test_import_csv_file(self, store, tmp_path):
         f = tmp_path / "data.csv"
         f.write_text("id,name\n1,foo\n2,bar\n")
@@ -291,6 +301,20 @@ class TestGraph:
         # 中间节点是工作区里的视图，可单独预览
         prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
         assert prev["rows"][0][0] == 2
+
+    def test_seed_examples(self, tmp_path):
+        """首次启动播种内置示例；已有 workflow 或已播种过则不动。"""
+        from dbmcp.examples import EXAMPLE_NAME, seed_examples
+        from dbmcp.workflows import WorkflowStore
+        store = WorkflowStore(tmp_path / "wf.sqlite3")
+        assert seed_examples(store, tmp_path) is True
+        wf = store.get(EXAMPLE_NAME)
+        assert wf.graph and len(wf.graph["nodes"]) == 8 and wf.chart["type"] == "bar"
+        assert (tmp_path / "demo" / "channel_cost.csv").exists()
+        assert seed_examples(store, tmp_path) is False  # 幂等
+        store.delete(EXAMPLE_NAME)
+        store.save("mine", "ws", "SELECT 1", [])
+        assert seed_examples(store, tmp_path) is False  # 删了示例但有别的 → 不复活
 
     def test_run_graph_unsaved_and_compile_error(self, service, tmp_path):
         from dbmcp.workflows import WorkflowStore
