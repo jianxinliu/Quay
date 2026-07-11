@@ -302,6 +302,7 @@
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, editorReady: false, toast: "",
+        vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300,
       };
     },
@@ -409,7 +410,7 @@
                     // data tab：WHERE 条 / ORDER BY 表达式（走 SQL 重查，跨页正确）
                     where: opts.where || "", orderBy: "", lastPage: 0,
                     pendingSql: null, readSql: null, explain: null, edit: null,
-                    wfName: opts.wfName || "", wfSteps: null };
+                    wfName: opts.wfName || "", wfSteps: null, vsel: null };
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -896,19 +897,14 @@
         });
       },
       cancelEdit: function () { if (this.activeTab) this.activeTab.edit = null; },
-      commitEdit: function () {
-        var t = this.activeTab;
-        if (!t || !t.edit || !t.result) return;
+      // 生成按主键定位的单单元格 UPDATE；失败返回 null（原因已 flash）
+      makeUpdateSql: function (t, ri, ci, newRaw) {
         var k = this.mk(t.table, t.schema);
         var meta = this.tableMeta[k];
-        if (!meta) { this.flash("表结构加载中，请稍后再试"); return; }
+        if (!meta) { this.fetchMeta(t.table, t.schema); this.flash("表结构加载中，请稍后再试"); return null; }
         var pk = meta.primary_key || [];
-        if (!pk.length) { this.flash("该表无主键，无法定位行进行编辑"); t.edit = null; return; }
-        var cols = t.result.columns, row = t.result.rows[t.edit.ri];
-        var col = cols[t.edit.ci];
-        var oldV = row[t.edit.ci];
-        var newRaw = t.edit.val;
-        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) { t.edit = null; return; }
+        if (!pk.length) { this.flash("该表无主键，无法定位行进行编辑"); return null; }
+        var cols = t.result.columns, row = t.result.rows[ri];
         var self = this;
         var conds = pk.map(function (p) {
           var idx = cols.indexOf(p);
@@ -917,13 +913,64 @@
           return p + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
         });
         if (conds.some(function (c) { return c == null; })) {
-          this.flash("结果集缺少主键列，无法定位行"); t.edit = null; return;
+          this.flash("结果集缺少主键列，无法定位行"); return null;
         }
         var q = t.schema ? t.schema + "." + t.table : t.table;
-        var sql = "UPDATE " + q + " SET " + col + " = " + this.sqlLit(newRaw, oldV) +
-                  " WHERE " + conds.join(" AND ");
+        return "UPDATE " + q + " SET " + cols[ci] + " = " + this.sqlLit(newRaw, row[ci]) +
+               " WHERE " + conds.join(" AND ");
+      },
+      commitEdit: function () {
+        var t = this.activeTab;
+        if (!t || !t.edit || !t.result) return;
+        var oldV = t.result.rows[t.edit.ri][t.edit.ci];
+        var newRaw = t.edit.val;
+        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) { t.edit = null; return; }
+        var sql = this.makeUpdateSql(t, t.edit.ri, t.edit.ci, newRaw);
         t.edit = null;
-        this.run(false, 0, sql);  // 走写确认流：先风险报告，确认后 writer 执行，随后自动刷新
+        if (sql) this.run(false, 0, sql);  // 写确认流：风险报告 → 确认 → writer 执行 → 自动刷新
+      },
+
+      // ---------- Value Editor（DataGrip 式侧栏编辑面板，选中单元格展开） ----------
+      cellClick: function (ri, ci) {
+        var t = this.activeTab;
+        if (!t || t.type !== "data" || !t.result) return;
+        t.vsel = { ri: ri, ci: ci };
+        var v = t.result.rows[ri][ci];
+        this.vpVal = v == null ? "" : this.cellText(v);
+        this.vpNull = v == null;
+        this.vpOpen = true; this.vpTab = this.vpTab || "value";
+        var k = this.mk(t.table, t.schema);
+        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
+      },
+      vpDirty: function () {
+        var t = this.activeTab;
+        if (!t || !t.vsel || !t.result) return false;
+        var v = t.result.rows[t.vsel.ri][t.vsel.ci];
+        if (this.vpNull) return v != null;
+        return this.vpVal !== (v == null ? "" : this.cellText(v));
+      },
+      vpSave: function () {
+        var t = this.activeTab;
+        if (!t || !t.vsel) return;
+        if (!this.vpDirty()) { this.flash("值未变化"); return; }
+        var newRaw = this.vpNull ? "NULL" : this.vpVal;
+        var sql = this.makeUpdateSql(t, t.vsel.ri, t.vsel.ci, newRaw);
+        if (sql) this.run(false, 0, sql);  // 走写确认流（二次确认）
+      },
+      // Value 面板格式化：JSON 美化 / 压缩（非 JSON 给提示不破坏原值）
+      vpFormat: function (pretty) {
+        try {
+          var obj = JSON.parse(this.vpVal);
+          this.vpVal = pretty ? JSON.stringify(obj, null, 2) : JSON.stringify(obj);
+        } catch (e) { this.flash("当前值不是合法 JSON"); }
+      },
+      vpRecord: function () {
+        var t = this.activeTab;
+        if (!t || !t.vsel || !t.result) return [];
+        var row = t.result.rows[t.vsel.ri], self = this;
+        return t.result.columns.map(function (c, i) {
+          return { col: c, val: row[i] == null ? null : self.cellText(row[i]), cur: i === t.vsel.ci };
+        });
       },
 
       // ---------- EXPLAIN 可视化 ----------
@@ -1059,7 +1106,7 @@
                      lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0,
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
-                     wfName: t.wfName || "", wfSteps: t.wfSteps || null,
+                     wfName: t.wfName || "", wfSteps: t.wfSteps || null, vsel: null,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -1439,7 +1486,8 @@
             </span>
           </div>
           <div v-if="!activeTab.result.columns.length" class="dg-res-empty">语句已执行，无结果集。</div>
-          <div v-else class="dg-res-scroll"><table class="dg-rt">
+          <div v-else class="dg-res-body">
+          <div class="dg-res-scroll"><table class="dg-rt">
             <thead><tr>
               <th v-for="c in activeTab.result.columns" :key="c"
                   :class="{sortable: activeTab.type==='data'}"
@@ -1451,7 +1499,8 @@
             </tr></thead>
             <tbody><tr v-for="(row,ri) in activeTab.result.rows" :key="ri">
               <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)"
-                  :class="{editable: activeTab.type==='data'}"
+                  :class="{editable: activeTab.type==='data', vsel: activeTab.vsel && activeTab.vsel.ri===ri && activeTab.vsel.ci===ci}"
+                  @click="cellClick(ri,ci)"
                   @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
                 <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
                        id="dg-cell-input" class="dg-cell-edit" v-model="activeTab.edit.val"
@@ -1460,6 +1509,37 @@
               </td>
             </tr></tbody>
           </table></div>
+          <div v-if="vpOpen && activeTab.type==='data' && activeTab.vsel" class="dg-vp">
+            <div class="vp-hd">
+              <span class="vt" :class="{on: vpTab==='value'}" @click="vpTab='value'">Value</span>
+              <span class="vt" :class="{on: vpTab==='record'}" @click="vpTab='record'">Record</span>
+              <span class="vp-x" @click="vpOpen=false">✕</span>
+            </div>
+            <template v-if="vpTab==='value'">
+              <div class="vp-col">{{ activeTab.result.columns[activeTab.vsel.ci] }}</div>
+              <textarea class="vp-ta" v-model="vpVal" :disabled="vpNull"
+                        placeholder="（空字符串）" spellcheck="false"></textarea>
+              <div class="vp-fmt">
+                <button class="dg-btn" @click="vpFormat(true)" title="JSON 美化（缩进 2 空格）">格式化 JSON</button>
+                <button class="dg-btn" @click="vpFormat(false)" title="JSON 压缩为单行">压缩</button>
+              </div>
+              <label class="vp-null"><input type="checkbox" v-model="vpNull"> 设为 NULL</label>
+              <div class="vp-acts">
+                <button class="dg-btn run" :disabled="!vpDirty()" @click="vpSave"
+                        title="生成 UPDATE，经风险确认后由 writer 执行">保存（生成 UPDATE）</button>
+                <span v-if="vpDirty()" class="vp-dirty">已修改</span>
+              </div>
+            </template>
+            <template v-else>
+              <div class="vp-rec">
+                <div v-for="r in vpRecord()" :key="r.col" class="vp-rec-row" :class="{cur: r.cur}">
+                  <span class="rc">{{ r.col }}</span>
+                  <span class="rv"><i v-if="r.val===null" class="nul">NULL</i><template v-else>{{ r.val }}</template></span>
+                </div>
+              </div>
+            </template>
+          </div>
+          </div>
         </template>
         <div v-else class="dg-res-empty">{{ activeTab.type==='data' ? "加载中…" : "运行查询查看结果（⌘/Ctrl+Enter）。" }}</div>
       </template>
