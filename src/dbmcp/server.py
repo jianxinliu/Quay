@@ -91,7 +91,12 @@ def build_mcp(service: DbmService) -> FastMCP:
             "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
             "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：首次提交会生成审批单并返回 change_id，"
             "需人工在管理后台审批；批准后带 change_id 重提相同 SQL 才执行。"
-            "所有操作都会被审计记录。"
+            "跨源 JOIN、大结果集聚合、多步分析请用分析工作台（DuckDB 本地沙箱）："
+            "analysis_import 把各源查询结果快照为工作区数据集（reader 拉取、带行数上限），"
+            "analysis_sql 在工作区自由 JOIN/聚合/建 VIEW（不需审批），只把小结果带回上下文。"
+            "人或 agent 沉淀的分析流程（多语句脚本或可视化 DAG）可用 run_workflow 一键重跑："
+            "自动重拉源数据 → 逐步执行 → 返回每步状态与输出，"
+            "可用列表见 analysis_workspaces。所有操作都会被审计记录。"
         ),
     )
 

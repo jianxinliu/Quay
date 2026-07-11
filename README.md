@@ -6,7 +6,13 @@
 SQL 风险审计与人工授权、全量操作审计；内置一个 **DataGrip 风格的 SQL 查询台**
 和一个**跨源数据分析工作台**（人和 Agent 都能用）。
 
-- 设计文档：[DESIGN.md](DESIGN.md) · 分析工作台：[ANALYSIS.md](ANALYSIS.md)
+## 文档地图
+
+| 你是谁 | 看哪份 |
+|---|---|
+| **使用后台的人** | [USER_GUIDE.md](USER_GUIDE.md) — 查询台 / 分析工作台 / DAG 画布 / 审批操作手册 |
+| **接入的 AI Agent**（或写 agent 提示词的人） | [AGENT_GUIDE.md](AGENT_GUIDE.md) — 工具地图、审批流套路、跨源分析与 workflow 用法 |
+| **开发者** | [DESIGN.md](DESIGN.md) 架构与安全设计 · [ANALYSIS.md](ANALYSIS.md) 分析工作台设计 · CLAUDE.md 开发约定与经验 |
 
 ## 能做什么
 
