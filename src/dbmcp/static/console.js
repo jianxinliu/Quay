@@ -90,6 +90,7 @@
         connections: [], tabs: [], activeId: null,
         tables: [], colsByTable: {}, expanded: {}, tablesLoading: false, lastLoadedConn: null,
         databases: [], dbExpanded: {}, tablesByDb: {},  // 未绑库连接：库→表 两级
+        schemaFilter: "", dragId: null,  // 库筛选 / tab 拖拽中的 id
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, editorReady: false, toast: "",
         leftW: 264, editorH: 300,  // 可拖动分隔条控制的尺寸
@@ -111,6 +112,11 @@
       needsDb: function () {
         var m = this.connMeta;
         return !!m && (m.engine === "mysql" || m.engine === "postgres") && !m.database;
+      },
+      filteredDatabases: function () {
+        var q = this.schemaFilter.trim().toLowerCase();
+        return q ? this.databases.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; })
+                 : this.databases;
       }
     },
     methods: {
@@ -261,15 +267,17 @@
       },
 
       // ----- 运行 / 格式化 / 导出 -----
-      run: function (confirm) {
+      run: function (confirm, page) {
         var self = this, t = this.activeTab;
         if (!t) return;
         if (!t.conn) { this.flash("请先选择连接"); return; }
         var sql = this.currentSql();
         if (!sql.trim()) { this.flash("请输入 SQL"); return; }
-        t.running = true; t.err = null; t.ok = null; t.result = null; t.confirm = null;
+        page = page || 0;
+        t.running = true; t.err = null; t.ok = null; t.confirm = null;
+        if (page === 0) t.result = null;  // 翻页时保留旧表，避免闪烁
         this.persist();
-        apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null })
+        apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null, page: page })
           .then(function (d) {
             t.running = false;
             if (!d.ok) { t.err = d.error; return; }
@@ -277,6 +285,17 @@
             else if (d.kind === "confirm") t.confirm = { risk: d.risk || {}, statement_kind: d.statement_kind };
             else if (d.kind === "write") { t.ok = d; self.loadTree(); }
           }).catch(function (e) { t.running = false; t.err = "" + e; });
+      },
+      goPage: function (p) { if (p >= 0) this.run(false, p); },
+      // ----- tab 拖拽排序 -----
+      onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
+      onTabDrop: function (targetId) {
+        var from = this.tabs.findIndex(function (t) { return t.id === this.dragId; }, this);
+        var to = this.tabs.findIndex(function (t) { return t.id === targetId; });
+        if (from < 0 || to < 0 || from === to) { this.dragId = null; return; }
+        var moved = this.tabs.splice(from, 1)[0];
+        this.tabs.splice(to, 0, moved);
+        this.dragId = null; this.persist();
       },
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
       cancelConfirm: function () { if (this.activeTab) this.activeTab.confirm = null; },
@@ -424,8 +443,10 @@
 '      <div class="dg-sec-hd"><span>{{ needsDb ? "库 / 表" : "表" }}</span><span class="act" @click="loadTree" title="刷新">↻</span></div>',
 '      <div v-if="!activeTab || !activeTab.conn" class="dg-empty">先选择连接</div>',
 '      <template v-else-if="needsDb">',
+'        <div v-if="databases.length > 6" class="dg-filter"><input v-model="schemaFilter" placeholder="筛选库…"></div>',
 '        <div v-if="!databases.length" class="dg-empty">（无可用库）</div>',
-'        <template v-for="db in databases" :key="db">',
+'        <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>',
+'        <template v-for="db in filteredDatabases" :key="db">',
 '          <div class="dg-item" @click="toggleDb(db)">',
 '            <span class="tw">{{ dbExpanded[db] ? "▾" : "▸" }}</span><span class="ic">🗄</span><span class="nm">{{db}}</span>',
 '          </div>',
@@ -495,7 +516,8 @@
 '      <span class="sp"></span><span class="hint">⌘/Ctrl+Enter 运行 · ⌃Space 补全</span>',
 '    </div>',
 '    <div class="dg-tabs">',
-'      <div v-for="t in tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId}" @click="switchTab(t.id)">',
+'      <div v-for="t in tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId, drag: t.id===dragId}" @click="switchTab(t.id)"',
+'           draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">',
 '        <span class="nm">{{t.title}}</span><span class="x" @click.stop="closeTab(t.id)">✕</span>',
 '      </div>',
 '      <button class="dg-tab-add" @click="newTab({})" title="新建查询">＋</button>',
@@ -519,7 +541,12 @@
 '          <div class="dg-res-meta">',
 '            <span>{{activeTab.result.rows.length}} 行</span>',
 '            <span v-if="activeTab.result.duration_ms!=null">{{activeTab.result.duration_ms}} ms</span>',
-'            <span v-if="activeTab.result.truncated" style="color:var(--dg-amber)">已截断到 max_rows</span>',
+'            <span v-if="activeTab.result.paginated" class="pager">',
+'              <button class="pg" :disabled="activeTab.result.page<=0" @click="goPage(activeTab.result.page-1)">‹ 上一页</button>',
+'              <span class="pn">第 {{activeTab.result.page+1}} 页</span>',
+'              <button class="pg" :disabled="!activeTab.result.has_next" @click="goPage(activeTab.result.page+1)">下一页 ›</button>',
+'            </span>',
+'            <span v-else-if="activeTab.result.truncated" style="color:var(--dg-amber)">已截断到 max_rows</span>',
 '            <span v-if="activeTab.result.columns.length" class="exp">',
 '              <button @click="exportAs(\'csv\')">CSV</button><button @click="exportAs(\'json\')">JSON</button><button @click="exportAs(\'markdown\')">MD</button><button @click="exportAs(\'xlsx\')">XLSX</button>',
 '            </span>',

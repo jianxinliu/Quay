@@ -239,10 +239,41 @@ def _create_readonly_engine(
     raise UnsupportedEngineError(f"引擎 {cfg.engine!r} 暂不支持直连查询（Redis 适配在 M4）")
 
 
+_PAGINATE_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}
+
+
+def paginate_sql(sql: str, engine_kind: str, limit: int, offset: int) -> tuple[str, bool]:
+    """给缺 LIMIT 的顶层 SELECT/UNION 注入 LIMIT/OFFSET，返回 (新SQL, 是否已分页)。
+
+    分页兜底——防止 `SELECT * FROM 大表` 把全表拉进客户端把 DB/进程跑挂。
+    用户自带 LIMIT 则尊重不改；SHOW/DESCRIBE/EXPLAIN 等非 SELECT 不动；解析失败也不动。
+    """
+    import sqlglot  # noqa: PLC0415
+    from sqlglot import exp  # noqa: PLC0415
+
+    dialect = _PAGINATE_DIALECTS.get(engine_kind)
+    try:
+        expr = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return sql, False
+    if not isinstance(expr, (exp.Select, exp.Union)):
+        return sql, False
+    if expr.args.get("limit"):
+        return sql, False
+    expr = expr.limit(limit)
+    if offset:
+        expr = expr.offset(offset)
+    return expr.sql(dialect=dialect), True
+
+
 def run_query(
     engine: SAEngine, sql: str, max_rows: int, max_cell_chars: int = 4096
 ) -> QueryResult:
-    """执行只读 SQL（调用方必须先通过 classify 判定），行数截到 max_rows，单元格截到 max_cell_chars。"""
+    """执行只读 SQL（调用方必须先通过 classify 判定），行数截到 max_rows，单元格截到 max_cell_chars。
+
+    注：不用流式游标（pymysql SSCursor 提前关闭 + 连接池复用会「commands out of sync」）；
+    改由调用方注入 LIMIT 兜底（paginate_sql）限制 DB 返回行数，缓冲游标即可安全。
+    """
     start = dt.datetime.now()
     with engine.connect() as conn:
         result = conn.execute(text(sql))

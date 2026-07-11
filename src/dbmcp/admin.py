@@ -1050,9 +1050,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         sql = str(f.get("sql") or "")
         confirm = str(f.get("confirm") or "") in ("1", "on", "true")
         try:
+            page = max(int(str(f.get("page") or "0")), 0)
+        except ValueError:
+            page = 0
+        try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             result = await anyio.to_thread.run_sync(
-                service.admin_run_sql, project, connection, sql, _caller(req), confirm)
+                service.admin_run_sql, project, connection, sql, _caller(req), confirm, page)
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception as e:

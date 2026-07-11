@@ -159,6 +159,20 @@ class TestAdminConsole:
         with pytest.raises(QueryRejected, match="只读"):
             service.admin_export("demo", "main", "DELETE FROM users", "csv", CALLER)
 
+    def test_pagination_auto_limit_and_next(self, service):
+        # 连接 max_rows=2，users 有 3 行 → 每页 2 行、有下一页
+        out = service.admin_run_sql("demo", "main", "SELECT id FROM users ORDER BY id", CALLER)
+        assert out["paginated"] is True and out["page"] == 0 and out["page_size"] == 2
+        assert out["has_next"] is True and len(out["rows"]) == 2
+        # 第 2 页：剩 1 行、无下一页
+        out2 = service.admin_run_sql("demo", "main", "SELECT id FROM users ORDER BY id",
+                                     CALLER, page=1)
+        assert out2["page"] == 1 and out2["has_next"] is False and len(out2["rows"]) == 1
+
+    def test_user_limit_respected_not_paginated(self, service):
+        out = service.admin_run_sql("demo", "main", "SELECT id FROM users LIMIT 5", CALLER)
+        assert out["paginated"] is False
+
 
 class TestNoDatabaseSchema:
     """未绑定默认库的连接：不带 schema 列表要给清晰报错（而非 SQLAlchemy 反射崩溃）。"""

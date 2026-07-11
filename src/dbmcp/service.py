@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 HOUSEKEEPING_INTERVAL_S = 60
 DEFAULT_RETENTION_DAYS = 30
+ADMIN_PAGE_SIZE = 100  # 查询台每页行数（上限受连接 max_rows 约束）
 
 
 class QueryRejected(Exception):
@@ -96,28 +97,23 @@ class DbmService:
 
     # ---------- 查询 ----------
 
-    def query(self, project: str, connection: str, sql: str, caller: CallerInfo) -> dict:
-        cfg = self.config.get_connection(project, connection)
+    def _read(
+        self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
+        caller: CallerInfo, max_rows: int,
+    ) -> dict:
+        """执行一条已判定只读的 SQL：跑 reader、落审计、脱敏，返回结果 dict。
+
+        max_rows 由调用方决定（query 用连接策略；查询台分页用 page_size+1 以探测下一页），
+        与 truncated 检测解耦，便于复用。
+        """
         rec = self._base_record(project, connection, cfg, "query", sql, caller)
-
-        verdict = classify(sql, cfg.engine)
-        if not verdict.readonly:
-            rec.status = "rejected"
-            rec.detail = verdict.reason
-            self.store.record(rec)
-            raise QueryRejected(
-                f"已拒绝：{verdict.reason}。query 工具仅允许只读语句；"
-                "数据变更操作需人工授权的 execute 流程（M3 上线后提供）。"
-            )
-
         try:
             engine = self.pool.get(project, connection, cfg)
-            result = engines.run_query(engine, sql, cfg.policy.max_rows,
+            result = engines.run_query(engine, sql, max_rows,
                                         max_cell_chars=cfg.policy.max_cell_chars)
         except QueryRejected:
             raise
         except Exception as e:
-            # 无默认库时用非限定表名 → MySQL 1046 / PG 未指定 schema，给 agent 友好指引
             if not cfg.database and _is_no_database_error(e):
                 rec.status = "error"
                 rec.detail = "未选定数据库"
@@ -142,11 +138,29 @@ class DbmService:
             "row_count": result.row_count,
             "truncated": result.truncated,
             "duration_ms": result.duration_ms,
-            "statement_kind": verdict.statement_kind,
         }
         if masked:
             out["masked_columns"] = masked
-        if result.truncated:
+        return out
+
+    def query(self, project: str, connection: str, sql: str, caller: CallerInfo) -> dict:
+        cfg = self.config.get_connection(project, connection)
+        verdict = classify(sql, cfg.engine)
+        if not verdict.readonly:
+            rec = self._base_record(project, connection, cfg, "query", sql, caller)
+            rec.status = "rejected"
+            rec.detail = verdict.reason
+            self.store.record(rec)
+            raise QueryRejected(
+                f"已拒绝：{verdict.reason}。query 工具仅允许只读语句；"
+                "数据变更操作需人工授权的 execute 流程（M3 上线后提供）。"
+            )
+
+        # 兜底：缺 LIMIT 的 SELECT 注入 LIMIT max_rows+1，防大表全量缓冲把 DB/进程拖挂
+        run_sql, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
+        out = self._read(project, connection, cfg, run_sql, caller, cfg.policy.max_rows)
+        out["statement_kind"] = verdict.statement_kind
+        if out["truncated"]:
             out["hint"] = (
                 f"结果已截断到 {cfg.policy.max_rows} 行（连接策略 max_rows）。"
                 "如需后续数据，请在 SQL 中用 LIMIT/OFFSET（或 WHERE 条件缩小范围）自行分页。"
@@ -156,11 +170,13 @@ class DbmService:
     # ---------- 管理后台查询台（人已认证，写操作二次确认后直接执行）----------
 
     def admin_run_sql(
-        self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False
+        self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False,
+        page: int = 0, page_size: int | None = None,
     ) -> dict:
         """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
 
-        - 只读语句：直接跑 reader 出结果（等价 query，含脱敏/截断策略）。
+        - 只读语句：跑 reader 出结果，自动分页（缺 LIMIT 的 SELECT 注入 LIMIT/OFFSET
+          兜底，防大表拉挂 DB）；用户自带 LIMIT 则尊重不改。
         - 写语句 + confirm=False：评估风险并返回风险报告，**不执行**。
         - 写语句 + confirm=True：经人工二次确认，直接用 writer 账号执行并落审计。
           这是后台专属旁路（不进审批单）；红线「拒绝—重提」只约束 agent 的 execute。
@@ -168,7 +184,23 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         verdict = classify(sql, cfg.engine)
         if verdict.readonly:
-            return {"kind": "read", **self.query(project, connection, sql, caller)}
+            page = max(page, 0)
+            size = min(page_size or ADMIN_PAGE_SIZE, cfg.policy.max_rows)
+            paged_sql, paginated = engines.paginate_sql(sql, cfg.engine, size + 1, page * size)
+            if paginated:
+                # 取 size+1 行探测是否有下一页；不受连接 max_rows 二次截断影响
+                out = self._read(project, connection, cfg, paged_sql, caller, size + 1)
+                rows = out["rows"]
+                out["has_next"] = len(rows) > size
+                out["rows"] = rows[:size]
+                out["row_count"] = len(out["rows"])
+                out.update(paginated=True, page=page, page_size=size)
+                out.pop("truncated", None)
+                return {"kind": "read", **out}
+            # 自带 LIMIT / 非 SELECT：走常规 query（max_rows + 流式游标兜底），不分页
+            out = self.query(project, connection, sql, caller)
+            out["paginated"] = False
+            return {"kind": "read", **out}
 
         if not confirm:
             report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
