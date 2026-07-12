@@ -46,6 +46,22 @@ def client(tmp_path):
     svc.close()
 
 
+def test_search_tables_and_lint(client):
+    """全局表搜索（sqlite sqlite_master LIKE）+ sqlglot 语法检查接口。"""
+    tc, svc = client
+    r = tc.get("/admin/sql/search_tables?conn=demo/main&q=use")
+    assert r.status_code == 200
+    assert any(x["table"] == "users" for x in r.json()["results"])
+    assert tc.get("/admin/sql/search_tables?conn=demo/main&q=").json()["results"] == []
+    # lint：合法 SQL 无错；语法错误返回行列；词法错误（引号不闭合）也有定位
+    ok = tc.post("/admin/sql/lint", data={"sql": "SELECT 1 FROM users", "dialect": "sqlite"})
+    assert ok.json()["errors"] == []
+    bad = tc.post("/admin/sql/lint", data={"sql": "SELEC 1 FRM users", "dialect": "mysql"}).json()
+    assert bad["errors"] and bad["errors"][0]["line"] == 1
+    tok = tc.post("/admin/sql/lint", data={"sql": "SELECT 'abc FROM t", "dialect": "mysql"}).json()
+    assert tok["errors"] and tok["errors"][0]["message"]
+
+
 def test_sql_import_rows(client):
     """数据导入：参数化批量 INSERT + 列校验 + 审计留痕。"""
     tc, svc = client

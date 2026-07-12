@@ -869,6 +869,18 @@ class DbmService:
         return self._audited(project, connection, cfg, "describe_table", detail, caller,
                              lambda: engines.describe_table(engine, table, schema))
 
+    def admin_search_tables(
+        self, project: str, connection: str, q: str, caller: CallerInfo,
+    ) -> list[dict]:
+        """查询台全局表名搜索（⌘P）：跨库 LIKE 匹配，最多 50 条。"""
+        q = (q or "").strip()
+        if not q:
+            return []
+        cfg = self.config.get_connection(project, connection)
+        engine = self.pool.get(project, connection, cfg)
+        return self._audited(project, connection, cfg, "search_tables", q, caller,
+                             lambda: engines.search_tables(engine, cfg.engine, q))
+
     def admin_table_sizes(
         self, project: str, connection: str, caller: CallerInfo, schema: str | None = None
     ) -> dict[str, int]:

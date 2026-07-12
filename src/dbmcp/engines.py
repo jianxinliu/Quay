@@ -370,6 +370,26 @@ def run_write(engine: SAEngine, sql: str) -> QueryResult:
     return QueryResult(columns=[], rows=[], row_count=affected, truncated=False, duration_ms=duration_ms)
 
 
+def search_tables(engine: SAEngine, engine_kind: str, q: str, limit: int = 50) -> list[dict]:
+    """跨库按名模糊搜表（查询台 ⌘P 跳转）。返回 [{db, table}]，全程参数化。"""
+    like = f"%{q}%"
+    if engine_kind == "mysql":
+        sql = ("SELECT table_schema, table_name FROM information_schema.tables"
+               " WHERE table_name LIKE :q AND table_schema NOT IN"
+               " ('mysql','information_schema','performance_schema','sys')"
+               " ORDER BY table_schema, table_name LIMIT :n")
+    elif engine_kind == "postgres":
+        sql = ("SELECT schemaname, tablename FROM pg_catalog.pg_tables"
+               " WHERE tablename LIKE :q AND schemaname NOT IN ('pg_catalog','information_schema')"
+               " ORDER BY schemaname, tablename LIMIT :n")
+    else:  # sqlite
+        sql = ("SELECT '' AS s, name FROM sqlite_master WHERE type = 'table'"
+               " AND name LIKE :q ORDER BY name LIMIT :n")
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), {"q": like, "n": limit}).fetchall()
+    return [{"db": r[0] or "", "table": r[1]} for r in rows]
+
+
 def insert_rows(engine: SAEngine, table: str, columns: list[str],
                 rows: list[list], schema: str | None = None) -> QueryResult:
     """参数化批量 INSERT（单事务，全部成功或整体回滚）。

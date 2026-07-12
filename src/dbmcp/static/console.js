@@ -316,6 +316,7 @@
         connections: [], workspaces: [], wfs: [], tabs: [], activeId: null,
         importPlan: null,  // {t, db, workspace, dataset, limit} 导入到分析工作区的内联表单
         importRows: null,  // {t, db, text, header, parsed} 数据导入（CSV/粘贴 → INSERT）
+        tblSearch: null,   // {q, results, sel, loading} 全局表名搜索浮层（⌘P）
         // 树状态（当前连接）
         databases: [], tablesByDb: {}, tableMeta: {}, tableSizes: {},
         openDb: {}, openTf: {}, openTbl: {}, openSub: {},
@@ -499,6 +500,7 @@
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
         if (t && t.view === "chart" && t.result) this.renderChart(); else this.disposeChart();
+        this.scheduleLint();
       },
       onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
       onTabDrop: function (targetId) {
@@ -1298,6 +1300,76 @@
         if (sql) this.run(false, 0, sql);  // 写确认流：风险报告 → 确认 → writer 执行 → 自动刷新
       },
 
+      // ---------- SQL 实时语法检查（sqlglot 按方言，防抖 600ms → Monaco 红波浪） ----------
+      scheduleLint: function () {
+        var self = this;
+        clearTimeout(this._lt);
+        this._lt = setTimeout(function () { self.runLint(); }, 600);
+      },
+      runLint: function () {
+        if (!editor || !window.monaco) return;
+        var model = editor.getModel();
+        if (!model) return;
+        var t = this.activeTab;
+        var clear = function () { window.monaco.editor.setModelMarkers(model, "dbm", []); };
+        if (!t || t.type !== "query" && t.type !== "flow") { clear(); return; }
+        var dialect = this.isAnalysis ? "duckdb" : (this.connMeta ? this.connMeta.engine : "");
+        if (["mysql", "postgres", "sqlite", "duckdb"].indexOf(dialect) < 0) { clear(); return; }
+        var sql = model.getValue();
+        if (!sql.trim()) { clear(); return; }
+        apiPost("/admin/sql/lint", { sql: sql, dialect: dialect }).then(function (d) {
+          if (!d.ok || editor.getModel() !== model) return;
+          var markers = (d.errors || []).map(function (e) {
+            var line = Math.min(e.line || 1, model.getLineCount());
+            var col = Math.max(1, e.col || 1);
+            return { startLineNumber: line, startColumn: col, endLineNumber: line,
+                     endColumn: Math.max(col + 1, model.getLineMaxColumn(line)),
+                     message: e.message, severity: window.monaco.MarkerSeverity.Error };
+          });
+          window.monaco.editor.setModelMarkers(model, "dbm", markers);
+        }).catch(function () { /* lint 失败静默，不影响编辑 */ });
+      },
+
+      // ---------- 全局表名搜索（⌘P，跨库 LIKE，回车打开表数据） ----------
+      openTblSearch: function () {
+        var t = this.activeTab;
+        if (!t || !t.conn || this.isAnalysis) { this.flash("先选择一个数据库连接"); return; }
+        this.tblSearch = { q: "", results: [], sel: 0, loading: false };
+        this.$nextTick(function () {
+          var el = document.getElementById("dg-tblsearch-input");
+          if (el) el.focus();
+        });
+      },
+      tblSearchInput: function () {
+        var self = this, s = this.tblSearch;
+        if (!s) return;
+        clearTimeout(this._tst);
+        if (!s.q.trim()) { s.results = []; return; }
+        this._tst = setTimeout(function () {
+          s.loading = true;
+          apiGet("/admin/sql/search_tables?conn=" + encodeURIComponent(self.activeTab.conn)
+                 + "&q=" + encodeURIComponent(s.q))
+            .then(function (d) {
+              if (self.tblSearch !== s) return;  // 已关闭/重开
+              s.loading = false;
+              s.results = d.ok ? d.results : [];
+              s.sel = 0;
+            }).catch(function () { s.loading = false; });
+        }, 300);
+      },
+      tblSearchKey: function (e) {
+        var s = this.tblSearch;
+        if (!s) return;
+        if (e.key === "ArrowDown") { e.preventDefault(); s.sel = Math.min(s.sel + 1, s.results.length - 1); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); s.sel = Math.max(s.sel - 1, 0); }
+        else if (e.key === "Enter" && s.results[s.sel]) this.tblSearchGo(s.results[s.sel]);
+        else if (e.key === "Escape") this.tblSearch = null;
+      },
+      tblSearchGo: function (item) {
+        this.tblSearch = null;
+        this.openTableTab(item.table, item.db || "");
+      },
+
       // ---------- 数据导入（CSV/粘贴 → 参数化 INSERT，writer 单事务） ----------
       openImport: function (t, db) {
         this.importRows = { t: t, db: db || "", text: "", header: true, parsed: null, running: false };
@@ -1781,6 +1853,8 @@
         });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { self.run(false); });
         editor.onDidBlurEditorText(function () { self.persist(); });
+        editor.onDidChangeModelContent(function () { self.scheduleLint(); });  // 实时语法检查
+        this.scheduleLint();
         // 上下文感知补全（DataGrip 式）：
         // - `库.` → 该库的表；`表./别名.` → 列
         // - FROM/JOIN/UPDATE/INTO 后 → 表；SELECT/WHERE/ON/BY/SET 等后 → 当前语句各表的列
@@ -1902,11 +1976,13 @@
       window.addEventListener("beforeunload", function () { self.persist(); });
       document.addEventListener("click", function () { self.closeCtx(); self.exportOpen = false; self.copyOpen = false; });
       // ⌘/Ctrl+F：焦点不在 Monaco 时打开网格内搜索（Monaco 自己的查找不受影响）
+      // ⌘/Ctrl+P：全局表名搜索（跨库，回车直达表数据）
       document.addEventListener("keydown", function (e) {
         if ((e.metaKey || e.ctrlKey) && e.key === "f" && editor && !editor.hasTextFocus()) {
           var t = self.activeTab;
           if (t && t.result && t.result.columns.length) { e.preventDefault(); self.openResQ(); }
         }
+        if ((e.metaKey || e.ctrlKey) && e.key === "p") { e.preventDefault(); self.openTblSearch(); }
       });
       window.addEventListener("resize", function () { if (chartInst) chartInst.resize(); });
       // 恢复的活动 tab 若在图表视图，重画
@@ -1923,6 +1999,7 @@
     <div class="dg-tree">
       <div class="dg-sec-hd"><span>{{ needsDb ? "库 / 表" : "表" }}</span>
         <span v-if="selCount" class="selinfo">已选 {{ selCount }} <a @click="clearSel">清除</a></span>
+        <span class="act" @click="openTblSearch" title="全局搜表跳转（⌘/Ctrl+P）">⌕</span>
         <span class="act" @click="refreshTree" title="刷新（重新拉取）">↻</span></div>
       <div v-if="!activeTab || !activeTab.conn" class="dg-empty">先选择连接</div>
       <template v-else-if="needsDb">
@@ -2364,6 +2441,22 @@
     </template>
     <div class="sep"></div>
     <button class="danger" @click="ctxAction('drop')">{{ ctx.multi ? ("DROP " + selCount + " 张表…") : "DROP 表…" }}</button>
+  </div>
+  <div v-if="tblSearch" class="dg-tblsearch" @click.self="tblSearch=null">
+    <div class="box">
+      <input id="dg-tblsearch-input" v-model="tblSearch.q" placeholder="输入表名跳转（当前连接跨库搜索）…"
+             spellcheck="false" @input="tblSearchInput" @keydown="tblSearchKey">
+      <div class="list">
+        <div v-if="tblSearch.loading" class="dg-empty">搜索中…</div>
+        <div v-else-if="tblSearch.q && !tblSearch.results.length" class="dg-empty">（无匹配表）</div>
+        <div v-for="(r,i) in tblSearch.results" :key="i" class="item" :class="{cur: i===tblSearch.sel}"
+             @click="tblSearchGo(r)" @mousemove="tblSearch.sel=i">
+          <span class="ic ic-table"></span>
+          <span class="nm">{{ r.db ? r.db + "." + r.table : r.table }}</span>
+        </div>
+      </div>
+      <div class="ft">↑↓ 选择 · Enter 打开表数据 · Esc 关闭</div>
+    </div>
   </div>
   <div id="dg-toast" v-if="toast">{{ toast }}</div>
 </div>`

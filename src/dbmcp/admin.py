@@ -543,6 +543,33 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
 
 # 查询台页面：Vue 3 + Monaco 深色 IDE。页面只给挂载点与脚本，逻辑在 static/console.js，
 # 数据全走 /admin/sql/* JSON 接口（连接/表/结构/执行/导出/片段），与服务端渲染解耦。
+def _lint_sql(sql: str, dialect: str) -> list[dict]:
+    """sqlglot 语法检查（查询台编辑器标红）。只报错误，不阻断任何执行路径——
+    执行时的「默认拒绝」判定在 classify/assess，与这里无关。"""
+    import re as _re
+
+    import sqlglot
+    from sqlglot.errors import ParseError, SqlglotError
+
+    if not sql.strip():
+        return []
+    try:
+        sqlglot.parse(sql, read=dialect)
+        return []
+    except ParseError as e:
+        out = []
+        for err in getattr(e, "errors", [])[:5]:
+            out.append({"line": err.get("line"), "col": err.get("col"),
+                        "message": err.get("description") or str(e)})
+        return out or [{"line": 1, "col": 1, "message": str(e)}]
+    except SqlglotError as e:  # 词法错误等（版本间类名有变：TokenizeError/TokenError）→ 基类兜底
+        m = _re.search(r"Line (\d+), Col: (\d+)", str(e))
+        return [{"line": int(m.group(1)) if m else 1, "col": int(m.group(2)) if m else 1,
+                 "message": str(e).split("\n")[0][:200]}]
+    except Exception:  # noqa: BLE001  lint 永不抛错影响编辑
+        return []
+
+
 def _console_body() -> str:
     return (
         '<link rel="stylesheet" href="/admin/static/console.css">'
@@ -1239,6 +1266,32 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
 
         _threading.Thread(target=_work_graph, name="dbm-adminjob", daemon=True).start()
         return JSONResponse({"ok": True, "job_id": job_id})
+
+    @mcp.custom_route("/admin/sql/search_tables", methods=["GET"])
+    @guard
+    async def _sql_search_tables(req: Request) -> JSONResponse:
+        conn = req.query_params.get("conn") or ""
+        q = req.query_params.get("q") or ""
+        if "/" not in conn or not q.strip():
+            return JSONResponse({"ok": True, "results": []})
+        project, connection = conn.split("/", 1)
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: service.admin_search_tables(project, connection, q, _caller(req)))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "results": out})
+
+    @mcp.custom_route("/admin/sql/lint", methods=["POST"])
+    @guard
+    async def _sql_lint(req: Request) -> JSONResponse:
+        """编辑器实时语法检查：sqlglot 按方言 parse，返回首个错误的行列。"""
+        f = await req.form()
+        sql = str(f.get("sql") or "")
+        dialect = str(f.get("dialect") or "mysql")
+        if dialect not in ("mysql", "postgres", "sqlite", "duckdb"):
+            dialect = "mysql"
+        return JSONResponse({"ok": True, "errors": _lint_sql(sql, dialect)})
 
     @mcp.custom_route("/admin/sql/import", methods=["POST"])
     @guard
