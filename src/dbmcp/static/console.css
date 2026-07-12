@@ -530,3 +530,41 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
 .dg-flow-cfg .row.acts { display: flex; gap: 6px; margin-top: 12px; }
 .dg-flow-cfg .dg-sel { width: 100%; }
 @keyframes dgspin { to { transform: rotate(360deg); } }
+
+/* ---------- 行选择 / 行级 CRUD / 网格内搜索 ---------- */
+.dg-rt th.gut, .dg-rt td.gut {
+  width: 40px; min-width: 40px; text-align: right; padding: 3px 8px 3px 4px;
+  color: var(--dg-faint); font-size: 10.5px; cursor: pointer; user-select: none;
+  position: sticky; left: 0; background: var(--dg-bg); border-right: 1px solid var(--dg-border);
+}
+.dg-rt td.gut:hover { color: var(--dg-text); background: var(--dg-hover); }
+.dg-rt tr.rsel td { background: var(--dg-accent-soft); }
+.dg-rt tr.rsel td.gut { color: #cfe0ff; }
+.dg-rt td.hit { outline: 1px solid var(--dg-amber); outline-offset: -1px; }
+.dg-rt td.curhit { background: #4a3c14; outline: 1.5px solid var(--dg-amber); }
+.dg-newrow td { padding: 2px 4px; }
+.dg-newrow td.nw { color: var(--dg-green); font-weight: 700; }
+.dg-newrow input {
+  width: 100%; min-width: 60px; box-sizing: border-box; background: var(--dg-bg);
+  color: var(--dg-text); border: 1px solid var(--dg-green); border-radius: 3px;
+  padding: 3px 6px; font-family: var(--dg-mono); font-size: 12px;
+}
+.dg-newrow input:focus { outline: none; border-color: var(--dg-accent); }
+.dg-newrow-acts {
+  flex: none; display: flex; gap: 8px; align-items: center; padding: 6px 10px;
+  border-top: 1px solid var(--dg-border); background: var(--dg-panel-2);
+}
+.dg-newrow-acts .hint { color: var(--dg-faint); font-size: 11px; }
+.dg-res-meta .rowops { display: inline-flex; gap: 6px; align-items: center; color: var(--dg-amber); }
+.dg-res-meta .rowops .act, .dg-res-meta .dg-resq .act {
+  cursor: pointer; color: var(--dg-muted); padding: 0 3px;
+}
+.dg-res-meta .rowops .act:hover, .dg-res-meta .dg-resq .act:hover { color: var(--dg-text); }
+.dg-res-meta .dg-resq { display: inline-flex; gap: 4px; align-items: center; }
+.dg-res-meta .dg-resq input {
+  width: 180px; background: var(--dg-bg); color: var(--dg-text);
+  border: 1px solid var(--dg-accent); border-radius: 4px; padding: 2px 8px;
+  font-size: 12px; font-family: var(--dg-mono);
+}
+.dg-res-meta .dg-resq input:focus { outline: none; }
+.dg-res-meta .dg-resq .cnt { color: var(--dg-muted); font-size: 11px; min-width: 34px; }
