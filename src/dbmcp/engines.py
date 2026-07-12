@@ -370,6 +370,25 @@ def run_write(engine: SAEngine, sql: str) -> QueryResult:
     return QueryResult(columns=[], rows=[], row_count=affected, truncated=False, duration_ms=duration_ms)
 
 
+def insert_rows(engine: SAEngine, table: str, columns: list[str],
+                rows: list[list], schema: str | None = None) -> QueryResult:
+    """参数化批量 INSERT（单事务，全部成功或整体回滚）。
+
+    表名/列名由调用方经表结构校验后传入；此处用 SQLAlchemy 构造以正确按方言加引号，
+    值全部走绑定参数——导入数据永不拼接 SQL。
+    """
+    import sqlalchemy as sa
+
+    start = dt.datetime.now()
+    t = sa.table(table, *[sa.column(c) for c in columns], schema=schema or None)
+    params = [dict(zip(columns, r, strict=False)) for r in rows]
+    with engine.begin() as conn:
+        conn.execute(sa.insert(t), params)
+    duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
+    return QueryResult(columns=[], rows=[], row_count=len(rows), truncated=False,
+                       duration_ms=duration_ms)
+
+
 def explain(engine: SAEngine, sql: str, engine_kind: str) -> str | None:
     """取执行计划文本，供风险评估参考。失败返回 None（不阻断主流程）。"""
     prefix = "EXPLAIN "  # 不带 ANALYZE，避免真实执行写语句

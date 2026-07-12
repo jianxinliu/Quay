@@ -1240,6 +1240,30 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         _threading.Thread(target=_work_graph, name="dbm-adminjob", daemon=True).start()
         return JSONResponse({"ok": True, "job_id": job_id})
 
+    @mcp.custom_route("/admin/sql/import", methods=["POST"])
+    @guard
+    async def _sql_import(req: Request) -> JSONResponse:
+        """查询台数据导入：前端解析 CSV/粘贴为 rows JSON，此处参数化批量 INSERT。"""
+        import json as _json
+        f = await req.form()
+        conn = str(f.get("conn") or "")
+        if "/" not in conn:
+            return JSONResponse({"ok": False, "error": "缺少连接"}, status_code=400)
+        project, connection = conn.split("/", 1)
+        try:
+            columns = _json.loads(str(f.get("columns") or "[]"))
+            rows = _json.loads(str(f.get("rows") or "[]"))
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "columns/rows 不是合法 JSON"}, status_code=400)
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: service.admin_import_rows(
+                    project, connection, str(f.get("table") or ""), columns, rows,
+                    _caller(req), schema=str(f.get("schema") or "") or None))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, **out})
+
     @mcp.custom_route("/admin/analysis/import", methods=["POST"])
     @guard
     async def _analysis_import(req: Request) -> JSONResponse:

@@ -46,6 +46,26 @@ def client(tmp_path):
     svc.close()
 
 
+def test_sql_import_rows(client):
+    """数据导入：参数化批量 INSERT + 列校验 + 审计留痕。"""
+    tc, svc = client
+    r = tc.post("/admin/sql/import", data={
+        "conn": "demo/main", "table": "users",
+        "columns": '["name", "active"]',
+        "rows": '[["frank", 1], ["grace", 0]]'})
+    assert r.status_code == 200 and r.json()["inserted"] == 2
+    out = svc.admin_run_sql("demo", "main", "SELECT count(*) FROM users", CALLER)
+    assert out["rows"][0][0] == 4  # 原 2 + 导入 2
+    # 列名不在表结构 → 拒绝（防注入面）
+    r2 = tc.post("/admin/sql/import", data={
+        "conn": "demo/main", "table": "users",
+        "columns": '["name; DROP TABLE users --"]', "rows": '[["x"]]'})
+    assert r2.status_code == 400 and "不存在" in r2.json()["error"]
+    # 审计留痕
+    recs = [x for x in svc.store.recent() if x["tool"] == "admin_import"]
+    assert recs and "2 行" in recs[0]["sql"]
+
+
 def test_expired_pending_not_in_badge(client):
     """过期的 pending 单不计入侧栏角标/顶部横幅（存储态仍是 pending，惰性过期）。"""
     tc, svc = client

@@ -22,6 +22,30 @@
   var colCache = {};          // "conn|schema|table" -> columns
   var seq = 1;
   var STORE_KEY = "dbm-console-v2";
+  // CSV/TSV 解析（导入用）：自动检测分隔符（Excel 复制区域即 TSV），支持引号包裹与转义
+  function parseDelimited(text) {
+    text = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+    if (!text.trim()) return null;
+    var nl = text.indexOf("\n");
+    var first = nl < 0 ? text : text.slice(0, nl);
+    var delim = first.indexOf("\t") >= 0 ? "\t" : ",";
+    var rows = [], row = [], cur = "", inQ = false, started = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false;
+        } else cur += ch;
+      } else if (ch === '"' && !started) { inQ = true; started = true; }
+      else if (ch === delim) { row.push(cur); cur = ""; started = false; }
+      else if (ch === "\n") { row.push(cur); rows.push(row); row = []; cur = ""; started = false; }
+      else { cur += ch; started = true; }
+    }
+    row.push(cur);
+    rows.push(row);
+    return rows;
+  }
+
   var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
   var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
 
@@ -291,6 +315,7 @@
       return {
         connections: [], workspaces: [], wfs: [], tabs: [], activeId: null,
         importPlan: null,  // {t, db, workspace, dataset, limit} 导入到分析工作区的内联表单
+        importRows: null,  // {t, db, text, header, parsed} 数据导入（CSV/粘贴 → INSERT）
         // 树状态（当前连接）
         databases: [], tablesByDb: {}, tableMeta: {}, tableSizes: {},
         openDb: {}, openTf: {}, openTbl: {}, openSub: {},
@@ -695,6 +720,7 @@
           this.importPlan = { t: t, db: s, workspace: this.workspaces[0] || "ws1",
                               dataset: t, limit: 200000, running: false };
         }
+        else if (act === "import") this.openImport(t, s);
         else if (act === "drop") {
           var items = multi ? Object.values(this.selected) : [{ t: t, db: s }];
           this.dropPlan = { items: items, running: false, results: null };
@@ -1270,6 +1296,67 @@
         var sql = this.makeUpdateSql(t, t.edit.ri, t.edit.ci, newRaw);
         t.edit = null;
         if (sql) this.run(false, 0, sql);  // 写确认流：风险报告 → 确认 → writer 执行 → 自动刷新
+      },
+
+      // ---------- 数据导入（CSV/粘贴 → 参数化 INSERT，writer 单事务） ----------
+      openImport: function (t, db) {
+        this.importRows = { t: t, db: db || "", text: "", header: true, parsed: null, running: false };
+        var k = this.mk(t, db);
+        if (!this.tableMeta[k]) this.fetchMeta(t, db);  // 列映射需要表结构
+      },
+      importFile: function (ev) {
+        var self = this, f = ev.target.files && ev.target.files[0];
+        if (!f) return;
+        var r = new FileReader();
+        r.onload = function () { self.importRows.text = r.result; self.importParse(); };
+        r.readAsText(f);
+        ev.target.value = "";
+      },
+      importParse: function () {
+        var p = this.importRows;
+        if (!p) return;
+        var all = parseDelimited(p.text);
+        if (!all || !all.length) { this.flash("没有可解析的数据"); return; }
+        var meta = this.tableMeta[this.mk(p.t, p.db)];
+        if (!meta) { this.fetchMeta(p.t, p.db); this.flash("表结构加载中，请稍后再点解析"); return; }
+        var tableCols = meta.columns.map(function (c) { return c.name; });
+        var header = p.header ? all[0] : null;
+        var dataRows = p.header ? all.slice(1) : all;
+        var mapping;
+        if (header) {  // 按名匹配（大小写不敏感），未匹配列忽略
+          var lower = {};
+          tableCols.forEach(function (c) { lower[c.toLowerCase()] = c; });
+          mapping = header.map(function (h) { return lower[(h || "").trim().toLowerCase()] || null; });
+        } else {       // 无表头：按表列顺序对位
+          mapping = (all[0] || []).map(function (_v, i) { return tableCols[i] || null; });
+        }
+        var cols = [], idxs = [];
+        mapping.forEach(function (m, i) { if (m) { cols.push(m); idxs.push(i); } });
+        if (!cols.length) { this.flash("没有任何列能对应到表 " + p.t + " 的字段"); return; }
+        var rows = dataRows
+          .filter(function (r) { return r.some(function (v) { return v !== ""; }); })
+          .map(function (r) {
+            return idxs.map(function (i) { var v = r[i]; return v === "" || v === undefined ? null : v; });
+          });
+        if (!rows.length) { this.flash("解析后没有数据行"); return; }
+        p.parsed = { columns: cols, rows: rows, skipped: mapping.filter(function (m) { return !m; }).length };
+      },
+      confirmImportRows: function () {
+        var self = this, p = this.importRows;
+        if (!p || !p.parsed || p.running) return;
+        p.running = true;
+        var tab = this.activeTab;
+        apiPost("/admin/sql/import", {
+          conn: tab.conn, table: p.t, schema: p.db || null,
+          columns: JSON.stringify(p.parsed.columns), rows: JSON.stringify(p.parsed.rows),
+        }).then(function (d) {
+          p.running = false;
+          if (!d.ok) { self.flash(d.error); return; }
+          self.importRows = null;
+          self.flash("已导入 " + d.inserted + " 行 → " + p.t + "（" + d.duration_ms + " ms）");
+          var t = self.activeTab;
+          if (t && t.type === "data" && t.table === p.t) self.run(false, t.lastPage);
+        }).catch(function (e) { p.running = false; self.flash("" + e); });
       },
 
       // ---------- 行选择 / 行级 CRUD / 复制 / 网格内搜索（DataGrip data editor 行为） ----------
@@ -1972,6 +2059,27 @@
         <button class="dg-btn" :disabled="importPlan.running" @click="importPlan=null">取消</button>
       </div>
     </div>
+    <div v-if="importRows" class="dg-drop" style="background:#1f2d3a;border-color:#2f4a63">
+      <div class="hd" style="color:#9fc6ee">导入数据到 <code>{{ importRows.db ? importRows.db + "." + importRows.t : importRows.t }}</code>
+        —— 粘贴 CSV / TSV（Excel 里复制区域直接粘）或选文件；writer 单事务执行并审计</div>
+      <textarea class="dg-imp-ta" v-model="importRows.text" rows="5" spellcheck="false"
+                placeholder="name,email,active&#10;frank,f@x,1&#10;grace,g@x,0"
+                @input="importRows.parsed = null"></textarea>
+      <div class="acts" style="align-items:center;gap:12px;flex-wrap:wrap">
+        <input type="file" accept=".csv,.tsv,.txt" @change="importFile" style="font-size:12px;color:var(--dg-muted);max-width:220px">
+        <label style="font-size:12px;color:var(--dg-muted)">
+          <input type="checkbox" v-model="importRows.header" @change="importRows.parsed = null"> 首行是表头（按列名匹配）</label>
+        <button class="dg-btn" @click="importParse">解析预览</button>
+        <template v-if="importRows.parsed">
+          <span style="font-size:12px;color:#7ee2a8">✓ {{ importRows.parsed.rows.length }} 行 →
+            {{ importRows.parsed.columns.join(", ") }}<template v-if="importRows.parsed.skipped">
+            （忽略 {{ importRows.parsed.skipped }} 个未匹配列）</template></span>
+          <button class="dg-btn run" :disabled="importRows.running" @click="confirmImportRows">
+            {{ importRows.running ? "导入中…" : "确认导入 " + importRows.parsed.rows.length + " 行" }}</button>
+        </template>
+        <button class="dg-btn" :disabled="importRows.running" @click="importRows=null">取消</button>
+      </div>
+    </div>
     <div v-if="wfAsk" class="dg-drop" style="background:#22301f;border-color:#3d5a35">
       <div class="hd" style="color:#a8d99b">保存 workflow：当前脚本 + 工作区 <code>{{ wfAsk.ws }}</code> 的取数配方（重跑时自动重拉数据）</div>
       <div class="acts" style="align-items:center">
@@ -2248,6 +2356,7 @@
       <button @click="ctxAction('select')">SELECT * → 编辑器</button>
       <button @click="ctxAction('count')">统计行数</button>
       <button @click="ctxAction('copy')">复制表名</button>
+      <button @click="ctxAction('import')">导入数据（CSV/粘贴）…</button>
       <button v-if="!isAnalysis" @click="ctxAction('toanalysis')">导入到分析工作区…</button>
     </template>
     <template v-else>

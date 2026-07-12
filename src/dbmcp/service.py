@@ -238,6 +238,47 @@ class DbmService:
         return {"kind": "write", "affected_rows": result.row_count,
                 "duration_ms": result.duration_ms}
 
+    MAX_IMPORT_ROWS = 50_000
+
+    def admin_import_rows(
+        self, project: str, connection: str, table: str, columns: list[str],
+        rows: list[list], caller: CallerInfo, schema: str | None = None,
+    ) -> dict:
+        """后台数据导入（CSV/粘贴）：参数化批量 INSERT，writer 单事务执行并审计。
+
+        安全：列名必须存在于目标表结构（防拼接注入）；值全部走绑定参数；
+        行数上限 MAX_IMPORT_ROWS。仅挂在已认证的后台路由上，agent 无法触达。
+        """
+        cfg = self.config.get_connection(project, connection)
+        if not rows:
+            raise ValueError("没有可导入的行")
+        if len(rows) > self.MAX_IMPORT_ROWS:
+            raise ValueError(f"单次导入上限 {self.MAX_IMPORT_ROWS} 行，实际 {len(rows)} 行")
+        if not columns:
+            raise ValueError("缺少列映射")
+        info = self.describe_table(project, connection, table, caller, schema=schema)
+        valid = {c["name"] for c in info["columns"]}
+        bad = [c for c in columns if c not in valid]
+        if bad:
+            raise ValueError(f"列不存在于表 {table}: {', '.join(bad)}（表列: {', '.join(sorted(valid))}）")
+        rec = self._base_record(project, connection, cfg, "admin_import",
+                                f"IMPORT INTO {table} ({', '.join(columns)}) — {len(rows)} 行",
+                                caller)
+        try:
+            engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
+            result = engines.insert_rows(engine, table, columns, rows, schema=schema)
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+        rec.status = "ok"
+        rec.row_count = result.row_count
+        rec.duration_ms = result.duration_ms
+        rec.detail = "后台导入（已确认，单事务）" + (f" schema={schema}" if schema else "")
+        self.store.record(rec)
+        return {"inserted": result.row_count, "duration_ms": result.duration_ms}
+
     def admin_export(
         self, project: str, connection: str, sql: str, fmt: str, caller: CallerInfo,
         schema: str | None = None,

@@ -568,3 +568,11 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
 }
 .dg-res-meta .dg-resq input:focus { outline: none; }
 .dg-res-meta .dg-resq .cnt { color: var(--dg-muted); font-size: 11px; min-width: 34px; }
+
+/* 数据导入面板 */
+.dg-drop .dg-imp-ta {
+  width: 100%; box-sizing: border-box; margin: 8px 0 4px; resize: vertical;
+  background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-border);
+  border-radius: 5px; padding: 7px 10px; font-family: var(--dg-mono); font-size: 12px;
+}
+.dg-drop .dg-imp-ta:focus { outline: none; border-color: var(--dg-accent); }
