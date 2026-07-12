@@ -179,11 +179,18 @@ class AnalysisStore:
             con.close()
 
     def drop_dataset(self, workspace: str, dataset: str) -> None:
+        # DuckDB 的 DROP TABLE IF EXISTS 遇到同名 VIEW 会报类型错误（IF EXISTS 不豁免），
+        # 必须先查类型再按类型删
         _valid_name(dataset, "数据集")
         con = self._connect(workspace)
         try:
-            con.execute(f'DROP TABLE IF EXISTS "{dataset}"')
-            con.execute(f'DROP VIEW IF EXISTS "{dataset}"')
+            row = con.execute(
+                "SELECT table_type FROM information_schema.tables"
+                " WHERE table_schema = 'main' AND table_name = ?", [dataset]).fetchone()
+            if row is None:
+                return
+            kind = "VIEW" if "VIEW" in row[0].upper() else "TABLE"
+            con.execute(f'DROP {kind} IF EXISTS "{dataset}"')
         finally:
             con.close()
 

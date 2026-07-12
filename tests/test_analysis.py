@@ -84,6 +84,15 @@ class TestStore:
         store.drop_workspace("tmp")
         assert not any(w["workspace"] == "tmp" for w in store.list_workspaces())
 
+    def test_drop_dataset_table_and_view(self, store):
+        """drop_dataset 对表和视图都能删（DuckDB 的 DROP TABLE 遇 VIEW 会报类型错）。"""
+        store.import_rows("ws1", "t", ["a"], [[1]])
+        store.run_sql("ws1", "CREATE VIEW v AS SELECT * FROM t")
+        store.drop_dataset("ws1", "v")   # 视图
+        store.drop_dataset("ws1", "t")   # 表
+        store.drop_dataset("ws1", "nope")  # 不存在 → 静默
+        assert store.list_datasets("ws1") == []
+
     def test_get_ddl(self, store):
         store.import_rows("ws1", "t", ["a"], [[1]])
         assert "CREATE TABLE" in store.get_ddl("ws1", "t")
