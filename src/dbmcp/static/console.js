@@ -46,6 +46,7 @@
     return rows;
   }
 
+  var ENV_COLORS = { local: "#64748b", dev: "#2563eb", staging: "#d97706", prod: "#dc2626" };
   var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
   var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
 
@@ -233,6 +234,13 @@
           if (this.options[i].value === v) return this.options[i].label;
         return this.placeholder || "选择…";
       },
+      selEnv: function () {
+        var v = this.modelValue;
+        for (var i = 0; i < this.options.length; i++)
+          if (this.options[i].value === v) return this.options[i].env || "";
+        return "";
+      },
+      envColor: function () { return function (e) { return ENV_COLORS[e] || "#64748b"; }; },
       filtered: function () {
         var q = this.q.trim().toLowerCase();
         return q ? this.options.filter(function (o) { return o.label.toLowerCase().indexOf(q) >= 0; })
@@ -255,12 +263,14 @@
     template: `
 <div class="dg-sel">
   <button type="button" class="dg-sel-btn" @click.stop="toggle" :title="label">
+    <span v-if="selEnv" class="dg-env" :style="{background: envColor(selEnv)}">{{ selEnv }}</span>
     <span class="lb">{{ label }}</span><span class="ar">▾</span></button>
   <div v-if="open" class="dg-sel-pop" @click.stop>
     <input v-if="options.length > 8" ref="qEl" v-model="q" class="dg-sel-q" placeholder="筛选…">
     <div class="dg-sel-list">
       <div v-for="o in filtered" :key="o.value" class="dg-sel-item"
-           :class="{cur: o.value === modelValue}" @click="pick(o.value)">{{ o.label }}</div>
+           :class="{cur: o.value === modelValue}" @click="pick(o.value)">
+        <span v-if="o.env" class="dg-env" :style="{background: envColor(o.env)}">{{ o.env }}</span>{{ o.label }}</div>
       <div v-if="!filtered.length" class="dg-sel-none">（无匹配）</div>
     </div>
   </div>
@@ -330,6 +340,7 @@
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, copyOpen: false, editorReady: false, toast: "",
+        schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300,
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
@@ -352,9 +363,13 @@
         return !!m && (m.engine === "mysql" || m.engine === "postgres") && !m.database;
       },
       filteredDatabases: function () {
+        var conn = this.activeTab ? this.activeTab.conn : "";
+        var show = this.schemaShow[conn];
+        var list = (show && show.length)
+          ? this.databases.filter(function (d) { return show.indexOf(d) >= 0; })
+          : this.databases;
         var q = this.schemaFilter.trim().toLowerCase();
-        return q ? this.databases.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; })
-                 : this.databases;
+        return q ? list.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }) : list;
       },
       selCount: function () { return Object.keys(this.selected).length; },
       execState: function () {
@@ -373,12 +388,11 @@
         return { height: this.editorH + "px" };
       },
       connOptions: function () {
-        var opts = [{ value: "", label: "选择连接…" }].concat(this.connections.map(function (c) {
-          return { value: c.value,
-                   label: c.connection + " · " + c.engine + (c.environment ? " (" + c.environment + ")" : "") };
+        var opts = [{ value: "", label: "选择连接…", env: "" }].concat(this.connections.map(function (c) {
+          return { value: c.value, label: c.connection + " · " + c.engine, env: c.environment || "" };
         }));
         return opts.concat(this.workspaces.map(function (w) {
-          return { value: "analysis/" + w, label: "⚗ " + w + " · 分析工作区" };
+          return { value: "analysis/" + w, label: "⚗ " + w + " · 分析工作区", env: "" };
         }));
       },
       isAnalysis: function () {
@@ -388,6 +402,13 @@
         var m = this.connMeta;
         var head = { value: "", label: m && m.database ? "默认（" + m.database + "）" : "未指定" };
         return [head].concat(this.databases.map(function (d) { return { value: d, label: d }; }));
+      },
+      isProd: function () { var m = this.connMeta; return !!m && m.environment === "prod"; },
+      isStaging: function () { var m = this.connMeta; return !!m && m.environment === "staging"; },
+      envInfo: function () {
+        var m = this.connMeta;
+        if (!m || !m.environment) return null;
+        return { env: m.environment, color: ENV_COLORS[m.environment] || "#64748b" };
       },
       chartTypeOptions: function () {
         return [{ value: "bar", label: "柱状" }, { value: "line", label: "折线" },
@@ -458,7 +479,9 @@
       newTab: function (opts) {
         opts = opts || {};
         var def = this.activeTab ? this.activeTab.conn : (this.connections[0] ? this.connections[0].value : "");
-        var defSchema = opts.schema != null ? opts.schema : (this.activeTab ? this.activeTab.schema : "");
+        var _conn = opts.conn || def;
+        var defSchema = opts.schema != null ? opts.schema
+          : (this.schemaDefault[_conn] || (this.activeTab && this.activeTab.conn === _conn ? this.activeTab.schema : ""));
         var id = seq++;
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
@@ -541,7 +564,32 @@
         });
       },
       setConn: function (val) { if (this.activeTab) { this.activeTab.conn = val; this.persist(); this.loadTree(); } },
-      setSchema: function (val) { if (this.activeTab) { this.activeTab.schema = val; this.persist(); } },
+      setSchema: function (val) {
+        var t = this.activeTab; if (!t) return;
+        t.schema = val;
+        if (t.conn) this.schemaDefault[t.conn] = val;  // 该连接后续新 tab 的默认执行 schema
+        this.persist();
+      },
+      schemaChecked: function (db) {
+        var conn = this.activeTab ? this.activeTab.conn : "";
+        var s = this.schemaShow[conn];
+        return !s || !s.length || s.indexOf(db) >= 0;  // 空集视为全部显示
+      },
+      toggleSchemaShow: function (db) {
+        var conn = this.activeTab ? this.activeTab.conn : "";
+        if (!conn) return;
+        var s = (this.schemaShow[conn] && this.schemaShow[conn].length)
+          ? this.schemaShow[conn].slice()
+          : this.databases.slice();  // 从"全部"开始显式化，再摘掉这个
+        var i = s.indexOf(db);
+        if (i >= 0) s.splice(i, 1); else s.push(db);
+        this.schemaShow[conn] = s;
+        this.persist();
+      },
+      showAllSchemas: function () {
+        var conn = this.activeTab ? this.activeTab.conn : "";
+        if (conn) { this.schemaShow[conn] = []; this.persist(); }
+      },
       stashTree: function () {
         if (!this.lastLoadedConn) return;
         this.treeCache[this.lastLoadedConn] = {
@@ -1776,7 +1824,8 @@
                      graph: t.graph || null };
           }, this);
           var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
-                       leftW: this.leftW, editorH: this.editorH };
+                       leftW: this.leftW, editorH: this.editorH,
+                       schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
           var s = JSON.stringify(data);
           if (s.length > 3800000) {  // localStorage 上限兜底：丢结果、保 SQL 与树
             tabs.forEach(function (t) { t.result = null; });
@@ -1811,6 +1860,8 @@
           this.treeCache = d.treeCache || {};
           if (d.leftW) this.leftW = d.leftW;
           if (d.editorH) this.editorH = d.editorH;
+          this.schemaShow = d.schemaShow || {};
+          this.schemaDefault = d.schemaDefault || {};
           seq = Math.max.apply(null, this.tabs.map(function (t) { return t.id; })) + 1;
         } catch (e) { /* 损坏则从空开始 */ }
       },
@@ -1974,7 +2025,7 @@
       this.loadConnections().then(function () { self.loadSnippets(); });
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
-      document.addEventListener("click", function () { self.closeCtx(); self.exportOpen = false; self.copyOpen = false; });
+      document.addEventListener("click", function () { self.closeCtx(); self.exportOpen = false; self.copyOpen = false; self.schemaPickOpen = false; });
       // ⌘/Ctrl+F：焦点不在 Monaco 时打开网格内搜索（Monaco 自己的查找不受影响）
       // ⌘/Ctrl+P：全局表名搜索（跨库，回车直达表数据）
       document.addEventListener("keydown", function (e) {
@@ -1990,9 +2041,9 @@
       if (at && at.view === "chart" && at.result) this.renderChart();
     },
     template: `
-<div class="dg-root">
+<div class="dg-root" :class="{'env-prod': isProd, 'env-staging': isStaging}">
   <aside class="dg-left" :style="{width: leftW + 'px'}">
-    <div class="dg-conn">
+    <div class="dg-conn" :class="{'env-prod': isProd, 'env-staging': isStaging}">
       <dg-select :model-value="activeTab ? activeTab.conn : ''" :options="connOptions"
                  placeholder="选择连接…" @update:model-value="setConn"/>
     </div>
@@ -2003,7 +2054,17 @@
         <span class="act" @click="refreshTree" title="刷新（重新拉取）">↻</span></div>
       <div v-if="!activeTab || !activeTab.conn" class="dg-empty">先选择连接</div>
       <template v-else-if="needsDb">
-        <div v-if="databases.length > 6" class="dg-filter"><input v-model="schemaFilter" placeholder="筛选库…"></div>
+        <div class="dg-schema-tools" v-if="databases.length">
+          <button class="dg-btn" @click.stop="schemaPickOpen = !schemaPickOpen"
+                  title="选择要在树里显示的 schema">Schemas ▾</button>
+          <input v-if="databases.length > 6" v-model="schemaFilter" placeholder="筛选库…">
+          <div v-if="schemaPickOpen" class="dg-schema-pop" @click.stop>
+            <div class="hd">显示哪些 schema<a @click="showAllSchemas">全部显示</a></div>
+            <label v-for="db in databases" :key="db" class="row">
+              <input type="checkbox" :checked="schemaChecked(db)" @change="toggleSchemaShow(db)"> {{ db }}
+            </label>
+          </div>
+        </div>
         <div v-if="!databases.length" class="dg-empty">（加载中或无可用库）</div>
         <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>
         <template v-for="db in filteredDatabases" :key="db">
@@ -2081,6 +2142,8 @@
   </aside>
   <div class="dg-vsplit" @mousedown="beginDrag($event, 'x')"></div>
   <section class="dg-main">
+    <div v-if="isProd" class="dg-prod-ribbon">⚠ 生产环境 · PROD · 写操作将影响线上数据，请谨慎</div>
+    <div v-else-if="isStaging" class="dg-prod-ribbon staging">预发布 · STAGING 环境</div>
     <div class="dg-top">
       <button class="dg-btn run" :disabled="!activeTab || activeTab.running" @click="run(false)">▶ {{ activeTab && activeTab.running ? "执行中…" : (activeTab && activeTab.type==='data' ? "刷新" : (activeTab && activeTab.type==='flow' ? "运行流程" : "运行")) }}</button>
       <button class="dg-btn" @click="formatSql">格式化</button>
@@ -2458,6 +2521,8 @@
       <div class="ft">↑↓ 选择 · Enter 打开表数据 · Esc 关闭</div>
     </div>
   </div>
+  <div v-if="isProd" class="dg-prod-frame"></div>
+  <div v-else-if="isStaging" class="dg-prod-frame staging"></div>
   <div id="dg-toast" v-if="toast">{{ toast }}</div>
 </div>`
   });

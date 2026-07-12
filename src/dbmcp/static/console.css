@@ -603,3 +603,48 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   padding: 7px 16px; font-size: 11px; color: var(--dg-faint);
   border-top: 1px solid var(--dg-border);
 }
+
+/* 环境徽章（下拉框内/关闭态） */
+.dg-env {
+  display: inline-block; font-size: 9.5px; line-height: 1.4; padding: 0 5px; margin-right: 6px;
+  border-radius: 3px; color: #fff; font-family: var(--dg-mono); text-transform: uppercase;
+  vertical-align: middle; letter-spacing: .3px;
+}
+/* 生产环境警示条 */
+.dg-prod-ribbon {
+  flex: none; background: var(--dg-red); color: #fff; font-weight: 600; font-size: 12.5px;
+  text-align: center; padding: 5px 10px; letter-spacing: .5px;
+}
+.dg-prod-ribbon.staging { background: #d97706; }
+/* 全屏红框：套住整个查询台视口，一眼可辨生产环境 */
+.dg-prod-frame {
+  position: fixed; inset: 0; pointer-events: none; z-index: 150;
+  border: 3px solid var(--dg-red); box-shadow: inset 0 0 0 1px rgba(220,38,38,.4);
+}
+.dg-prod-frame.staging { border-color: #d97706; box-shadow: inset 0 0 0 1px rgba(217,119,6,.4); }
+/* 生产连接：连接下拉框变红警示 */
+.dg-conn.env-prod .dg-sel-btn { border-color: var(--dg-red); color: #ffb4b4; }
+.dg-conn.env-staging .dg-sel-btn { border-color: #d97706; color: #f0c078; }
+/* schema 勾选器 */
+.dg-schema-tools { position: relative; display: flex; gap: 6px; align-items: center; padding: 6px 10px; }
+.dg-schema-tools input {
+  flex: 1; min-width: 0; background: var(--dg-panel); color: var(--dg-text);
+  border: 1px solid var(--dg-border); border-radius: 5px; padding: 5px 8px;
+  font-size: 12px; font-family: var(--dg-mono);
+}
+.dg-schema-tools input:focus { outline: none; border-color: var(--dg-accent); }
+.dg-schema-pop {
+  position: absolute; top: 100%; left: 10px; z-index: 60; margin-top: 2px;
+  width: 220px; max-height: 320px; overflow: auto; background: var(--dg-panel);
+  border: 1px solid var(--dg-border); border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.5); padding: 4px;
+}
+.dg-schema-pop .hd {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 8px; font-size: 11px; color: var(--dg-faint);
+}
+.dg-schema-pop .hd a { color: var(--dg-accent); cursor: pointer; }
+.dg-schema-pop .row {
+  display: flex; align-items: center; gap: 7px; padding: 4px 8px; cursor: pointer;
+  font-family: var(--dg-mono); font-size: 12.5px; color: var(--dg-text); border-radius: 4px;
+}
+.dg-schema-pop .row:hover { background: var(--dg-hover); }
