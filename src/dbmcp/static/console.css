@@ -644,7 +644,13 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
 }
 .dg-schema-pop .hd a { color: var(--dg-accent); cursor: pointer; }
 .dg-schema-pop .row {
-  display: flex; align-items: center; gap: 7px; padding: 4px 8px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; margin: 0; padding: 5px 8px; cursor: pointer;
   font-family: var(--dg-mono); font-size: 12.5px; color: var(--dg-text); border-radius: 4px;
 }
 .dg-schema-pop .row:hover { background: var(--dg-hover); }
+/* 查询台里所有裸复选框：重置后台外壳全局 input{width:100%} 的污染
+   （否则复选框被撑成满宽，schema 勾选器/导入面板等整行错位） */
+.dg-root input[type=checkbox] {
+  flex: none; width: 15px; height: 15px; min-width: 0; margin: 0; padding: 0;
+  accent-color: var(--dg-accent);
+}
