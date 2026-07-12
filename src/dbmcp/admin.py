@@ -571,7 +571,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     def _shell(title: str, body: str) -> HTMLResponse:
         """渲染登录后的页面，自动注入待审批数（侧栏角标 + 顶部横幅）。"""
         try:
-            pending = len(service.list_changes("pending"))
+            # 惰性过期：存储态还是 pending 但已过 TTL 的单不该继续闪红点
+            pending = len([c for c in service.list_changes("pending")
+                           if c.effective_status() == "pending"])
         except Exception:
             pending = 0
         return HTMLResponse(_page(title, body, pending=pending))

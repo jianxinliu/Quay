@@ -46,6 +46,19 @@ def client(tmp_path):
     svc.close()
 
 
+def test_expired_pending_not_in_badge(client):
+    """过期的 pending 单不计入侧栏角标/顶部横幅（存储态仍是 pending，惰性过期）。"""
+    tc, svc = client
+    svc.execute("demo", "main", "DELETE FROM users WHERE id = 1", CALLER)
+    assert "条数据变更待审批" in tc.get("/admin/audit").text
+    # 把审批单改成已过期（时间格式与真实写入一致，带 UTC 时区）
+    with svc.approvals._lock:
+        svc.approvals._conn.execute(
+            "UPDATE change_request SET expires_at = '2000-01-01T00:00:00+00:00'")
+        svc.approvals._conn.commit()
+    assert "条数据变更待审批" not in tc.get("/admin/audit").text
+
+
 def test_approvals_list_page(client):
     tc, svc = client
     svc.execute("demo", "main", "DELETE FROM users WHERE id = 1", CALLER)
