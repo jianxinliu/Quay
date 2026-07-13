@@ -65,6 +65,15 @@ class TestBrowse:
         assert val["fields"] == {"k1": "v1", "k2": "v2"}
         assert val["ttl"] == -1  # 永久
 
+    def test_binary_value_shown_as_hex_not_crash(self, service):
+        """二进制值（如 msgpack）不能让 UTF-8 解码崩，应转 BINARY HEX（对标 Medis）。"""
+        import redis
+        raw = redis.Redis(host="127.0.0.1", port=6379, db=TEST_DB)
+        raw.hset("bink", "f", b"\x88\xa7OfferId")  # 0x88 非法 UTF-8 起始字节
+        val = service.redis_value("local", "r", "bink", CALLER, db=TEST_DB)
+        assert val["fields"]["f"].startswith("BINARY HEX ")
+        assert "88 A7" in val["fields"]["f"]
+
 
 class TestCommandWindow:
     def test_read_command_direct(self, service):

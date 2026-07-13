@@ -119,7 +119,10 @@ def _build_client(cfg: ConnectionConfig, role: Role, db: int | None = None) -> _
             db=eff_db,
             username=user,
             password=password or None,
-            decode_responses=True,
+            # 取原始 bytes 自行解码：值可能是二进制（序列化/protobuf 等），
+            # decode_responses=True 会在 redis-py 内部 UTF-8 解码时对二进制抛
+            # UnicodeDecodeError。改由 _jsonable 逐值处理：能 UTF-8 就文本，否则 BINARY HEX。
+            decode_responses=False,
             socket_connect_timeout=5,
             socket_timeout=timeout,
         )
@@ -191,7 +194,7 @@ def scan_keys(
     for k in names:
         pipe.type(k)
     types = pipe.execute()
-    keys = [{"key": k, "type": (t if isinstance(t, str) else str(t))}
+    keys = [{"key": _jsonable(k), "type": _jsonable(t)}
             for k, t in zip(names, types, strict=False)]
     keys.sort(key=lambda d: d["key"])
     return {"keys": keys, "truncated": truncated}
@@ -204,13 +207,13 @@ def read_value(client: redis.Redis, key: str, max_cell_chars: int = 4096,
     string → {"value": s}；hash → {"fields": {f: v}}；list → {"items": [...]}；
     set → {"members": [...]}；zset → {"members": [{"member","score"}]}。
     """
-    ktype = client.type(key)
+    ktype = _jsonable(client.type(key))  # bytes → str（raw 客户端）
     if ktype == "none":
         raise KeyError(f"键 {key!r} 不存在")
 
     ttl = client.ttl(key)  # -1 永久、-2 不存在
     try:
-        encoding = client.object("encoding", key)
+        encoding = _jsonable(client.object("encoding", key))
     except Exception:
         encoding = None
     try:
@@ -224,7 +227,9 @@ def read_value(client: redis.Redis, key: str, max_cell_chars: int = 4096,
         detail["value"] = _truncate(_jsonable(client.get(key)), max_cell_chars)
     elif ktype == "hash":
         h = client.hgetall(key)
-        detail["fields"] = {k: _truncate(_jsonable(v), max_cell_chars) for k, v in h.items()}
+        # 字段名多为文本、值可能二进制 → 都过 _jsonable（二进制转 BINARY HEX）
+        detail["fields"] = {_jsonable(k): _truncate(_jsonable(v), max_cell_chars)
+                            for k, v in h.items()}
         detail["length"] = client.hlen(key)
     elif ktype == "list":
         detail["items"] = [_truncate(_jsonable(v), max_cell_chars)
@@ -254,6 +259,12 @@ def _truncate(v: Any, max_chars: int) -> Any:
     return v
 
 
+def _hexdump(b: bytes) -> str:
+    """二进制值 → `BINARY HEX 88 A7 4F …`（对标 Medis 的二进制展示）。"""
+    h = b.hex()
+    return "BINARY HEX " + " ".join(h[i:i + 2].upper() for i in range(0, len(h), 2))
+
+
 def _jsonable(v: Any) -> Any:
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
@@ -261,7 +272,7 @@ def _jsonable(v: Any) -> Any:
         try:
             return v.decode("utf-8")
         except UnicodeDecodeError:
-            return repr(v)
+            return _hexdump(v)
     if isinstance(v, (list, tuple)):
         return [_jsonable(x) for x in v]
     if isinstance(v, dict):
