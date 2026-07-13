@@ -690,3 +690,19 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
 .dg-datalog .dl-row .sql { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--dg-mono); color: var(--dg-text); }
 .dg-datalog .dl-row .tm { flex: none; color: var(--dg-faint); font-family: var(--dg-mono); font-size: 11px; }
+/* 表数据工具栏（过滤条上方）：刷新/加行/减行/提交/DDL */
+.dg-toolbar { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-panel); position: relative; z-index: 3; }
+.dg-toolbar .tb-sep { width: 1px; height: 16px; background: var(--dg-border); margin: 0 3px; }
+.dg-toolbar .dg-btn.run:disabled { opacity: .45; cursor: not-allowed; }
+.dg-toolbar .tb-pending { margin-left: auto; color: var(--dg-amber); font-size: 12px; font-weight: 500; }
+.dg-toolbar .dg-menu-pop { top: 100%; left: 0; }
+/* 暂存改动的可视标记 */
+table.dg-rt td.edited { background: color-mix(in srgb, var(--dg-amber) 22%, transparent);
+  box-shadow: inset 0 0 0 1px var(--dg-amber); }
+table.dg-rt tr.delrow td { text-decoration: line-through; color: var(--dg-faint);
+  background: color-mix(in srgb, var(--dg-red) 12%, transparent); }
+table.dg-rt tr.delrow td.gut { color: var(--dg-red); text-decoration: none; }
+.dg-submit-sql { max-height: 260px; overflow: auto; margin: 8px 0; padding: 10px 12px;
+  background: var(--dg-bg); border: 1px solid var(--dg-border); border-radius: 6px;
+  font-family: var(--dg-mono); font-size: 12px; white-space: pre; color: var(--dg-text); }

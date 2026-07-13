@@ -339,7 +339,7 @@
         delSnip: null, delWf: null, wfAsk: null,
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
-        exportOpen: false, copyOpen: false, editorReady: false, toast: "",
+        exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300, dataLogH: 150,
@@ -496,7 +496,9 @@
                     wfName: opts.wfName || "", wfSteps: null, vsel: null,
                     view: "table", chart: null,
                     graph: opts.graph || null, sel: null, nodeStatus: {},
-                    rowSel: {}, lastSelRi: -1, newRow: null, resQ: null };
+                    rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
+                    // 暂存式编辑：改动先攒着，工具栏「提交」才写库
+                    edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false };
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -1311,8 +1313,9 @@
         if (!t || t.type !== "data" || !t.result) return;
         var k = this.mk(t.table, t.schema);
         if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
-        var v = t.result.rows[ri][ci];
-        t.edit = { ri: ri, ci: ci, val: v == null ? "NULL" : this.cellText(v) };
+        var v = t.result.rows[ri][ci], key = ri + ":" + ci;
+        var init = (t.edits && key in t.edits) ? t.edits[key] : (v == null ? "NULL" : this.cellText(v));
+        t.edit = { ri: ri, ci: ci, val: init };
         this.$nextTick(function () {
           var el = document.getElementById("dg-cell-input");
           if (el) { el.focus(); el.select(); }
@@ -1344,12 +1347,147 @@
       commitEdit: function () {
         var t = this.activeTab;
         if (!t || !t.edit || !t.result) return;
-        var oldV = t.result.rows[t.edit.ri][t.edit.ci];
-        var newRaw = t.edit.val;
-        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) { t.edit = null; return; }
-        var sql = this.makeUpdateSql(t, t.edit.ri, t.edit.ci, newRaw);
+        var ri = t.edit.ri, ci = t.edit.ci, key = ri + ":" + ci;
+        var oldV = t.result.rows[ri][ci], newRaw = t.edit.val;
         t.edit = null;
-        if (sql) this.run(false, 0, sql);  // 写确认流：风险报告 → 确认 → writer 执行 → 自动刷新
+        // 暂存：不立即执行，等工具栏「提交」。改回原值则撤销暂存。
+        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
+        else t.edits[key] = newRaw;
+        this.persist();
+      },
+
+      // ---------- 暂存式编辑：攒改动 → 工具栏提交 ----------
+      isEditedCell: function (ri, ci) {
+        var t = this.activeTab; return !!(t && t.edits && (ri + ":" + ci) in t.edits);
+      },
+      isDelRow: function (ri) { var t = this.activeTab; return !!(t && t.dels && t.dels[ri]); },
+      cellNull: function (ri, ci) {
+        var t = this.activeTab, key = ri + ":" + ci;
+        if (t.edits && key in t.edits) return t.edits[key] === "NULL";
+        return t.result.rows[ri][ci] === null;
+      },
+      cellShow: function (ri, ci) {
+        var t = this.activeTab, key = ri + ":" + ci;
+        if (t.edits && key in t.edits) return t.edits[key];
+        var v = t.result.rows[ri][ci];
+        return v == null ? "NULL" : this.cellText(v);
+      },
+      hasPending: function () {
+        var t = this.activeTab; if (!t) return false;
+        return !!((t.edits && Object.keys(t.edits).length) ||
+                  (t.dels && Object.keys(t.dels).length) || (t.adds && t.adds.length));
+      },
+      pendingCount: function () {
+        var t = this.activeTab; if (!t) return 0;
+        return Object.keys(t.edits || {}).length + Object.keys(t.dels || {}).length + (t.adds || []).length;
+      },
+      clearPending: function (t) { t.edits = {}; t.dels = {}; t.adds = []; },
+      addRow: function (cloneRi) {
+        var t = this.activeTab; if (!t || t.type !== "data" || !t.result) return;
+        var k = this.mk(t.table, t.schema); if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
+        var self = this, meta = this.tableMeta[k];
+        var vals = t.result.columns.map(function (c, ci) {
+          if (cloneRi == null) return "";
+          if (meta && (meta.primary_key || []).indexOf(c) >= 0) return "";  // 主键留自增/默认
+          var v = t.result.rows[cloneRi][ci];
+          return v == null ? "NULL" : self.cellText(v);
+        });
+        t.adds.push({ values: vals }); this.persist();
+      },
+      removeAdd: function (idx) {
+        var t = this.activeTab; if (t && t.adds) { t.adds.splice(idx, 1); this.persist(); }
+      },
+      toggleDelSelected: function () {
+        var t = this.activeTab; if (!t) return;
+        var ris = this.selRis();
+        if (!ris.length) { this.flash("先点行号选中要删除的行"); return; }
+        ris.forEach(function (ri) { if (t.dels[ri]) delete t.dels[ri]; else t.dels[ri] = true; });
+        this.clearRowSel(); this.persist();
+      },
+      pkConds: function (t, ri) {
+        var k = this.mk(t.table, t.schema), meta = this.tableMeta[k];
+        if (!meta) { this.fetchMeta(t.table, t.schema); return { err: "表结构加载中，请稍后再试" }; }
+        var pk = meta.primary_key || [];
+        if (!pk.length) return { err: "该表无主键，改动/删除无法定位行" };
+        var cols = t.result.columns, row = t.result.rows[ri], self = this, miss = false;
+        var conds = pk.map(function (p) {
+          var idx = cols.indexOf(p); if (idx < 0) { miss = true; return null; }
+          var pv = row[idx];
+          return p + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
+        });
+        if (miss) return { err: "结果集缺少主键列，无法定位行" };
+        return { conds: conds };
+      },
+      // 汇总所有暂存改动为 SQL 语句数组（INSERT/UPDATE/DELETE）
+      buildPendingStatements: function (t) {
+        var q = t.schema ? t.schema + "." + t.table : t.table, cols = t.result.columns, self = this;
+        var stmts = [];
+        (t.adds || []).forEach(function (add) {
+          var c = [], v = [];
+          for (var i = 0; i < cols.length; i++) {
+            var raw = add.values[i]; if (raw === "" || raw == null) continue;
+            c.push(cols[i]); v.push(self.sqlLit(raw, null));
+          }
+          if (c.length) stmts.push("INSERT INTO " + q + " (" + c.join(", ") + ") VALUES (" + v.join(", ") + ")");
+        });
+        var byRow = {};
+        Object.keys(t.edits || {}).forEach(function (key) {
+          var p = key.split(":"); (byRow[p[0]] = byRow[p[0]] || []).push({ ci: +p[1], val: t.edits[key] });
+        });
+        for (var ri in byRow) {
+          var pc = this.pkConds(t, ri); if (pc.err) return { err: pc.err };
+          var row = t.result.rows[ri];
+          var sets = byRow[ri].map(function (e) { return cols[e.ci] + " = " + self.sqlLit(e.val, row[e.ci]); });
+          stmts.push("UPDATE " + q + " SET " + sets.join(", ") + " WHERE " + pc.conds.join(" AND "));
+        }
+        var delRis = Object.keys(t.dels || {});
+        for (var di = 0; di < delRis.length; di++) {
+          var pc2 = this.pkConds(t, delRis[di]); if (pc2.err) return { err: pc2.err };
+          stmts.push("DELETE FROM " + q + " WHERE " + pc2.conds.join(" AND "));
+        }
+        return { statements: stmts };
+      },
+      submitPending: function (mode) {
+        this.submitOpen = false;
+        var t = this.activeTab; if (!t) return;
+        if (!this.hasPending()) { this.flash("没有未提交的改动"); return; }
+        var res = this.buildPendingStatements(t);
+        if (res.err) { this.flash(res.err); return; }
+        if (!res.statements.length) { this.flash("无有效改动（新增行至少填一列）"); return; }
+        if (mode === "sql") t.submit = { statements: res.statements, sql: res.statements.join(";\n") + ";" };
+        else this.doSubmit(res.statements);
+      },
+      cancelSubmit: function () { if (this.activeTab) this.activeTab.submit = null; },
+      doSubmit: function (statements) {
+        var t = this.activeTab; if (!t) return;
+        var stmts = statements || (t.submit && t.submit.statements);
+        if (!stmts || !stmts.length) return;
+        var self = this; t.submit = null; t.submitting = true; t.err = null;
+        var chain = Promise.resolve(), fails = [], okc = 0;
+        stmts.forEach(function (sql) {
+          chain = chain.then(function () {
+            return apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: "1" }).then(function (d) {
+              if (d && d.ok) okc++; else fails.push((d && d.error) || ("失败：" + sql));
+            }).catch(function (e) { fails.push("" + e); });
+          });
+        });
+        chain.then(function () {
+          t.submitting = false; self.clearPending(t);
+          self.flash(fails.length ? ("提交完成：成功 " + okc + " 条，失败 " + fails.length + " —— " + fails[0])
+                                  : ("已提交 " + okc + " 条改动"));
+          self.loadHistory();
+          self.run(false, t.result ? t.result.page : 0);  // 重新按条件查询刷新
+        });
+      },
+      refreshData: function () {
+        var t = this.activeTab; if (!t) return;
+        if (this.hasPending()) { t.refreshWarn = true; return; }
+        this.run(false, t.result ? t.result.page : 0);
+      },
+      doRefresh: function () {
+        var t = this.activeTab; if (!t) return;
+        t.refreshWarn = false; this.clearPending(t);
+        this.run(false, t.result ? t.result.page : 0);
       },
 
       // ---------- SQL 实时语法检查（sqlglot 按方言，防抖 600ms → Monaco 红波浪） ----------
@@ -1513,74 +1651,6 @@
         var t = this.activeTab;
         return Object.keys(t.rowSel || {}).map(Number).sort(function (a, b) { return a - b; });
       },
-      // 新增行：网格顶部出现编辑行；留空 = 用列默认值，填 NULL = 显式 NULL
-      startNewRow: function (cloneRi) {
-        var t = this.activeTab;
-        if (!t || t.type !== "data" || !t.result) return;
-        var k = this.mk(t.table, t.schema);
-        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
-        var self = this;
-        var vals = t.result.columns.map(function (c, ci) {
-          if (cloneRi == null) return "";
-          var meta = self.tableMeta[k];
-          if (meta && (meta.primary_key || []).indexOf(c) >= 0) return "";  // 主键留给自增/默认
-          var v = t.result.rows[cloneRi][ci];
-          return v == null ? "NULL" : self.cellText(v);
-        });
-        t.newRow = { values: vals };
-        this.$nextTick(function () {
-          var el = document.querySelector(".dg-newrow input");
-          if (el) el.focus();
-        });
-      },
-      commitNewRow: function () {
-        var t = this.activeTab;
-        if (!t || !t.newRow) return;
-        var cols = [], vals = [];
-        for (var i = 0; i < t.result.columns.length; i++) {
-          var raw = t.newRow.values[i];
-          if (raw === "") continue;               // 留空 → 列默认值
-          cols.push(t.result.columns[i]);
-          vals.push(this.sqlLit(raw, null));      // "NULL" → NULL，其余按字面量
-        }
-        if (!cols.length) { this.flash("至少填写一列（留空 = 用默认值）"); return; }
-        var q = t.schema ? t.schema + "." + t.table : t.table;
-        var sql = "INSERT INTO " + q + " (" + cols.join(", ") + ") VALUES (" + vals.join(", ") + ")";
-        t.newRow = null;
-        this.run(false, 0, sql);   // 写确认流 → writer 执行 → 自动刷新
-      },
-      deleteSelRows: function () {
-        var t = this.activeTab;
-        if (!t || t.type !== "data" || !t.result) return;
-        var ris = this.selRis();
-        if (!ris.length) return;
-        var k = this.mk(t.table, t.schema);
-        var meta = this.tableMeta[k];
-        if (!meta) { this.fetchMeta(t.table, t.schema); this.flash("表结构加载中，请稍后再试"); return; }
-        var pk = meta.primary_key || [];
-        if (!pk.length) { this.flash("该表无主键，无法定位行删除"); return; }
-        var cols = t.result.columns, self = this;
-        var pkIdx = pk.map(function (p) { return cols.indexOf(p); });
-        if (pkIdx.some(function (i) { return i < 0; })) { this.flash("结果集缺少主键列"); return; }
-        var q = t.schema ? t.schema + "." + t.table : t.table;
-        var where;
-        if (pk.length === 1) {
-          var vs = ris.map(function (ri) {
-            var v = t.result.rows[ri][pkIdx[0]];
-            return self.sqlLit(self.cellText(v), v);
-          });
-          where = pk[0] + " IN (" + vs.join(", ") + ")";
-        } else {
-          where = ris.map(function (ri) {
-            return "(" + pk.map(function (p, j) {
-              var v = t.result.rows[ri][pkIdx[j]];
-              return p + (v == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(v), v));
-            }).join(" AND ") + ")";
-          }).join(" OR ");
-        }
-        this.clearRowSel();
-        this.run(false, 0, "DELETE FROM " + q + " WHERE " + where);  // 走写确认流
-      },
       // 选中行复制为各种格式（无选中 = 当前页全部）
       copyRows: function (fmt) {
         var t = this.activeTab;
@@ -1680,9 +1750,10 @@
         var t = this.activeTab;
         if (!t || t.type !== "data" || !t.result) return;
         t.vsel = { ri: ri, ci: ci };
-        var v = t.result.rows[ri][ci];
-        this.vpVal = v == null ? "" : this.cellText(v);
-        this.vpNull = v == null;
+        var v = t.result.rows[ri][ci], key = ri + ":" + ci;
+        var staged = t.edits && key in t.edits;   // 面板显示已暂存的改动值（若有）
+        this.vpVal = staged ? (t.edits[key] === "NULL" ? "" : t.edits[key]) : (v == null ? "" : this.cellText(v));
+        this.vpNull = staged ? t.edits[key] === "NULL" : v == null;
         this.vpOpen = true; this.vpTab = this.vpTab || "value";
         var k = this.mk(t.table, t.schema);
         if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
@@ -1698,9 +1769,14 @@
         var t = this.activeTab;
         if (!t || !t.vsel) return;
         if (!this.vpDirty()) { this.flash("值未变化"); return; }
+        var key = t.vsel.ri + ":" + t.vsel.ci;
         var newRaw = this.vpNull ? "NULL" : this.vpVal;
-        var sql = this.makeUpdateSql(t, t.vsel.ri, t.vsel.ci, newRaw);
-        if (sql) this.run(false, 0, sql);  // 走写确认流（二次确认）
+        var oldV = t.result.rows[t.vsel.ri][t.vsel.ci];
+        // 暂存到 edits，等工具栏「提交」统一写库（铁律：展示态不写库）
+        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
+        else t.edits[key] = newRaw;
+        this.persist();
+        this.flash("已暂存改动，点工具栏「提交」写库");
       },
       // Value 面板格式化：JSON 美化 / 压缩（非 JSON 给提示不破坏原值）
       vpFormat: function (pretty) {
@@ -1824,6 +1900,7 @@
                      lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
+                     edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null };
           }, this);
@@ -1858,6 +1935,8 @@
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null, sel: null, nodeStatus: {},
                      rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
+                     edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
+                     submit: null, submitting: false, refreshWarn: false,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -2335,6 +2414,25 @@
     <div class="dg-hsplit" v-show="activeTab && (activeTab.type==='query' || activeTab.type==='flow')" @mousedown="beginDrag($event, 'y')"></div>
     <div class="dg-results" v-show="activeTab && activeTab.type!=='ddl'">
       <template v-if="activeTab">
+        <div v-if="activeTab.type==='data'" class="dg-toolbar">
+          <button class="dg-btn" @click="refreshData" title="按当前条件重新查询（有未提交改动会提醒）">↻ 刷新</button>
+          <span class="tb-sep"></span>
+          <button class="dg-btn" @click="addRow(null)" title="新增一行，提交时生成 INSERT">＋ 加行</button>
+          <button class="dg-btn" :disabled="!selRowCount()" @click="toggleDelSelected"
+                  title="标记/取消标记选中行删除，提交时生成 DELETE">－ 减行</button>
+          <span class="tb-sep"></span>
+          <span class="dg-menu">
+            <button class="dg-btn run" :disabled="!hasPending()" @click.stop="submitOpen=!submitOpen">
+              提交<template v-if="pendingCount()">（{{ pendingCount() }}）</template> ▾</button>
+            <div v-if="submitOpen" class="dg-menu-pop">
+              <button @click="submitPending('sql')">SQL 确认后提交</button>
+              <button @click="submitPending('direct')">直接提交</button>
+            </div>
+          </span>
+          <button class="dg-btn" @click="openDdlTab(activeTab.table, activeTab.schema)"
+                  title="在新 tab 查看格式化的建表语句">DDL</button>
+          <span v-if="hasPending()" class="tb-pending">● {{ pendingCount() }} 处未提交</span>
+        </div>
         <div v-if="activeTab.type==='data'" class="dg-where">
           <span class="k">WHERE</span>
           <input id="dg-where-input" v-model="activeTab.where" placeholder="status = 'paid' AND amount > 100"
@@ -2345,7 +2443,6 @@
           <button class="dg-btn" @click="applyWhere">应用</button>
           <button v-if="activeTab.where || activeTab.orderBy" class="dg-btn"
                   @click="activeTab.where='';activeTab.orderBy='';applyWhere()">清除</button>
-          <button class="dg-btn" @click="startNewRow(null)" title="在网格里填一行，生成 INSERT 走写确认">＋ 新增行</button>
         </div>
         <div v-if="activeTab.explain" class="dg-explain">
           <div class="hd"><b>执行计划</b><span class="act" @click="closeExplain">✕ 关闭</span></div>
@@ -2367,6 +2464,19 @@
           <div v-for="(st,si) in activeTab.wfSteps" :key="si" :class="st.ok?'okline':'errline'">
             {{ st.ok ? "✓" : "✗" }} {{ st.step }}<template v-if="st.rows!=null">（{{ st.rows }} 行）</template>
             <template v-if="st.error">— {{ st.error }}</template></div>
+        </div>
+        <div v-if="activeTab.refreshWarn" class="dg-confirm">
+          <h4>有未提交的改动</h4>
+          <div style="font-size:13px;color:var(--dg-muted)">刷新会丢弃当前所有未提交改动（{{ pendingCount() }} 处），确定继续？</div>
+          <div class="acts"><button class="dg-btn danger" @click="doRefresh">继续刷新（丢弃改动）</button>
+            <button class="dg-btn" @click="activeTab.refreshWarn=false">取消</button></div>
+        </div>
+        <div v-if="activeTab.submit" class="dg-confirm">
+          <h4>确认提交 · {{ activeTab.submit.statements.length }} 条语句</h4>
+          <div style="font-size:12px;color:var(--dg-muted)">将由 writer 账号依次执行并记入审计（后台旁路，不进审批单）。</div>
+          <pre class="dg-submit-sql">{{ activeTab.submit.sql }}</pre>
+          <div class="acts"><button class="dg-btn ok" @click="doSubmit()">确认提交（writer 执行）</button>
+            <button class="dg-btn" @click="cancelSubmit">取消</button></div>
         </div>
         <div v-if="activeTab.err" class="dg-res-err">⚠ {{ activeTab.err }}</div>
         <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{ activeTab.ok.affected_rows }} 行 · {{ activeTab.ok.duration_ms }} ms</div>
@@ -2391,9 +2501,9 @@
                   <button @click="copyRows('json')">JSON</button>
                 </div></span>
               <button v-if="activeTab.type==='data' && selRowCount()===1" class="dg-btn"
-                      @click="startNewRow(selRis()[0])" title="以选中行为模板新增（主键留空）">克隆</button>
+                      @click="addRow(selRis()[0])" title="以选中行为模板暂存新增（主键留空）">克隆</button>
               <button v-if="activeTab.type==='data'" class="dg-btn danger"
-                      @click="deleteSelRows" title="按主键生成 DELETE，走写确认">删除</button>
+                      @click="toggleDelSelected" title="标记选中行删除（提交时执行）">标记删除</button>
               <a class="act" @click="clearRowSel">✕</a>
             </span>
             <span v-if="activeTab.resQ" class="dg-resq">
@@ -2442,32 +2552,30 @@
               </th>
             </tr></thead>
             <tbody>
-            <tr v-if="activeTab.newRow" class="dg-newrow">
-              <td class="gut nw" title="填写后回车提交；留空列用默认值，填 NULL 为显式 NULL">＋</td>
-              <td v-for="(c,ci) in activeTab.result.columns" :key="'n'+ci">
-                <input v-model="activeTab.newRow.values[ci]" :placeholder="c"
-                       @keydown.enter="commitNewRow" @keydown.esc="activeTab.newRow=null">
+            <!-- 暂存的新增行 -->
+            <tr v-for="(add,ai) in activeTab.adds" :key="'a'+ai" class="dg-newrow">
+              <td class="gut nw" @click="removeAdd(ai)" title="移除此新增行">✕</td>
+              <td v-for="(c,ci) in activeTab.result.columns" :key="'a'+ai+'-'+ci">
+                <input v-model="add.values[ci]" :placeholder="c" @keydown.esc="removeAdd(ai)">
               </td>
             </tr>
-            <tr v-for="(row,ri) in activeTab.result.rows" :key="ri" :class="{rsel: activeTab.rowSel && activeTab.rowSel[ri]}">
-              <td class="gut" @mousedown.prevent @click.stop="rowClick(ri,$event)">{{ ri+1 }}</td>
+            <tr v-for="(row,ri) in activeTab.result.rows" :key="ri"
+                :class="{rsel: activeTab.rowSel && activeTab.rowSel[ri], delrow: isDelRow(ri)}">
+              <td class="gut" @mousedown.prevent @click.stop="rowClick(ri,$event)"
+                  :title="isDelRow(ri) ? '已标记删除（提交时执行）' : '点击选择行'">{{ isDelRow(ri) ? '␡' : ri+1 }}</td>
               <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)" :data-cell="ri+':'+ci"
                   :class="{editable: activeTab.type==='data', vsel: activeTab.vsel && activeTab.vsel.ri===ri && activeTab.vsel.ci===ci,
-                           hit: isHit(ri,ci), curhit: isCurHit(ri,ci)}"
+                           edited: isEditedCell(ri,ci), hit: isHit(ri,ci), curhit: isCurHit(ri,ci)}"
                   @click="cellClick(ri,ci)"
                   @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
                 <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
                        id="dg-cell-input" class="dg-cell-edit" v-model="activeTab.edit.val"
                        @keydown.enter="commitEdit" @keydown.esc="cancelEdit" @blur="cancelEdit">
+                <template v-else-if="activeTab.type==='data'"><span v-if="cellNull(ri,ci)" class="nul">NULL</span><span v-else>{{ cellShow(ri,ci) }}</span></template>
                 <template v-else><span v-if="v===null" class="nul">NULL</span><span v-else>{{ cellText(v) }}</span></template>
               </td>
             </tr></tbody>
-          </table>
-          <div v-if="activeTab.newRow" class="dg-newrow-acts">
-            <button class="dg-btn run" @click="commitNewRow">插入（生成 INSERT）</button>
-            <button class="dg-btn" @click="activeTab.newRow=null">取消</button>
-            <span class="hint">留空列用数据库默认值；填 NULL 为显式 NULL</span>
-          </div></div>
+          </table></div>
           <div v-if="vpOpen && activeTab.type==='data' && activeTab.vsel" class="dg-vp">
             <div class="vp-hd">
               <span class="vt" :class="{on: vpTab==='value'}" @click="vpTab='value'">Value</span>
