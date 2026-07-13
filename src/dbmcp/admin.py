@@ -109,149 +109,18 @@ _FAVICON_HREF = "data:image/svg+xml;base64," + base64.b64encode(_FAVICON_SVG.enc
 _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
-def _page(title: str, body: str, pending: int = 0) -> str:
+def _page(title: str, body: str, pending: int = 0, doc: bool = True) -> str:
     nav_badge = f"<span class='nav-count'>{pending}</span>" if pending else ""
     banner = (f"<a class='pending-banner' href='/admin/approvals'>"
               f"⚠ <b>{pending}</b> 条数据变更待审批，点此处理 →</a>" if pending else "")
+    doc_css = ('<link rel="stylesheet" href="/admin/static/admin-doc.css">'
+               if doc else '')
     return f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · Quay</title>
 {_FAVICON_LINK}
-<style>
- :root{{
-  --ink:#14181f; --ink-2:#1c222c; --paper:#f4f5f7; --surface:#fff;
-  --border:#e6e8ec; --line:#eef0f3; --text:#1a1f28; --muted:#6b7280; --faint:#9aa1ac;
-  --accent:#0d9488; --accent-ink:#0b7268; --accent-soft:#e6faf6;
-  --mono:ui-monospace,'SF Mono',Menlo,Monaco,'Cascadia Code',monospace;
-  --sans:-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif;
- }}
- *{{box-sizing:border-box}}
- body{{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
-   -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5}}
- code,pre,.mono{{font-family:var(--mono)}}
- a{{color:var(--accent-ink);text-decoration:none}} a:hover{{text-decoration:underline}}
- .shell{{display:grid;grid-template-columns:236px 1fr;min-height:100vh}}
- /* 侧栏 */
- .side{{background:var(--ink);color:#c7cdd6;display:flex;flex-direction:column;padding:20px 14px;
-   position:sticky;top:0;height:100vh}}
- .side .brand{{display:flex;align-items:center;gap:10px;padding:4px 8px 20px;color:#fff}}
- .side .brand svg{{width:30px;height:30px;border-radius:8px;flex:none}}
- .side .brand b{{font-size:15px;font-weight:600;letter-spacing:.2px}}
- .side .brand span{{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1px;text-transform:uppercase}}
- .side nav{{display:flex;flex-direction:column;gap:2px;margin-top:6px}}
- .side nav a{{display:flex;align-items:center;gap:10px;color:#aeb6c2;padding:9px 11px;border-radius:8px;
-   font-size:14px;transition:background .12s,color .12s}}
- .side nav a:hover{{background:var(--ink-2);color:#fff;text-decoration:none}}
- .side nav a.active{{background:var(--accent);color:#fff;font-weight:500}}
- /* 每个页面的专属导航图标（SVG data-URI，与查询台树图标同风格）；收起态只显图标 */
- .side nav a .nico{{width:17px;height:17px;flex:none;background-position:center;
-   background-repeat:no-repeat;background-size:contain;opacity:.85}}
- .side nav a.active .nico,.side nav a:hover .nico{{opacity:1}}
- .nico-sql{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='2.5' width='13' height='11' rx='2' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3Cpath d='M4.5 6.5 7 8.5l-2.5 2' fill='none' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 10.5h3' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")}}
- .nico-approve{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 13.5 3.5v4c0 3.2-2.3 5.8-5.5 7-3.2-1.2-5.5-3.8-5.5-7v-4z' fill='none' stroke='%2356d364' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.8 6' fill='none' stroke='%2356d364' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}}
- .nico-audit{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3.5h8M2 8h6M2 12.5h5' stroke='%23e8b339' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='11.5' cy='10.5' r='3' fill='none' stroke='%23e8b339' stroke-width='1.5'/%3E%3Cpath d='M11.5 9v1.7l1.2.8' fill='none' stroke='%23e8b339' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E")}}
- .nico-conn{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%236f9be8'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3C/svg%3E")}}
- .nico-redis{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2.5 13 4 8 5.5 3 4Z' fill='%23d9534f'/%3E%3Cpath d='M8 6.5 13 8 8 9.5 3 8Z' fill='%23d9534f'/%3E%3Cpath d='M8 10.5 13 12 8 13.5 3 12Z' fill='%23d9534f'/%3E%3C/svg%3E")}}
- .nico-settings{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='2.2' fill='none' stroke='%23aab2c0' stroke-width='1.5'/%3E%3Cpath d='M8 1.3v2.2M8 12.5v2.2M14.7 8h-2.2M3.5 8H1.3M12.7 3.3l-1.6 1.6M4.9 11.1l-1.6 1.6M12.7 12.7l-1.6-1.6M4.9 4.9 3.3 3.3' stroke='%23aab2c0' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E")}}
- .nav-count{{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
-   min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}}
- .pending-banner{{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
-   padding:11px 16px;border-radius:10px;margin-bottom:20px;font-size:14px;font-weight:500;text-decoration:none}}
- .pending-banner:hover{{background:#fee2e2;text-decoration:none}} .pending-banner b{{font-size:16px}}
- .side .foot{{margin-top:auto;border-top:1px solid #262d38;padding-top:12px}}
- .side .foot a{{color:var(--faint);font-size:13px;padding:6px 11px;display:block;border-radius:6px}}
- .side .foot a:hover{{color:#fff;background:var(--ink-2);text-decoration:none}}
- /* 工作区 */
- main{{padding:32px 40px;max-width:1160px}}
- h1,h2,h3{{color:var(--text);font-weight:600;letter-spacing:-.01em}}
- h2{{font-size:19px;margin:0 0 2px}} h3{{font-size:15px;margin:0 0 8px}}
- .eyebrow{{font-family:var(--mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;
-   color:var(--accent-ink);margin-bottom:6px}}
- .pagehead{{margin-bottom:22px}}
- .stabs{{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px}}
- .stabs .stab{{padding:9px 16px;color:var(--faint);font-size:14px;text-decoration:none;
-   border-bottom:2px solid transparent;margin-bottom:-1px}}
- .stabs .stab:hover{{color:var(--text)}}
- .stabs .stab.active{{color:var(--accent);border-bottom-color:var(--accent);font-weight:500}}
- .card{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 22px;margin-bottom:18px}}
- .card h2{{margin-bottom:14px}}
- /* 表格 */
- .tablewrap{{overflow-x:auto;margin:0 -6px;border-radius:8px}}
- table{{width:100%;border-collapse:collapse;font-size:13.5px}}
- th,td{{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}}
- th{{font-family:var(--mono);font-weight:600;font-size:11px;letter-spacing:.6px;text-transform:uppercase;
-   color:var(--faint);border-bottom:1px solid var(--border)}}
- tr:last-child td{{border-bottom:none}}
- tbody tr{{transition:background .1s}} tbody tr:hover{{background:#fafbfc}}
- td code{{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border-radius:5px}}
- .cell-sql{{display:inline-block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}}
- .sql-toggle:hover{{background:#e6faf6;color:var(--accent-ink)}}
- .sql-full td{{background:#0f141b;padding:0}} .sql-full pre{{margin:0;border-radius:0;border:none}}
- .cell-detail{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;margin-top:2px}}
- .pager{{display:flex;align-items:center;gap:14px;margin-top:16px}}
- .pager-info{{font-size:13px;color:var(--muted)}}
- .btn.pg{{padding:6px 13px;font-size:13px}}
- .btn.disabled{{opacity:.4;pointer-events:none}}
- /* 徽章 / pill / tag */
- .badge{{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
-   font-family:var(--mono);letter-spacing:.3px}}
- .pill{{display:inline-block;padding:1px 10px;border-radius:6px;font-size:12px;font-weight:600;font-family:var(--mono)}}
- .pill-yes{{background:#dcfce7;color:#166534}} .pill-no{{background:#f1f5f9;color:#475569}}
- .pill-na{{background:#fef3c7;color:#92400e}}
- .tag{{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);padding:1px 8px;
-   border-radius:5px;font-size:12px;font-family:var(--mono);margin-right:4px}}
- /* 代码 / 计划 */
- pre{{background:var(--ink);color:#e2e8f0;padding:14px 16px;border-radius:10px;overflow-x:auto;
-   font-size:12.5px;line-height:1.55;border:1px solid #262d38}}
- /* 按钮 */
- .btn{{display:inline-block;padding:9px 17px;border-radius:8px;border:1px solid transparent;
-   font-size:13.5px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .12s,transform .04s;
-   background:var(--ink);color:#fff;font-family:var(--sans)}}
- .btn:hover{{filter:brightness(1.15);text-decoration:none}} .btn:active{{transform:translateY(1px)}}
- .btn-primary{{background:var(--accent)}} .btn-approve{{background:#16794f}} .btn-reject{{background:#c0392b}}
- .btn-ghost{{background:#fff;color:var(--text);border-color:var(--border)}}
- .btn-ghost:hover{{background:#f6f7f9;filter:none}}
- /* 表单（去原生观感：下拉自绘箭头、checkbox 主题色） */
- input,textarea,select{{font-family:var(--sans);font-size:13.5px;padding:9px 11px;border:1px solid var(--border);
-   border-radius:8px;background:#fff;transition:border-color .12s,box-shadow .12s;color:var(--text)}}
- input:focus,textarea:focus,select:focus{{outline:none;border-color:var(--accent);
-   box-shadow:0 0 0 3px rgba(13,148,136,.14)}}
- input::placeholder{{color:var(--faint)}}
- select{{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
-   background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-   background-repeat:no-repeat;background-position:right 10px center}}
- input[type=checkbox]{{accent-color:var(--accent);width:15px;height:15px;cursor:pointer}}
- /* 通用弹窗 */
- .modalbg{{position:fixed;inset:0;background:rgba(15,20,27,.5);display:none;z-index:70;
-   align-items:flex-start;justify-content:center;padding:36px 20px;overflow:auto}}
- .modalbg.open{{display:flex}}
- .modalbg .modalbox{{background:#fff;border-radius:14px;padding:24px 28px;max-width:800px;width:100%;
-   box-shadow:0 24px 70px rgba(0,0,0,.35);position:relative}}
- .modalbox .mclose{{position:absolute;top:14px;right:16px;border:none;background:none;font-size:18px;
-   color:var(--faint);cursor:pointer;padding:4px}} .modalbox .mclose:hover{{color:var(--text)}}
- label{{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-weight:500}}
- .errbar{{background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;padding:11px 15px;border-radius:9px;
-   margin-bottom:16px;font-size:13.5px}}
- /* 通用 */
- .muted{{color:var(--muted);font-size:13px}} .row{{display:flex;gap:22px;flex-wrap:wrap}}
- .filters{{margin-bottom:14px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13px}}
- .filters a{{padding:3px 10px;border-radius:6px;color:var(--muted)}}
- .filters a:hover{{background:#eceef1;text-decoration:none;color:var(--text)}}
- .kv{{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:4px 0;align-items:center;font-size:13.5px}}
- .kv dt{{color:var(--muted)}} .kv dd{{margin:0;color:var(--text)}}
- .sec-title{{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.8px;
-   text-transform:uppercase;margin:18px 0 7px}}
- .card h3:first-child,.card .sec-title:first-child{{margin-top:0}}
- @media (max-width:720px){{
-  .shell{{grid-template-columns:1fr}}
-  .side{{position:static;height:auto;flex-direction:row;align-items:center;padding:12px 16px;gap:8px;overflow-x:auto}}
-  .side .brand{{padding:0 8px 0 0}} .side .brand span{{display:none}}
-  .side nav{{flex-direction:row;margin:0}} .side .foot{{margin:0 0 0 auto;border:none;padding:0}}
-  main{{padding:22px 18px}}
- }}
- @media (prefers-reduced-motion:reduce){{*{{transition:none!important}}}}
-</style></head><body>
+<link rel="stylesheet" href="/admin/static/admin-chrome.css">{doc_css}</head><body>
 <div class="shell">
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>Quay</b><span>gatekeeper</span></div></div>
@@ -266,19 +135,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  </aside>
  <main>{banner}{body}</main>
 </div>
-<script>
- (function(){{var p=location.pathname;document.querySelectorAll('.side nav a').forEach(function(a){{
-   if(p.indexOf(a.getAttribute('href'))===0)a.classList.add('active');}});}})();
- // 危险操作二次确认（自绘，替代原生 confirm）：首次点击按钮变「确认删除？」，3 秒内再点才提交
- function dbmConfirm(form){{
-   var btn=form.querySelector('button');
-   if(form.dataset.armed==='1')return true;
-   form.dataset.armed='1';btn.dataset.old=btn.textContent;btn.textContent='确认删除？';
-   btn.style.filter='brightness(1.25)';
-   setTimeout(function(){{form.dataset.armed='';btn.textContent=btn.dataset.old;btn.style.filter='';}},3000);
-   return false;
- }}
-</script>
+<script src="/admin/static/admin.js"></script>
 </body></html>"""
 
 
@@ -834,7 +691,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return await handler(req)
         return _wrapped
 
-    def _shell(title: str, body: str) -> HTMLResponse:
+    def _shell(title: str, body: str, doc: bool = True) -> HTMLResponse:
         """渲染登录后的页面，自动注入待审批数（侧栏角标 + 顶部横幅）。"""
         try:
             # 惰性过期：存储态还是 pending 但已过 TTL 的单不该继续闪红点
@@ -842,7 +699,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                            if c.effective_status() == "pending"])
         except Exception:
             pending = 0
-        return HTMLResponse(_page(title, body, pending=pending))
+        return HTMLResponse(_page(title, body, pending=pending, doc=doc))
 
     @mcp.custom_route("/favicon.ico", methods=["GET"])
     @mcp.custom_route("/favicon.svg", methods=["GET"])
@@ -1285,7 +1142,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @mcp.custom_route("/admin/sql", methods=["GET"])
     @guard
     async def _sql_console(_req: Request) -> HTMLResponse:
-        return _shell("查询台", _console_body())
+        return _shell("查询台", _console_body(), doc=False)
 
     @mcp.custom_route("/admin/sql/connections", methods=["GET"])
     @guard
@@ -1449,7 +1306,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @mcp.custom_route("/admin/redis", methods=["GET"])
     @guard
     async def _redis_console(_req: Request) -> HTMLResponse:
-        return _shell("Redis", _redis_body())
+        return _shell("Redis", _redis_body(), doc=False)
 
     # ---------- 系统设置 ----------
 

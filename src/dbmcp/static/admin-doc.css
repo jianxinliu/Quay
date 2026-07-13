@@ -1,0 +1,89 @@
+/* 后台「内容」样式：仅服务端渲染页（审批/审计/设置/连接/登录）加载。
+   查询台 / Redis 等 SPA 不加载本文件，因此这里的通用元素（table/th/td/label/select/input/pre…）
+   与 .pager 等类名不会渗进 SPA 及其 body 级 Monaco 弹层。原先内联在 admin.py 的 <style>。 */
+code,pre,.mono{font-family:var(--mono)}
+a{color:var(--accent-ink);text-decoration:none} a:hover{text-decoration:underline}
+/* 工作区 */
+main{padding:32px 40px;max-width:1160px}
+h1,h2,h3{color:var(--text);font-weight:600;letter-spacing:-.01em}
+h2{font-size:19px;margin:0 0 2px} h3{font-size:15px;margin:0 0 8px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;
+  color:var(--accent-ink);margin-bottom:6px}
+.pagehead{margin-bottom:22px}
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px}
+.stabs .stab{padding:9px 16px;color:var(--faint);font-size:14px;text-decoration:none;
+  border-bottom:2px solid transparent;margin-bottom:-1px}
+.stabs .stab:hover{color:var(--text)}
+.stabs .stab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:500}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 22px;margin-bottom:18px}
+.card h2{margin-bottom:14px}
+/* 表格 */
+.tablewrap{overflow-x:auto;margin:0 -6px;border-radius:8px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-weight:600;font-size:11px;letter-spacing:.6px;text-transform:uppercase;
+  color:var(--faint);border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+tbody tr{transition:background .1s} tbody tr:hover{background:#fafbfc}
+td code{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border-radius:5px}
+.cell-sql{display:inline-block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
+.sql-toggle:hover{background:#e6faf6;color:var(--accent-ink)}
+.sql-full td{background:#0f141b;padding:0} .sql-full pre{margin:0;border-radius:0;border:none}
+.cell-detail{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;margin-top:2px}
+.pager{display:flex;align-items:center;gap:14px;margin-top:16px}
+.pager-info{font-size:13px;color:var(--muted)}
+.btn.pg{padding:6px 13px;font-size:13px}
+.btn.disabled{opacity:.4;pointer-events:none}
+/* 徽章 / pill / tag */
+.badge{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
+  font-family:var(--mono);letter-spacing:.3px}
+.pill{display:inline-block;padding:1px 10px;border-radius:6px;font-size:12px;font-weight:600;font-family:var(--mono)}
+.pill-yes{background:#dcfce7;color:#166534} .pill-no{background:#f1f5f9;color:#475569}
+.pill-na{background:#fef3c7;color:#92400e}
+.tag{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);padding:1px 8px;
+  border-radius:5px;font-size:12px;font-family:var(--mono);margin-right:4px}
+/* 代码 / 计划 */
+pre{background:var(--ink);color:#e2e8f0;padding:14px 16px;border-radius:10px;overflow-x:auto;
+  font-size:12.5px;line-height:1.55;border:1px solid #262d38}
+/* 按钮 */
+.btn{display:inline-block;padding:9px 17px;border-radius:8px;border:1px solid transparent;
+  font-size:13.5px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .12s,transform .04s;
+  background:var(--ink);color:#fff;font-family:var(--sans)}
+.btn:hover{filter:brightness(1.15);text-decoration:none} .btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--accent)} .btn-approve{background:#16794f} .btn-reject{background:#c0392b}
+.btn-ghost{background:#fff;color:var(--text);border-color:var(--border)}
+.btn-ghost:hover{background:#f6f7f9;filter:none}
+/* 表单（去原生观感：下拉自绘箭头、checkbox 主题色） */
+input,textarea,select{font-family:var(--sans);font-size:13.5px;padding:9px 11px;border:1px solid var(--border);
+  border-radius:8px;background:#fff;transition:border-color .12s,box-shadow .12s;color:var(--text)}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(13,148,136,.14)}
+input::placeholder{color:var(--faint)}
+select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7280' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center}
+input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px;cursor:pointer}
+/* 通用弹窗 */
+.modalbg{position:fixed;inset:0;background:rgba(15,20,27,.5);display:none;z-index:70;
+  align-items:flex-start;justify-content:center;padding:36px 20px;overflow:auto}
+.modalbg.open{display:flex}
+.modalbg .modalbox{background:#fff;border-radius:14px;padding:24px 28px;max-width:800px;width:100%;
+  box-shadow:0 24px 70px rgba(0,0,0,.35);position:relative}
+.modalbox .mclose{position:absolute;top:14px;right:16px;border:none;background:none;font-size:18px;
+  color:var(--faint);cursor:pointer;padding:4px} .modalbox .mclose:hover{color:var(--text)}
+label{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-weight:500}
+.errbar{background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;padding:11px 15px;border-radius:9px;
+  margin-bottom:16px;font-size:13.5px}
+/* 通用 */
+.muted{color:var(--muted);font-size:13px} .row{display:flex;gap:22px;flex-wrap:wrap}
+.filters{margin-bottom:14px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13px}
+.filters a{padding:3px 10px;border-radius:6px;color:var(--muted)}
+.filters a:hover{background:#eceef1;text-decoration:none;color:var(--text)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:4px 0;align-items:center;font-size:13.5px}
+.kv dt{color:var(--muted)} .kv dd{margin:0;color:var(--text)}
+.sec-title{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.8px;
+  text-transform:uppercase;margin:18px 0 7px}
+.card h3:first-child,.card .sec-title:first-child{margin-top:0}
+@media (max-width:720px){
+  main{padding:22px 18px}
+}
