@@ -342,7 +342,7 @@
         exportOpen: false, copyOpen: false, editorReady: false, toast: "",
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
-        leftW: 264, editorH: 300,
+        leftW: 264, editorH: 300, dataLogH: 150,
         theme: "dark",          // 系统设置：dark | light（浅色主题）
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
       };
@@ -526,6 +526,7 @@
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
         if (t && t.view === "chart" && t.result) this.renderChart(); else this.disposeChart();
+        if (t && t.type === "data") this.loadHistory();  // 底部执行记录面板用
         this.scheduleLint();
       },
       onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
@@ -1827,7 +1828,7 @@
                      graph: t.graph || null };
           }, this);
           var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
-                       leftW: this.leftW, editorH: this.editorH,
+                       leftW: this.leftW, editorH: this.editorH, dataLogH: this.dataLogH,
                        schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
           var s = JSON.stringify(data);
           if (s.length > 3800000) {  // localStorage 上限兜底：丢结果、保 SQL 与树
@@ -1863,6 +1864,7 @@
           this.treeCache = d.treeCache || {};
           if (d.leftW) this.leftW = d.leftW;
           if (d.editorH) this.editorH = d.editorH;
+          if (d.dataLogH != null) this.dataLogH = d.dataLogH;
           this.schemaShow = d.schemaShow || {};
           this.schemaDefault = d.schemaDefault || {};
           seq = Math.max.apply(null, this.tabs.map(function (t) { return t.id; })) + 1;
@@ -1872,11 +1874,13 @@
       // ---------- 拖动分隔条 ----------
       beginDrag: function (e, axis) {
         var self = this, start = axis === "x" ? e.clientX : e.clientY;
-        var base = axis === "x" ? this.leftW : this.editorH;
+        var base = axis === "x" ? this.leftW : axis === "log" ? this.dataLogH : this.editorH;
         e.preventDefault();
         function move(ev) {
           var delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
           if (axis === "x") self.leftW = Math.max(180, Math.min(560, base + delta));
+          // log 面板在底部：手柄在其上方，往下拖变矮 → base - delta
+          else if (axis === "log") self.dataLogH = Math.max(0, Math.min(window.innerHeight - 240, base - delta));
           else self.editorH = Math.max(100, Math.min(window.innerHeight - 160, base + delta));
         }
         function up() {
@@ -2495,6 +2499,22 @@
             </template>
           </div>
           </div>
+          <!-- 表数据视图：底部可拖拽的 SQL 执行记录面板 -->
+          <template v-if="activeTab.type==='data' && dataLogH>0">
+            <div class="dg-loghandle" @mousedown="beginDrag($event,'log')" title="拖动调整高度"></div>
+            <div class="dg-datalog" :style="{height: dataLogH+'px'}">
+              <div class="dl-hd">SQL 执行记录 <span class="muted">· 本连接最近</span>
+                <span class="dl-x" @click="loadHistory" title="刷新">↻</span></div>
+              <div class="dl-body">
+                <div v-if="!history.length" class="dl-empty">（暂无记录）</div>
+                <div v-for="(h,hi) in history" :key="hi" class="dl-row" :title="h.sql" @click="openHistory(h)">
+                  <span class="st" :class="h.status==='ok'?'ok':'bad'">{{ h.status==='ok'?'✓':'✗' }}</span>
+                  <span class="sql">{{ h.sql }}</span>
+                  <span class="tm">{{ fmtTs(h.ts).slice(5) }}</span>
+                </div>
+              </div>
+            </div>
+          </template>
         </template>
         <div v-else class="dg-res-empty">{{ activeTab.type==='data' ? "加载中…" : "运行查询查看结果（⌘/Ctrl+Enter）。" }}</div>
       </template>

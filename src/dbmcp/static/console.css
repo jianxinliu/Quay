@@ -279,7 +279,9 @@ table.dg-rt th, table.dg-rt td {
   border: 1px solid var(--dg-border); padding: 4px 10px; white-space: nowrap;
   max-width: 460px; overflow: hidden; text-overflow: ellipsis; text-align: left;
 }
-table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: var(--dg-muted); z-index: 1; }
+/* 列名保持原样大小写：覆盖后台外壳全局 th{text-transform:uppercase} */
+table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: var(--dg-muted);
+  z-index: 1; text-transform: none; letter-spacing: 0; }
 table.dg-rt td .nul { color: var(--dg-faint); font-style: italic; }
 table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 .dg-res-ok { padding: 12px 14px; color: var(--dg-green); }
@@ -667,3 +669,24 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   flex: none; width: 15px; height: 15px; min-width: 0; margin: 0; padding: 0;
   accent-color: var(--dg-accent);
 }
+/* 表数据视图底部：可拖拽的 SQL 执行记录面板 */
+.dg-loghandle { height: 6px; flex: none; cursor: row-resize; background: var(--dg-border); }
+.dg-loghandle:hover { background: var(--dg-accent); }
+.dg-datalog { flex: none; display: flex; flex-direction: column; overflow: hidden;
+  border-top: 1px solid var(--dg-border); background: var(--dg-panel); }
+.dg-datalog .dl-hd { flex: none; padding: 5px 12px; font-size: 11px; letter-spacing: .5px;
+  color: var(--dg-faint); text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+.dg-datalog .dl-hd .muted { text-transform: none; letter-spacing: 0; color: var(--dg-muted); }
+.dg-datalog .dl-hd .dl-x { margin-left: auto; cursor: pointer; color: var(--dg-muted); padding: 0 4px; }
+.dg-datalog .dl-hd .dl-x:hover { color: var(--dg-accent); }
+.dg-datalog .dl-body { flex: 1; overflow: auto; }
+.dg-datalog .dl-empty { padding: 10px 12px; color: var(--dg-faint); font-size: 12px; }
+.dg-datalog .dl-row { display: flex; align-items: center; gap: 8px; padding: 4px 12px;
+  font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--dg-border); }
+.dg-datalog .dl-row:hover { background: var(--dg-hover); }
+.dg-datalog .dl-row .st { flex: none; font-weight: 700; }
+.dg-datalog .dl-row .st.ok { color: var(--dg-green); }
+.dg-datalog .dl-row .st.bad { color: var(--dg-red); }
+.dg-datalog .dl-row .sql { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--dg-mono); color: var(--dg-text); }
+.dg-datalog .dl-row .tm { flex: none; color: var(--dg-faint); font-family: var(--dg-mono); font-size: 11px; }
