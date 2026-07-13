@@ -604,7 +604,7 @@ def _redis_body() -> str:
 
 
 _SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
-                  ("connections", "连接管理")]
+                  ("connections", "连接管理"), ("info", "系统信息")]
 
 _SETTINGS_SUBMIT_JS = """<script>
 document.querySelectorAll('form.settings-form').forEach(function(f){
@@ -665,6 +665,105 @@ def _settings_redis_body(s: dict) -> str:
         + _field("Redis 键列表加载上限", "redis_key_limit", s.get("redis_key_limit", 1000),
                  ph="1000", typ="number", width="200px")
         + "<div class='muted' style='margin-top:4px'>左侧键树 SCAN 一次最多加载的键数量。</div></div>")
+
+
+def _settings_info_body(service: "DbmService", req: "Request") -> str:
+    """系统信息 tab：只读展示项目/数据/日志路径、运行时信息、登录 token 获取与更新指引。"""
+    import os
+    from pathlib import Path
+
+    from .secrets import KEYRING_SERVICE
+    try:
+        from importlib.metadata import version as _pkgver
+        ver = _pkgver("db-manage-mcp")
+    except Exception:  # noqa: BLE001
+        ver = "0.1.0"
+
+    def _size(p: object) -> str | None:
+        try:
+            if p and os.path.isfile(str(p)):
+                n = float(os.path.getsize(str(p)))
+                for unit in ("B", "KB", "MB", "GB"):
+                    if n < 1024 or unit == "GB":
+                        return f"{int(n)} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+                    n /= 1024
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def ap(p: object) -> str:
+        try:
+            return str(Path(str(p)).resolve()) if p else "（未配置）"
+        except Exception:  # noqa: BLE001
+            return str(p)
+
+    def row(label: str, value: str, note: str = "") -> str:
+        cp = (f"<button class='ic-copy' data-copy='{_esc(value)}' title='复制'>⧉</button>"
+              if value and value != "（未配置）" else "")
+        nt = f"<span class='muted' style='margin-left:8px'>{_esc(note)}</span>" if note else ""
+        return (f"<tr><td class='ik'>{_esc(label)}</td>"
+                f"<td class='iv'><code>{_esc(value)}</code>{cp}{nt}</td></tr>")
+
+    analysis_root = getattr(getattr(service, "analysis", None), "root", None)
+    data_dir = analysis_root.parent if analysis_root is not None else None
+    db_path = (data_dir / "dbm.sqlite3") if data_dir is not None else None
+    config_path = getattr(service, "config_path", None)
+    env_file = os.environ.get("DBM_ENV_FILE") or os.path.expanduser("~/.config/db-manage-mcp/env")
+    log_path = os.path.expanduser("~/Library/Logs/db-manage-mcp.log")
+    host = req.url.hostname or "127.0.0.1"
+    port = req.url.port or 8100
+
+    ws_note = ""
+    if analysis_root is not None and Path(str(analysis_root)).exists():
+        ws_note = f"{len(list(Path(str(analysis_root)).glob('*.duckdb')))} 个工作区"
+    db_note = ("存在 · " + (_size(db_path) or "")) if db_path and os.path.isfile(str(db_path)) else "尚未创建"
+
+    paths = "".join([
+        row("项目工作目录", os.getcwd()),
+        row("配置文件（连接/账密引用）", ap(config_path)),
+        row("SQLite 库（审计/审批/设置/片段/workflow）", ap(db_path), db_note),
+        row("分析工作区目录（DuckDB）", ap(analysis_root) if analysis_root else "（未启用）", ws_note),
+        row("密钥 env 文件", env_file, "存在" if os.path.isfile(env_file) else "不存在（或用环境变量注入）"),
+        row("launchd 日志", log_path, "存在" if os.path.isfile(log_path) else "非 launchd 则输出到 stdout"),
+    ])
+    runtime = "".join([
+        row("监听地址", f"{host}:{port}"),
+        row("MCP 端点（给 agent）", f"http://{host}:{port}/mcp"),
+        row("keyring 服务名（密码存储处）", KEYRING_SERVICE),
+        row("版本", ver),
+    ])
+    token = (
+        "<div class='card'><h3>登录 Token（获取与更新）</h3>"
+        "<p class='muted'>后台登录用的 <code>DBM_ADMIN_TOKEN</code>。出于安全，本页<b>不显示明文</b>。</p>"
+        f"<table class='info-tbl'>{row('存储位置', env_file, '文件中的 DBM_ADMIN_TOKEN=…，或由环境变量注入')}</table>"
+        "<p style='margin:14px 0 4px'><b>查看当前 token</b></p>"
+        f"<pre class='cmd'>grep DBM_ADMIN_TOKEN {_esc(env_file)}</pre>"
+        "<p style='margin:14px 0 4px'><b>更新 token</b>（改完热重载，旧 cookie 失效需重新登录）</p>"
+        "<pre class='cmd'># 编辑 env 文件把 DBM_ADMIN_TOKEN 改成新值，然后热重载（幂等）：\n"
+        "bash scripts/install-launchd.sh</pre>"
+        "<p class='muted' style='margin-top:10px'>想让服务重新随机生成：删掉该行再跑上面命令，"
+        f"新 token 会打印在日志里（<code>tail -f {_esc(log_path)}</code>）。</p></div>"
+    )
+    css = ("<style>"
+           ".info-tbl{width:100%;border-collapse:collapse}"
+           ".info-tbl td{padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top;font-size:13px}"
+           ".info-tbl tr:last-child td{border-bottom:none}"
+           ".info-tbl td.ik{color:var(--muted);white-space:nowrap;width:290px}"
+           ".info-tbl td.iv code{background:var(--paper);padding:2px 6px;border-radius:5px;word-break:break-all}"
+           ".ic-copy{margin-left:8px;background:none;border:1px solid var(--border);color:var(--faint);"
+           "border-radius:5px;cursor:pointer;padding:1px 6px;font-size:12px}"
+           ".ic-copy:hover{color:var(--accent-ink);border-color:var(--accent)}"
+           "pre.cmd{background:var(--ink);color:#d7dde6;border-radius:8px;padding:10px 12px;overflow-x:auto;"
+           "font-family:var(--mono);font-size:12.5px;margin:0}"
+           "</style>")
+    script = ("<script>document.querySelectorAll('.ic-copy').forEach(function(b){"
+              "b.addEventListener('click',function(){var t=b.getAttribute('data-copy');"
+              "if(navigator.clipboard){navigator.clipboard.writeText(t);var o=b.textContent;"
+              "b.textContent='✓';setTimeout(function(){b.textContent=o},1200);}});});</script>")
+    return (css
+            + f"<div class='card'><h3>路径</h3><table class='info-tbl'>{paths}</table></div>"
+            + f"<div class='card'><h3>运行时</h3><table class='info-tbl'>{runtime}</table></div>"
+            + token + script)
 
 
 def _connections_body(service: "DbmService", editing: str | None) -> str:
@@ -1382,6 +1481,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             content = _settings_db_body(s)
         elif tab == "redis":
             content = _settings_redis_body(s)
+        elif tab == "info":
+            content = _settings_info_body(service, req)
         else:
             tab = "general"
             content = _settings_general_body(s)
