@@ -49,6 +49,9 @@
   var ENV_COLORS = { local: "#64748b", dev: "#2563eb", staging: "#d97706", prod: "#dc2626" };
   var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
   var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
+  // 列类型 → 表头小图标（DataGrip 风）
+  var COL_GLYPH = { number: "#", string: "T", datetime: "◷", date: "◷", time: "◷",
+                    json: "{}", bool: "☑", binary: "⬡", "": "·" };
 
   var RESERVED = {};
   ("where on group order by having limit join inner left right full outer cross " +
@@ -1286,6 +1289,7 @@
             if (t2.type === "data" && t2.table) {
               var mk = self.mk(t2.table, t2.schema);
               if (!self.tableMeta[mk]) self.fetchMeta(t2.table, t2.schema);
+              if (t2.id === self.activeId) self.loadHistory();  // 底部执行记录及时反映刚才的过滤/排序 SQL
             }
           }
           else if (r.kind === "confirm") {
@@ -1446,6 +1450,38 @@
       isNumericCol: function (ci) {
         return /\b(bigint|smallint|mediumint|tinyint|int|integer|decimal|numeric|float|double|real|bit)\b/.test(this.colType(ci));
       },
+      // 列类型归类：数据 tab 用表结构类型，查询 tab 从本页数据推断
+      colCat: function (ci) {
+        var t = this.activeTab; if (!t || !t.result) return "";
+        var type = t.type === "data" ? this.colType(ci) : "";
+        if (type) {
+          if (/json/.test(type)) return "json";
+          if (/int|decimal|numeric|float|double|real|bit|serial/.test(type)) return "number";
+          if (/datetime|timestamp/.test(type)) return "datetime";
+          if (type === "date") return "date";
+          if (type === "time") return "time";
+          if (/bool/.test(type)) return "bool";
+          if (/blob|binary|bytea/.test(type)) return "binary";
+          return "string";
+        }
+        var rows = t.result.rows;   // 无表结构：扫本页首个非空值推断
+        for (var i = 0; i < rows.length && i < 40; i++) {
+          var v = rows[i][ci]; if (v != null) return this.inferCat(v);
+        }
+        return "";
+      },
+      inferCat: function (v) {
+        if (typeof v === "number") return "number";
+        if (typeof v === "boolean") return "bool";
+        if (typeof v === "object") return "json";
+        var s = String(v).trim();
+        if (/^-?\d+(\.\d+)?$/.test(s)) return "number";
+        if (s[0] === "{" || s[0] === "[") return "json";
+        if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s)) return "datetime";
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return "date";
+        return "string";
+      },
+      colGlyph: function (ci) { return COL_GLYPH[this.colCat(ci)] || "·"; },
       isJsonCol: function (ci) { return this.colType(ci).indexOf("json") >= 0; },
       isDatetimeCol: function (ci) {
         var t = this.colType(ci); return /datetime|timestamp/.test(t) || t === "date" || t === "time";
@@ -1886,17 +1922,19 @@
       // ---------- Value Editor（DataGrip 式侧栏编辑面板，选中单元格展开） ----------
       cellClick: function (ri, ci) {
         var t = this.activeTab;
-        if (!t || t.type !== "data" || !t.result) return;
+        if (!t || !t.result || (t.type !== "data" && t.type !== "query")) return;
         t.vsel = { ri: ri, ci: ci };
         var v = t.result.rows[ri][ci], key = ri + ":" + ci;
-        var staged = t.edits && key in t.edits;   // 面板显示已暂存的改动值（若有）
+        var staged = t.type === "data" && t.edits && key in t.edits;   // 面板显示已暂存的改动值（若有）
         this.vpVal = staged ? (t.edits[key] === "NULL" ? "" : t.edits[key]) : (v == null ? "" : this.cellText(v));
         this.vpNull = staged ? t.edits[key] === "NULL" : v == null;
-        // JSON 列默认进 Record（格式化只读视图），其余保留上次选择
+        // JSON 列默认进 Record（格式化视图），其余保留上次选择
         this.vpOpen = true;
-        this.vpTab = this.isJsonCol(ci) ? "record" : (this.vpTab || "value");
-        var k = this.mk(t.table, t.schema);
-        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
+        this.vpTab = this.colCat(ci) === "json" ? "record" : (this.vpTab || "value");
+        if (t.type === "data") {   // 查询 tab 无表/主键，不预取
+          var k = this.mk(t.table, t.schema);
+          if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
+        }
       },
       vpDirty: function () {
         var t = this.activeTab;
@@ -1939,7 +1977,7 @@
             }
           }
           return { col: c, val: val, pretty: pretty, isJson: isJson,
-                   type: self.colType(i) || "", cur: i === t.vsel.ci };
+                   type: self.colType(i) || self.colCat(i) || "", cur: i === t.vsel.ci };
         });
       },
 
@@ -2700,7 +2738,7 @@
                   @click="activeTab.type==='data' && cycleOrder(c)"
                   @contextmenu="activeTab.type==='data' && openColMenu($event, ci)"
                   :title="activeTab.type==='data' ? '点击排序（走 SQL）· 右键改显示类型' : c">
-                {{ c }}{{ orderMark(c) }}
+                <span class="ctype" :class="'ct-'+colCat(ci)" :title="'类型：'+(colCat(ci)||'未知')">{{ colGlyph(ci) }}</span>{{ c }}{{ orderMark(c) }}
                 <span v-if="activeTab.type==='data' && displayTypeOf(ci)!=='number'" class="disp-badge" title="按时间戳展示（仅展示，不改值）">🕒</span>
                 <span v-if="activeTab.type==='data'" class="funnel" @click.stop="funnel(c)" title="按此列筛选（填入 WHERE）">⧩</span>
               </th>
@@ -2733,7 +2771,7 @@
               </td>
             </tr></tbody>
           </table></div>
-          <div v-if="vpOpen && activeTab.type==='data' && activeTab.vsel" class="dg-vp">
+          <div v-if="vpOpen && (activeTab.type==='data' || activeTab.type==='query') && activeTab.vsel" class="dg-vp">
             <div class="vp-hd">
               <span class="vt" :class="{on: vpTab==='value'}" @click="vpTab='value'">Value</span>
               <span class="vt" :class="{on: vpTab==='record'}" @click="vpTab='record'">Record</span>
@@ -2741,18 +2779,21 @@
             </div>
             <template v-if="vpTab==='value'">
               <div class="vp-col">{{ activeTab.result.columns[activeTab.vsel.ci] }}</div>
-              <textarea class="vp-ta" v-model="vpVal" :disabled="vpNull"
+              <textarea class="vp-ta" v-model="vpVal" :disabled="vpNull" :readonly="activeTab.type!=='data'"
                         placeholder="（空字符串）" spellcheck="false"></textarea>
               <div class="vp-fmt">
                 <button class="dg-btn" @click="vpFormat(true)" title="JSON 美化（缩进 2 空格）">格式化 JSON</button>
                 <button class="dg-btn" @click="vpFormat(false)" title="JSON 压缩为单行">压缩</button>
               </div>
-              <label class="vp-null"><input type="checkbox" v-model="vpNull"> 设为 NULL</label>
-              <div class="vp-acts">
-                <button class="dg-btn run" :disabled="!vpDirty()" @click="vpSave"
-                        title="生成 UPDATE，经风险确认后由 writer 执行">保存（生成 UPDATE）</button>
-                <span v-if="vpDirty()" class="vp-dirty">已修改</span>
-              </div>
+              <template v-if="activeTab.type==='data'">
+                <label class="vp-null"><input type="checkbox" v-model="vpNull"> 设为 NULL</label>
+                <div class="vp-acts">
+                  <button class="dg-btn run" :disabled="!vpDirty()" @click="vpSave"
+                          title="暂存改动，点工具栏「提交」写库">保存改动（暂存）</button>
+                  <span v-if="vpDirty()" class="vp-dirty">已修改</span>
+                </div>
+              </template>
+              <div v-else class="vp-null">只读 · 查询结果不可就地编辑（可格式化查看）</div>
             </template>
             <template v-else>
               <div class="vp-rec">

@@ -706,6 +706,17 @@ table.dg-rt tr.delrow td.gut { color: var(--dg-red); text-decoration: none; }
 .dg-submit-sql { max-height: 260px; overflow: auto; margin: 8px 0; padding: 10px 12px;
   background: var(--dg-bg); border: 1px solid var(--dg-border); border-radius: 6px;
   font-family: var(--dg-mono); font-size: 12px; white-space: pre; color: var(--dg-text); }
+/* 列类型图标（表头，DataGrip 风） */
+table.dg-rt th .ctype { display: inline-block; width: 15px; margin-right: 5px; text-align: center;
+  font-family: var(--dg-mono); font-size: 10px; font-weight: 700; border-radius: 3px;
+  color: var(--dg-bg); line-height: 14px; vertical-align: baseline; }
+.ct-number { background: #3574f0; }
+.ct-string { background: #57965c; }
+.ct-datetime, .ct-date, .ct-time { background: #d9a343; }
+.ct-json { background: #bc8cff; }
+.ct-bool { background: #39c5cf; }
+.ct-binary { background: #d9534f; }
+.ct- { background: var(--dg-faint); }
 /* 列显示类型：表头徽章 + 右键菜单 */
 table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-ctx-backdrop { position: fixed; inset: 0; z-index: 190; }
