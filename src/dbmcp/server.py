@@ -163,32 +163,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             )
         return result
 
-    @mcp.tool
-    async def redis_command(
-        project: str,
-        connection: str,
-        command: Annotated[str, Field(description="Redis 命令，如 GET key / SET key value（值含空格用引号）")],
-        reason: Annotated[str, Field(description="写命令的变更原因，供审批人参考")] = "",
-        change_id: Annotated[int | None, Field(description="已获批审批单号")] = None,
-        ctx: Context | None = None,
-    ) -> dict:
-        """执行 Redis 命令（连接引擎须为 redis）。
-
-        读命令（GET/HGETALL/SCAN 等）直接执行；写命令走与 execute 相同的人工授权流程；
-        FLUSHDB/FLUSHALL/KEYS/CONFIG/EVAL 等高危命令按 CRITICAL 管控。
-        """
-        caller = _caller_from_ctx(ctx)
-        run = partial(service.redis_execute, project, connection, command, caller, reason=reason)
-        try:
-            result = await anyio.to_thread.run_sync(partial(run, change_id=change_id))
-        except (QueryRejected, KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
-        if change_id is None:
-            result = await _maybe_elicit_approval(
-                service, ctx, project, connection, command, caller, result,
-                resubmit=lambda cid: run(change_id=cid),
-            )
-        return result
+    # Redis 有意不暴露为 MCP 工具：agent 碰不到 Redis。Redis 仅供人通过已登录的
+    # 管理后台 /admin/redis 操作（对标 Medis 的独立控制台）。
 
     @mcp.tool
     def get_change_status(change_id: int) -> dict:

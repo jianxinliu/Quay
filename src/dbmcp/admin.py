@@ -152,6 +152,8 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  .nico-approve{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 13.5 3.5v4c0 3.2-2.3 5.8-5.5 7-3.2-1.2-5.5-3.8-5.5-7v-4z' fill='none' stroke='%2356d364' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.8 6' fill='none' stroke='%2356d364' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}}
  .nico-audit{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3.5h8M2 8h6M2 12.5h5' stroke='%23e8b339' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='11.5' cy='10.5' r='3' fill='none' stroke='%23e8b339' stroke-width='1.5'/%3E%3Cpath d='M11.5 9v1.7l1.2.8' fill='none' stroke='%23e8b339' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E")}}
  .nico-conn{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%236f9be8'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3C/svg%3E")}}
+ .nico-redis{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2.5 13 4 8 5.5 3 4Z' fill='%23d9534f'/%3E%3Cpath d='M8 6.5 13 8 8 9.5 3 8Z' fill='%23d9534f'/%3E%3Cpath d='M8 10.5 13 12 8 13.5 3 12Z' fill='%23d9534f'/%3E%3C/svg%3E")}}
+ .nico-settings{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='2.2' fill='none' stroke='%23aab2c0' stroke-width='1.5'/%3E%3Cpath d='M8 1.3v2.2M8 12.5v2.2M14.7 8h-2.2M3.5 8H1.3M12.7 3.3l-1.6 1.6M4.9 11.1l-1.6 1.6M12.7 12.7l-1.6-1.6M4.9 4.9 3.3 3.3' stroke='%23aab2c0' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E")}}
  .nav-count{{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
    min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}}
  .pending-banner{{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
@@ -167,6 +169,11 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  .eyebrow{{font-family:var(--mono);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;
    color:var(--accent-ink);margin-bottom:6px}}
  .pagehead{{margin-bottom:22px}}
+ .stabs{{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:20px}}
+ .stabs .stab{{padding:9px 16px;color:var(--faint);font-size:14px;text-decoration:none;
+   border-bottom:2px solid transparent;margin-bottom:-1px}}
+ .stabs .stab:hover{{color:var(--text)}}
+ .stabs .stab.active{{color:var(--accent);border-bottom-color:var(--accent);font-weight:500}}
  .card{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px 22px;margin-bottom:18px}}
  .card h2{{margin-bottom:14px}}
  /* 表格 */
@@ -250,9 +257,10 @@ def _page(title: str, body: str, pending: int = 0) -> str:
   <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
   <nav>
    <a href="/admin/sql"><span class="nico nico-sql"></span>查询台</a>
+   <a href="/admin/redis"><span class="nico nico-redis"></span>Redis</a>
    <a href="/admin/approvals"><span class="nico nico-approve"></span>审批中心{nav_badge}</a>
    <a href="/admin/audit"><span class="nico nico-audit"></span>操作审计</a>
-   <a href="/admin/connections"><span class="nico nico-conn"></span>连接管理</a>
+   <a href="/admin/settings"><span class="nico nico-settings"></span>系统设置</a>
   </nav>
   <div class="foot"><a href="/admin/logout">退出登录</a></div>
  </aside>
@@ -455,7 +463,7 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
   <button class="btn btn-primary" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
   <button class="btn btn-ghost" type="button" id="btn-test">测试连接</button>
   <button class="btn btn-ghost" type="button" id="btn-test-ssh">测试 SSH 隧道</button>
-  {"<a href='/admin/connections' style='margin-left:4px'>取消编辑</a>" if is_edit else ""}
+  {"<a href='/admin/settings?tab=connections' style='margin-left:4px'>取消编辑</a>" if is_edit else ""}
  </div>
 </form>
 <script>
@@ -526,7 +534,7 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
         body: new FormData(form)
       }});
       var data = await resp.json();
-      if (data.ok) {{ window.location = '/admin/connections'; return; }}
+      if (data.ok) {{ window.location = '/admin/settings?tab=connections'; return; }}
       err.textContent = '⚠ ' + (data.error || '保存失败');
       err.style.display = 'block';
       err.scrollIntoView({{behavior: 'smooth', block: 'center'}});
@@ -580,6 +588,136 @@ def _console_body() -> str:
         '<script src="/admin/static/echarts.min.js"></script>'
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         '<script src="/admin/static/console.js"></script>'
+    )
+
+
+def _redis_body() -> str:
+    """Redis 控制台页面（对标 Medis）：复用 console.css 外壳 + redis.css 布局，逻辑在 redis.js。"""
+    return (
+        '<link rel="stylesheet" href="/admin/static/console.css">'
+        '<link rel="stylesheet" href="/admin/static/redis.css">'
+        '<div id="dbm-redis"></div>'
+        '<script src="/admin/static/vue.global.prod.js"></script>'
+        '<script src="/admin/static/monaco/vs/loader.js"></script>'
+        '<script src="/admin/static/redis.js"></script>'
+    )
+
+
+_SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
+                  ("connections", "连接管理")]
+
+_SETTINGS_SUBMIT_JS = """<script>
+document.querySelectorAll('form.settings-form').forEach(function(f){
+  f.addEventListener('submit', async function(e){
+    e.preventDefault();
+    var msg=f.querySelector('.settings-msg'); if(msg)msg.textContent='保存中…';
+    try{ var r=await fetch('/admin/settings/save',{method:'POST',body:new FormData(f)});
+      var d=await r.json();
+      if(msg)msg.textContent=d.ok?'✓ 已保存（重新打开查询台/Redis 生效）':'保存失败：'+d.error;
+    }catch(err){ if(msg)msg.textContent='保存失败：'+err; }
+  });
+});
+</script>"""
+
+
+def _settings_tabs(active: str) -> str:
+    items = "".join(
+        f"<a class='stab{' active' if active == k else ''}' "
+        f"href='/admin/settings?tab={k}'>{_esc(label)}</a>"
+        for k, label in _SETTINGS_TABS
+    )
+    return f"<div class='stabs'>{items}</div>"
+
+
+def _settings_form(inner: str) -> str:
+    return (f"<div class='card' style='max-width:560px'><form class='settings-form'>{inner}"
+            "<button class='btn btn-primary' type='submit'>保存</button>"
+            "<span class='settings-msg muted' style='margin-left:12px'></span>"
+            f"</form></div>{_SETTINGS_SUBMIT_JS}")
+
+
+def _settings_general_body(s: dict) -> str:
+    def sel(v: str) -> str:
+        return " selected" if s.get("theme") == v else ""
+    return _settings_form(
+        "<div style='margin-bottom:16px'><label>界面主题</label>"
+        f"<select name='theme' style='width:200px'>"
+        f"<option value='dark'{sel('dark')}>深色（默认）</option>"
+        f"<option value='light'{sel('light')}>浅色</option></select>"
+        "<div class='muted' style='margin-top:4px'>作用于查询台与 Redis 控制台的深色 IDE 界面。</div></div>")
+
+
+def _settings_db_body(s: dict) -> str:
+    return _settings_form(
+        "<div style='margin-bottom:16px'>"
+        + _field("查询台结果每页行数", "sql_page_size", s.get("sql_page_size", 100),
+                 ph="100", typ="number", width="200px")
+        + "<div class='muted' style='margin-top:4px'>查询台（DB）结果分页大小。</div></div>")
+
+
+def _settings_redis_body(s: dict) -> str:
+    return _settings_form(
+        "<div style='margin-bottom:16px'>"
+        + _field("Redis 结果每页行数", "redis_page_size", s.get("redis_page_size", 100),
+                 ph="100", typ="number", width="200px")
+        + "<div class='muted' style='margin-top:4px'>Redis 键详情（hash/list/set/zset）与命令结果分页大小。</div></div>"
+        "<div style='margin-bottom:16px'>"
+        + _field("Redis 键列表加载上限", "redis_key_limit", s.get("redis_key_limit", 1000),
+                 ph="1000", typ="number", width="200px")
+        + "<div class='muted' style='margin-top:4px'>左侧键树 SCAN 一次最多加载的键数量。</div></div>")
+
+
+def _connections_body(service: "DbmService", editing: str | None) -> str:
+    """连接管理（并入系统设置的『连接管理』tab）：连接列表 + 新增/编辑弹窗表单。"""
+    edit_cfg = None
+    e_project = e_conn = ""
+    if editing and "/" in editing:
+        e_project, e_conn = editing.split("/", 1)
+        proj = service.config.projects.get(e_project)
+        edit_cfg = proj.connections.get(e_conn) if proj else None
+
+    rows = []
+    for pname, proj in sorted(service.config.projects.items()):
+        for cname, c in sorted(proj.connections.items()):
+            jump = " → ".join(c.jump_hosts) if c.jump_hosts else "—"
+            stripe = _ENV_COLOR.get(c.environment, "#64748b")
+            db = f"<code>{_esc(c.database)}</code>" if c.database else "<span class='muted'>—</span>"
+            rows.append(
+                f"<tr><td style='border-left:3px solid {stripe};padding-left:13px'>"
+                f"<code>{_esc(pname)}/{_esc(cname)}</code></td><td class='mono muted'>{_esc(c.engine)}</td>"
+                f"<td>{_env_badge(c.environment)}</td><td><code>{_esc(c.host)}:{_esc(c.port)}</code></td>"
+                f"<td>{db}</td><td class='muted mono'>{_esc(jump)}</td>"
+                f"<td style='white-space:nowrap'>"
+                f"<a href='/admin/settings?tab=connections&edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
+                f"<form method='post' action='/admin/connections/delete' style='display:inline' "
+                f"onsubmit='return dbmConfirm(this)'>"
+                f"<input type='hidden' name='project' value='{_esc(pname)}'>"
+                f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
+                f"<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form></td></tr>"
+            )
+    table = "".join(rows) or '<tr><td colspan="7" class="muted">（无连接）</td></tr>'
+    keyring_note = "" if _keyring_available() else (
+        "<p style='color:#b00020'>⚠️ 未安装 keyring，无法安全存储密码。"
+        "请 <code>pip install 'db-manage-mcp[keyring]'</code> 后重启。</p>"
+    )
+    form = _connection_form(e_project, e_conn, edit_cfg)
+    back = "/admin/settings?tab=connections"
+    auto_open = "document.getElementById('conn-modal').classList.add('open');" if edit_cfg else ""
+    return (
+        "<div class='card'><div style='display:flex;align-items:center;margin-bottom:14px'>"
+        "<h2 style='margin:0'>连接列表</h2>"
+        "<button class='btn btn-primary' style='margin-left:auto' "
+        "onclick=\"document.getElementById('conn-modal').classList.add('open')\">＋ 新增连接</button></div>"
+        f"<div class='tablewrap'><table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
+        f"<th>跳板</th><th>操作</th></tr>{table}</table></div></div>"
+        f"<div class='modalbg' id='conn-modal'><div class='modalbox'>"
+        f"<button class='mclose' onclick=\"document.getElementById('conn-modal').classList.remove('open');"
+        f"if(location.search.indexOf('edit=')>=0)location.href='{back}'\">✕</button>"
+        f"<h2>{'编辑连接' if edit_cfg else '新增连接'}</h2>{keyring_note}{form}</div></div>"
+        f"<script>{auto_open}"
+        "document.getElementById('conn-modal').addEventListener('click',function(e){"
+        "if(e.target===this){this.classList.remove('open');"
+        f"if(location.search.indexOf('edit=')>=0)location.href='{back}';}}}});</script>"
     )
 
 
@@ -887,60 +1025,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
 
     @mcp.custom_route("/admin/connections", methods=["GET"])
     @guard
-    async def _connections(req: Request) -> HTMLResponse:
-        editing = req.query_params.get("edit")  # "project/connection"
-        edit_cfg = None
-        e_project = e_conn = ""
-        if editing and "/" in editing:
-            e_project, e_conn = editing.split("/", 1)
-            proj = service.config.projects.get(e_project)
-            edit_cfg = proj.connections.get(e_conn) if proj else None
-
-        rows = []
-        for pname, proj in sorted(service.config.projects.items()):
-            for cname, c in sorted(proj.connections.items()):
-                jump = " → ".join(c.jump_hosts) if c.jump_hosts else "—"
-                stripe = _ENV_COLOR.get(c.environment, "#64748b")
-                db = f"<code>{_esc(c.database)}</code>" if c.database else "<span class='muted'>—</span>"
-                rows.append(
-                    f"<tr><td style='border-left:3px solid {stripe};padding-left:13px'>"
-                    f"<code>{_esc(pname)}/{_esc(cname)}</code></td><td class='mono muted'>{_esc(c.engine)}</td>"
-                    f"<td>{_env_badge(c.environment)}</td><td><code>{_esc(c.host)}:{_esc(c.port)}</code></td>"
-                    f"<td>{db}</td><td class='muted mono'>{_esc(jump)}</td>"
-                    f"<td style='white-space:nowrap'><a href='/admin/connections?edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
-                    f"<form method='post' action='/admin/connections/delete' style='display:inline' "
-                    f"onsubmit='return dbmConfirm(this)'>"
-                    f"<input type='hidden' name='project' value='{_esc(pname)}'>"
-                    f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
-                    f"<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form></td></tr>"
-                )
-        table = "".join(rows) or '<tr><td colspan="7" class="muted">（无连接）</td></tr>'
-
-        keyring_note = "" if _keyring_available() else (
-            "<p style='color:#b00020'>⚠️ 未安装 keyring，无法安全存储密码。"
-            "请 <code>pip install 'db-manage-mcp[keyring]'</code> 后重启。</p>"
-        )
-        form = _connection_form(e_project, e_conn, edit_cfg)
-        # 表单放弹窗：新增按钮打开；带 ?edit= 时自动打开（编辑）
-        auto_open = "document.getElementById('conn-modal').classList.add('open');" if edit_cfg else ""
-        body = (
-            _pagehead("Connections", "连接管理", "主账号应为只读账号；保存时自动校验权限，密码写入系统钥匙串")
-            + "<div class='card'><div style='display:flex;align-items:center;margin-bottom:14px'>"
-            "<h2 style='margin:0'>连接列表</h2>"
-            "<button class='btn btn-primary' style='margin-left:auto' "
-            "onclick=\"document.getElementById('conn-modal').classList.add('open')\">＋ 新增连接</button></div>"
-            f"<div class='tablewrap'><table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
-            f"<th>跳板</th><th>操作</th></tr>{table}</table></div></div>"
-            f"<div class='modalbg' id='conn-modal'><div class='modalbox'>"
-            f"<button class='mclose' onclick=\"document.getElementById('conn-modal').classList.remove('open');"
-            f"if(location.search)location.href='/admin/connections'\">✕</button>"
-            f"<h2>{'编辑连接' if edit_cfg else '新增连接'}</h2>{keyring_note}{form}</div></div>"
-            f"<script>{auto_open}"
-            "document.getElementById('conn-modal').addEventListener('click',function(e){"
-            "if(e.target===this){this.classList.remove('open');"
-            "if(location.search)location.href='/admin/connections';}});</script>"
-        )
-        return _shell("连接管理", body)
+    async def _connections(req: Request) -> Response:
+        # 连接管理已并入系统设置的『连接管理』tab；保留旧地址做重定向（含编辑参数）
+        edit = req.query_params.get("edit")
+        url = "/admin/settings?tab=connections" + (f"&edit={edit}" if edit else "")
+        return RedirectResponse(url=url, status_code=303)
 
     @mcp.custom_route("/admin/connections/save", methods=["POST"])
     @guard
@@ -979,11 +1068,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             if "application/json" in req.headers.get("accept", ""):
                 return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
             body = f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>" \
-                   f"<a href='/admin/connections'>← 返回</a></div>"
+                   f"<a href='/admin/settings?tab=connections'>← 返回</a></div>"
             return HTMLResponse(_page("保存失败", body), status_code=400)
         if "application/json" in req.headers.get("accept", ""):
             return JSONResponse({"ok": True})
-        return RedirectResponse(url="/admin/connections", status_code=303)
+        return RedirectResponse(url="/admin/settings?tab=connections", status_code=303)
 
     @mcp.custom_route("/admin/connections/delete", methods=["POST"])
     @guard
@@ -995,7 +1084,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             service.delete_connection(str(f.get("project")), str(f.get("connection")), _caller(req))
         except (ConnectionAdminError, QueryRejected) as e:
             return HTMLResponse(_page("删除失败", f"<div class='card'>{_esc(e)}</div>"), status_code=400)
-        return RedirectResponse(url="/admin/connections", status_code=303)
+        return RedirectResponse(url="/admin/settings?tab=connections", status_code=303)
 
     def _form_fields(f) -> dict:  # noqa: ANN001
         port_raw = str(f.get("port") or "").strip()
@@ -1173,6 +1262,132 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
+
+    # ---------- Redis 浏览 / 命令窗口（对标 Medis）----------
+
+    def _db_param(raw: str | None) -> int | None:
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    @mcp.custom_route("/admin/redis/databases", methods=["GET"])
+    @guard
+    async def _redis_databases(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            dbs = await anyio.to_thread.run_sync(
+                service.redis_databases, project, connection, _caller(req))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "databases": dbs})
+
+    @mcp.custom_route("/admin/redis/keys", methods=["GET"])
+    @guard
+    async def _redis_keys(req: Request) -> JSONResponse:
+        db = _db_param(req.query_params.get("db"))
+        pattern = req.query_params.get("pattern") or "*"
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.redis_keys, project, connection, _caller(req), db, pattern)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/redis/value", methods=["GET"])
+    @guard
+    async def _redis_value(req: Request) -> JSONResponse:
+        db = _db_param(req.query_params.get("db"))
+        key = req.query_params.get("key", "")
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.redis_value, project, connection, key, _caller(req), db)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/redis/run", methods=["POST"])
+    @guard
+    async def _redis_run(req: Request) -> JSONResponse:
+        f = await req.form()
+        db = _db_param(str(f.get("db") or "") or None)
+        confirm = str(f.get("confirm") or "") in ("1", "true", "on", "yes")
+        confirm_text = str(f.get("confirm_text") or "") or None
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            out = await anyio.to_thread.run_sync(
+                service.admin_redis_run, project, connection,
+                str(f.get("command") or ""), _caller(req), confirm, db, confirm_text)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/redis/command-doc", methods=["GET"])
+    @guard
+    async def _redis_command_doc(req: Request) -> JSONResponse:
+        from .redis_docs import lookup
+        doc = lookup(req.query_params.get("cmd", ""))
+        return JSONResponse({"ok": True, "doc": doc})
+
+    @mcp.custom_route("/admin/redis/connections", methods=["GET"])
+    @guard
+    async def _redis_connections(_req: Request) -> JSONResponse:
+        conns = []
+        for pname, proj in sorted(service.config.projects.items()):
+            for cname, c in sorted(proj.connections.items()):
+                if c.engine != "redis":
+                    continue
+                conns.append({"value": f"{pname}/{cname}", "project": pname, "connection": cname,
+                              "environment": c.environment or ""})
+        return JSONResponse({"ok": True, "connections": conns})
+
+    @mcp.custom_route("/admin/redis", methods=["GET"])
+    @guard
+    async def _redis_console(_req: Request) -> HTMLResponse:
+        return _shell("Redis", _redis_body())
+
+    # ---------- 系统设置 ----------
+
+    @mcp.custom_route("/admin/settings/get", methods=["GET"])
+    @guard
+    async def _settings_get(_req: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "settings": service.get_settings()})
+
+    @mcp.custom_route("/admin/settings/save", methods=["POST"])
+    @guard
+    async def _settings_save(req: Request) -> JSONResponse:
+        f = await req.form()
+        updates = {}
+        for key in ("theme", "sql_page_size", "redis_page_size", "redis_key_limit"):
+            if key in f:
+                updates[key] = str(f.get(key))
+        try:
+            settings = service.save_settings(updates)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "settings": settings})
+
+    @mcp.custom_route("/admin/settings", methods=["GET"])
+    @guard
+    async def _settings_page(req: Request) -> HTMLResponse:
+        tab = req.query_params.get("tab") or "general"
+        s = service.get_settings()
+        if tab == "connections":
+            content = _connections_body(service, req.query_params.get("edit"))
+        elif tab == "db":
+            content = _settings_db_body(s)
+        elif tab == "redis":
+            content = _settings_redis_body(s)
+        else:
+            tab = "general"
+            content = _settings_general_body(s)
+        body = (_pagehead("Settings", "系统设置", "界面偏好 + 连接管理，服务端保存")
+                + _settings_tabs(tab) + content)
+        return _shell("系统设置", body)
 
     @mcp.custom_route("/admin/workflows", methods=["GET"])
     @guard

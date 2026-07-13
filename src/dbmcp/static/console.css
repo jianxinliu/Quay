@@ -33,6 +33,15 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   --dg-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 
+/* 浅色主题：把 --dg-* 覆盖为浅色一套（作用于查询台 .dg-root 与 Redis .rd-root）。
+   系统设置里选择，服务端持久化，两个 IDE 页共用。侧栏保持深色（如 VS Code 浅色主题的活动栏）。 */
+.dg-root.theme-light, .rd-root.theme-light {
+  --dg-bg: #ffffff; --dg-panel: #f2f4f7; --dg-panel-2: #e9ecf1; --dg-border: #d4d8df;
+  --dg-text: #1f2530; --dg-muted: #5b6270; --dg-faint: #838a97;
+  --dg-accent: #2563eb; --dg-accent-soft: #d6e2fb; --dg-hover: #eef1f6;
+  --dg-green: #1f7a30; --dg-red: #c02a26; --dg-amber: #a9750f;
+}
+
 #dbm-console { height: 100vh; }
 .dg-root {
   height: 100%; display: flex;

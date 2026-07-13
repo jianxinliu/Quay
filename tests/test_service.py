@@ -46,6 +46,51 @@ def service(tmp_path):
     svc.close()
 
 
+class TestProbeFields:
+    def test_redis_no_auth_not_blocked_by_password_guard(self, service):
+        """无认证 Redis：不填密码不应被『请填写密码』挡住，而是真正去连。"""
+        res = service.probe_connection_fields(
+            {"engine": "redis", "host": "127.0.0.1", "port": 1, "environment": "local"}
+        )
+        # 连不上（端口 1）是预期的；关键是没被密码守卫短路
+        assert res.ok is False
+        assert "请填写密码" not in res.message
+        assert "连接失败" in res.message
+
+    def test_mysql_still_requires_password(self, service):
+        res = service.probe_connection_fields(
+            {"engine": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root"}
+        )
+        assert res.ok is False
+        assert "请填写密码" in res.message
+
+
+class TestRedisHiddenFromMcp:
+    def _svc(self, tmp_path):
+        cfg = AppConfig.model_validate({"projects": {
+            "p": {"connections": {
+                "sql": {"engine": "sqlite", "database": ":memory:"},
+                "cache": {"engine": "redis", "host": "127.0.0.1"},
+            }},
+            "redisonly": {"connections": {
+                "r": {"engine": "redis", "host": "127.0.0.1"},
+            }},
+        }})
+        return DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+
+    def test_list_connections_excludes_redis(self, tmp_path):
+        svc = self._svc(tmp_path)
+        names = [c["connection"] for c in svc.list_connections("p")]
+        assert names == ["sql"]  # redis 连接 cache 被过滤
+        svc.close()
+
+    def test_list_projects_drops_redis_only_project(self, tmp_path):
+        svc = self._svc(tmp_path)
+        projs = {p["project"]: p["connections"] for p in svc.list_projects()}
+        assert projs == {"p": ["sql"]}  # redisonly 只有 redis 连接 → 整个项目不出现
+        svc.close()
+
+
 class TestQuery:
     def test_select_ok_and_audited(self, service):
         result = service.query("demo", "main", "SELECT id, name FROM users ORDER BY id", CALLER)
