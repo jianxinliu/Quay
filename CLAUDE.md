@@ -1,6 +1,6 @@
-# db-manage-mcp
+# Quay（包名 dbmcp / CLI dbm）
 
-给所有 agent 提供数据库访问的 MCP 服务：按项目管理连接与账密、SSH 多层跳板、SQL 审计与人工授权、操作审计与管理后台。完整设计见 `DESIGN.md`（改动核心流程前先读它）。
+**品牌名 Quay（码头）**：本地数据库工作台——查询台 · Redis 控制台 · 分析工作台 · MCP（给 agent）四个前端共享一套连接与安全治理主线。改名只是对外品牌：**包名仍 `dbmcp`、CLI 仍 `dbm`、配置目录 `~/.config/db-manage-mcp`、launchd label `com.db-manage-mcp`、keyring service `db-manage-mcp` 全部不变**（只换品牌、不做全量重命名，避免动迁移逻辑）。按项目管理连接与账密、SSH 多层跳板、SQL 审计与人工授权、操作审计与管理后台。完整设计见 `DESIGN.md`（改动核心流程前先读它）。
 
 ## 技术栈（已确认，勿擅自更换）
 

@@ -1,4 +1,4 @@
-# db-manage-mcp 设计文档
+# Quay 设计文档
 
 > 状态：已确认技术选型（Python + FastMCP / MySQL + PG + Redis / elicitation + CLI 审批，Web 后台 / 本地进程 + launchd 常驻部署）
 
@@ -20,7 +20,7 @@ Agent A / B / C ...（Claude Code 等 MCP 客户端）
         │  MCP streamable HTTP（stdio 作兼容模式）
         ▼
 ┌───────────────────────────────────────────────┐
-│ db-manage-mcp 服务（本地进程，launchd 常驻）        │
+│ Quay 服务（本地进程，launchd 常驻）                 │
 │                                               │
 │  FastAPI 应用，三个面：                          │
 │   /mcp    MCP 接口（FastMCP streamable HTTP）   │

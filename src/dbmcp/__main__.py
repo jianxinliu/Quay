@@ -38,7 +38,7 @@ def _add_data_dir(p: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="dbm", description="db-manage-mcp 服务与审批 CLI")
+    parser = argparse.ArgumentParser(prog="dbm", description="Quay 数据库工作台 服务与审批 CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     serve = sub.add_parser("serve", help="运行 MCP 服务（默认子命令）")
@@ -100,7 +100,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
             admin_token = os.environ.get("DBM_ADMIN_TOKEN") or secrets.token_urlsafe(24)
             if not os.environ.get("DBM_ADMIN_TOKEN"):
                 # 未设置则一次性生成，打印到 stderr 方便本地登录；生产应显式注入
-                print(f"\n[db-manage-mcp] 未设置 DBM_ADMIN_TOKEN，本次生成管理 token：\n"
+                print(f"\n[Quay] 未设置 DBM_ADMIN_TOKEN，本次生成管理 token：\n"
                       f"    {admin_token}\n"
                       f"    登录 http://{args.host}:{args.port}/admin/login\n", file=sys.stderr)
             mount_admin(mcp, service, admin_token)

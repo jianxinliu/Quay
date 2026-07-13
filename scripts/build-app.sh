@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 生成一个可双击启动的 macOS .app（db-manage-mcp.app）：
+# 生成一个可双击启动的 macOS .app（Quay.app）：
 #   双击 → 确保常驻服务已起（有 launchd 就 kickstart，没有就直接后台拉起）
 #        → 等端口就绪 → 用默认浏览器打开管理后台。
 #
 # 用法：  bash scripts/build-app.sh [输出目录]
-#   不传输出目录时生成到仓库根目录：./db-manage-mcp.app
+#   不传输出目录时生成到仓库根目录：./Quay.app
 #   常见做法：bash scripts/build-app.sh ~/Applications   （之后 Launchpad/Spotlight 可搜到）
 #
 # 说明：本地构建的 .app 没有 quarantine 标记，双击不触发 Gatekeeper 拦截（无需签名）。
@@ -13,7 +13,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$PROJECT_DIR}"
-APP="$OUT_DIR/db-manage-mcp.app"
+APP="$OUT_DIR/Quay.app"
 MACOS="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
 
@@ -21,13 +21,13 @@ mkdir -p "$MACOS" "$RES"
 
 # ---------- 1. 启动脚本（可执行文件） ----------
 # PROJECT_DIR 在构建时写死为绝对路径：.app 移到别处仍能找到仓库；仓库整体搬家后请重跑本脚本。
-cat > "$MACOS/db-manage-mcp" <<EOF
+cat > "$MACOS/Quay" <<EOF
 #!/bin/bash
-# db-manage-mcp 启动器（由 build-app.sh 生成，勿手改；改需求改 scripts/build-app.sh 重生成）。
+# Quay 启动器（由 build-app.sh 生成，勿手改；改需求改 scripts/build-app.sh 重生成）。
 set -u
 PROJECT_DIR="$PROJECT_DIR"
 EOF
-cat >> "$MACOS/db-manage-mcp" <<'EOF'
+cat >> "$MACOS/Quay" <<'EOF'
 LABEL="com.db-manage-mcp"
 UID_NUM="$(id -u)"
 ENV_FILE="${DBM_ENV_FILE:-$HOME/.config/db-manage-mcp/env}"
@@ -41,8 +41,8 @@ if [ -f "$ENV_FILE" ]; then
 fi
 URL="http://127.0.0.1:$PORT/admin/login"
 
-notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"db-manage-mcp\"" >/dev/null 2>&1 || true; }
-alert()  { /usr/bin/osascript -e "display dialog \"$1\" with title \"db-manage-mcp\" buttons {\"好\"} default button 1 with icon caution" >/dev/null 2>&1 || true; }
+notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Quay\"" >/dev/null 2>&1 || true; }
+alert()  { /usr/bin/osascript -e "display dialog \"$1\" with title \"Quay\" buttons {\"好\"} default button 1 with icon caution" >/dev/null 2>&1 || true; }
 is_up()  { /usr/bin/curl -sf --noproxy '*' -o /dev/null "http://127.0.0.1:$PORT/admin/login"; }
 
 if is_up; then
@@ -72,7 +72,7 @@ else
   alert "服务启动超时。请查看日志：$LOG"
 fi
 EOF
-chmod +x "$MACOS/db-manage-mcp"
+chmod +x "$MACOS/Quay"
 
 # ---------- 2. Info.plist ----------
 ICON_LINE=""
@@ -94,10 +94,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>db-manage-mcp</string>
-  <key>CFBundleDisplayName</key><string>db-manage-mcp</string>
+  <key>CFBundleName</key><string>Quay</string>
+  <key>CFBundleDisplayName</key><string>Quay</string>
   <key>CFBundleIdentifier</key><string>com.db-manage-mcp.launcher</string>
-  <key>CFBundleExecutable</key><string>db-manage-mcp</string>
+  <key>CFBundleExecutable</key><string>Quay</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
