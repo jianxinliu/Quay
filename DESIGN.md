@@ -15,30 +15,29 @@
 
 ## 二、总体架构
 
-```
-Agent A / B / C ...（Claude Code 等 MCP 客户端）
-        │  MCP streamable HTTP（stdio 作兼容模式）
-        ▼
-┌───────────────────────────────────────────────┐
-│ Quay 服务（本地进程，launchd 常驻）                 │
-│                                               │
-│  FastAPI 应用，三个面：                          │
-│   /mcp    MCP 接口（FastMCP streamable HTTP）   │
-│   /admin  管理后台（审计查询 + 审批处理）           │
-│   CLI     dbm 命令（连接管理、审批兜底）            │
-│                                               │
-│  内部分层：                                      │
-│   1. MCP 接口层   tools / resources             │
-│   2. 审计引擎     SQL 解析分类、风险评估、影响范围    │
-│   3. 审批中心     审批单生命周期（拒绝—重提模式）      │
-│   4. 元数据缓存   schema / 索引 / 表行数统计        │
-│   5. 连接管理     连接池、SSH 多跳隧道生命周期        │
-│   6. 驱动适配     MySQL / PostgreSQL / Redis     │
-│                                               │
-│  存储：SQLite（volume 挂载）                      │
-│   审计记录 / 审批单 / 元数据缓存                    │
-└──────────┬──────────────────┬─────────────────┘
-       本地数据库        跳板1 → 跳板2 → 线上数据库
+```mermaid
+flowchart TB
+    A["Agent A / B / C …（Claude Code 等 MCP 客户端）"]
+    A -->|"MCP streamable HTTP（stdio 作兼容模式）"| Q
+
+    subgraph Q["Quay 服务（本地进程 · launchd 常驻）"]
+        direction TB
+        F["FastAPI 应用 · 三个面<br/>/mcp MCP 接口　·　/admin 管理后台　·　CLI dbm 命令"]
+        L1["① MCP 接口层：tools / resources"]
+        L2["② 审计引擎：SQL 解析分类 · 风险评估 · 影响范围"]
+        L3["③ 审批中心：审批单生命周期（拒绝—重提模式）"]
+        L4["④ 元数据缓存：schema / 索引 / 表行数统计"]
+        L5["⑤ 连接管理：连接池 · SSH 多跳隧道生命周期"]
+        L6["⑥ 驱动适配：MySQL / PostgreSQL / Redis"]
+        S[("存储 SQLite<br/>审计记录 / 审批单 / 元数据缓存")]
+        F --> L1 --> L2 --> L3 --> L4 --> L5 --> L6
+        L2 -.-> S
+        L3 -.-> S
+        L4 -.-> S
+    end
+
+    Q --> DB1[("本地数据库")]
+    Q --> J["跳板1 → 跳板2"] --> DB2[("线上数据库")]
 ```
 
 ## 三、技术选型
@@ -100,20 +99,18 @@ projects:
 > 放行凭据采用 **change_id**（确定性，不依赖 agent 重提一字不差的 SQL）；
 > SQL 指纹只用于校验与无 id 时的兜底匹配。
 
-```
-agent 调 execute(conn, sql, reason?, change_id?)
-  ├─ 审计判定 LOW（只读/策略允许的低风险）→ 直接执行，返回结果
-  ├─ 需要授权：
-  │   ├─ 客户端支持 elicitation 且策略允许 → 服务端发起确认，人确认即执行（快捷通道）
-  │   └─ 否则 → 明确拒绝，返回结构化信息：
-  │        { status: "approval_required", change_id: 123,
-  │          risk_report: {...},
-  │          message: "已生成审批单 #123，请通知用户在管理后台审批；
-  │                    批准后带上 change_id=123 重新提交" }
-  ├─ 人在管理后台查看审批单：完整 SQL、目标库/环境、风险报告
-  │  （影响表、预估行数、性能、危害等级）→ 批准 / 拒绝（附理由）
-  ├─ agent 带 change_id 重新提交 → 校验通过 → 执行并核销
-  └─ 若被拒绝 → 返回人的拒绝理由，agent 调整 SQL 后重新提交（生成新审批单）
+```mermaid
+flowchart TD
+    E["agent 调 execute(conn, sql, reason?, change_id?)"]
+    E --> C{"审计判定"}
+    C -->|"LOW 只读 / 策略允许的低风险"| RUN["直接执行，返回结果"]
+    C -->|"需要授权"| G{"客户端支持 elicitation<br/>且策略允许？"}
+    G -->|"是"| ELI["服务端发起确认<br/>人确认即执行（快捷通道）"]
+    G -->|"否"| DENY["明确拒绝，返回结构化信息<br/>status: approval_required · change_id · risk_report<br/>「已生成审批单，请到后台审批，批准后带 change_id 重提」"]
+    DENY --> REVIEW["人在管理后台查看审批单<br/>完整 SQL / 目标库 / 环境 / 风险报告<br/>（影响表 · 预估行数 · 性能 · 危害等级）"]
+    REVIEW -->|"批准"| RESUB["agent 带 change_id 重新提交<br/>校验通过 → 执行并核销"]
+    REVIEW -->|"拒绝（附理由）"| REJ["返回人的拒绝理由<br/>agent 调整 SQL 后重新提交"]
+    REJ -.->|"生成新审批单"| E
 ```
 
 规则：

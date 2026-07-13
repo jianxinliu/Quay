@@ -30,18 +30,14 @@ JOIN，对 agent 来说不是慢，是**做不到**。
 | 文件数据 | DuckDB 原生 `read_csv_auto()` / Parquet / JSON |
 | filter / join / group by | 完整 SQL（窗口函数、CTE 都有） |
 
-```
-源数据（现有连接管理：MySQL/PG/SQLite + SSH 多跳隧道 │ 本地 CSV/Parquet 文件）
-   │   取数走现有 reader + 审计 + 行数上限（不打挂源库）
-   ▼
-分析工作区 = 一个独立的 .duckdb 文件（data/analysis/<名字>.duckdb）
-   │   数据集 = 表快照；分析步骤 = SQL → 虚拟表（VIEW）
-   ▼
-查询台整套 UI 复用：Monaco 编辑器 / 上下文补全 / 结果表格 / 分页 / 导出
-   ▼
-可视化（P3）：图表视图（柱/线/饼/散点）
-   ▼
-Workflow（P2）：数据源 + 步骤 SQL 链 + 图表配置 → JSON 存档，一键重跑
+```mermaid
+flowchart TB
+    SRC["源数据<br/>MySQL / PG / SQLite（+ SSH 多跳隧道）　·　本地 CSV / Parquet 文件"]
+    SRC -->|"取数走现有 reader + 审计 + 行数上限（不打挂源库）"| WS
+    WS["分析工作区 = 一个独立的 .duckdb 文件（data/analysis/&lt;名字&gt;.duckdb）<br/>数据集 = 表快照　·　分析步骤 = SQL → 虚拟表（VIEW）"]
+    WS --> UI["查询台整套 UI 复用<br/>Monaco 编辑器 / 上下文补全 / 结果表格 / 分页 / 导出"]
+    UI --> VIZ["可视化（P3）：图表视图（柱 / 线 / 饼 / 散点）"]
+    VIZ --> WF["Workflow（P2）：数据源 + 步骤 SQL 链 + 图表配置<br/>→ JSON 存档，一键重跑"]
 ```
 
 ## 安全模型：沙箱自由，源头受控

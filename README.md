@@ -12,20 +12,14 @@ SSH 多层跳板直达内网库，统一的连接与账密管理、SQL 风险审
 
 ## 四个前端,一条治理主线
 
-```
-                    ┌─────────── 你的数据库们 ───────────┐
-                    │ MySQL · PostgreSQL · SQLite · Redis │
-                    │      (可经 SSH 多跳跳板直达内网)     │
-                    └────────────────┬───────────────────┘
-              ┌──────────────────────┴──────────────────────┐
-              │   治理主线:连接/账密管理 · reader/writer     │
-              │   双账号 · SQL 风险审计 · 拒绝—重提审批       │
-              │   · 全量操作审计 · prod 强管控 · 脱敏         │
-              └──────────────────────┬──────────────────────┘
-      ┌───────────────┬──────────────┼──────────────┬───────────────┐
-   查询台          Redis 控制台     分析工作台        MCP
- (SQL IDE)        (对标 Medis)   (DuckDB 跨源分析)  (给 Agent)
-   人用             人用            人 + Agent        Agent 用
+```mermaid
+flowchart TB
+    DB[("你的数据库们<br/>MySQL · PostgreSQL · SQLite · Redis<br/>（可经 SSH 多跳跳板直达内网）")]
+    DB --> GOV["治理主线<br/>连接/账密管理 · reader/writer 双账号<br/>SQL 风险审计 · 拒绝—重提审批<br/>全量操作审计 · prod 强管控 · 脱敏"]
+    GOV --> T1["🗄️ 查询台<br/>SQL IDE<br/><b>人用</b>"]
+    GOV --> T2["🧊 Redis 控制台<br/>对标 Medis<br/><b>人用</b>"]
+    GOV --> T3["🔬 分析工作台<br/>DuckDB 跨源分析<br/><b>人 + Agent</b>"]
+    GOV --> T4["🤖 MCP<br/>给 Agent 的入口<br/><b>Agent 用</b>"]
 ```
 
 - 🗄️ **查询台**(`/admin/sql`):DataGrip 风深色 SQL IDE。库→表→列树、多 tab、上下文补全、
