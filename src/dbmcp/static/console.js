@@ -15,6 +15,7 @@
 
   var editor = null;          // 单个 Monaco 编辑器，切 tab 换 model
   var models = new Map();     // tabId -> ITextModel
+  var bmCollection = null;    // 书签装饰集合（切 tab 时重设为该 tab 的书签）
   var monacoReady = false;
   var currentTables = [];     // 补全用：当前连接可见表（未绑库为 库.表）
   var currentConn = "";
@@ -338,11 +339,15 @@
         selected: {},           // metaKey -> {t, db}（多选）
         dragId: null,
         ctx: { show: false, x: 0, y: 0, table: "", schema: "", multi: false },
+        tabCtx: { show: false, x: 0, y: 0, id: null },  // 编辑区 tab 右键菜单
+        renamingId: null, renameVal: "",                // tab 就地改名
+        acc: { tree: true, bm: true, wf: true, hist: false, snip: true },  // 左栏手风琴各区展开状态
         dropPlan: null,         // {items:[{t,db}], running, results}
         delSnip: null, delWf: null, wfAsk: null,
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
+        bmOpen: false, bmTick: 0,   // 书签下拉菜单；bmTick 强制刷新预览文本
         colMenu: { show: false, x: 0, y: 0, ci: -1 },
         sug: { open: false, items: [], sel: 0, which: "", word: "" },  // WHERE/ORDER BY 字段提示
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
@@ -357,6 +362,17 @@
         var id = this.activeId, ts = this.tabs;
         for (var i = 0; i < ts.length; i++) if (ts[i].id === id) return ts[i];
         return null;
+      },
+      // 当前 query tab 的书签列表（行号 + 该行 SQL 预览），供左栏「书签」区直接跳转/执行
+      bmList: function () {
+        var _ = this.bmTick;   // 编辑后手动 +1 触发预览刷新
+        var t = this.activeTab;
+        if (!t || t.type !== "query" || !t.bookmarks || !t.bookmarks.length) return [];
+        var m = models.get(t.id);
+        return t.bookmarks.slice().sort(function (a, b) { return a - b; }).map(function (ln) {
+          var txt = m ? (m.getLineContent(ln) || "").trim() : "";
+          return { line: ln, text: txt || "(空行)" };
+        });
       },
       connMeta: function () {
         var t = this.activeTab; if (!t || !t.conn) return null;
@@ -494,7 +510,10 @@
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
                     sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, running: false,
-                    pinned: false,
+                    pinned: false, snippetId: opts.snippetId || null,   // 已保存到服务端片段库的 id（⌘S 覆盖同一条）
+                    snipNote: opts.snipNote || "",                     // 片段备注（覆盖保存时保留，不被清空）
+                    savedSql: opts.sql || "", dirty: false,            // 未保存改动标记（标题后 *）
+                    bookmarks: opts.bookmarks || [],                   // 书签行号（编辑器字形边栏）
                     // data tab：WHERE 条 / ORDER BY 表达式（走 SQL 重查，跨页正确）
                     where: opts.where || "", orderBy: "", lastPage: 0,
                     pendingSql: null, readSql: null, explain: null, edit: null,
@@ -533,11 +552,126 @@
         if (this.activeId === id) this.switchTab(this.tabs[Math.max(0, i - 1)].id);
         this.persist();
       },
+      // 当前编辑器内容 vs 上次保存快照 → 更新活动 tab 的改动标记（标题后 *）
+      markDirty: function () {
+        var t = this.activeTab;
+        if (t && t.type === "query") t.dirty = (this.sqlOf(t) !== (t.savedSql || ""));
+      },
+      // ---- tab 就地改名（双击标题 / 右键菜单）----
+      beginRename: function (id) {
+        var t = this.tabs.find(function (x) { return x.id === id; });
+        if (!t) return;
+        this.closeTabCtx();
+        this.renamingId = id; this.renameVal = t.title;
+        var self = this;
+        this.$nextTick(function () {
+          var el = document.querySelector(".dg-tab .rename-in");
+          if (el) { el.focus(); el.select(); }
+        });
+      },
+      commitRename: function () {
+        var id = this.renamingId; if (id == null) return;
+        var t = this.tabs.find(function (x) { return x.id === id; });
+        this.renamingId = null;
+        var name = (this.renameVal || "").trim();
+        if (!t || !name || name === t.title) return;
+        t.title = name;
+        // 若该 tab 已存为片段，同步改片段标题（用已保存的 SQL，不提交未保存改动）
+        if (t.snippetId) {
+          var self = this;
+          apiPost("/admin/sql/snippets/save", {
+            id: t.snippetId, title: name, note: t.snipNote || "",
+            sql: t.savedSql || this.sqlOf(t), connection: t.conn
+          }).then(function (d) { if (d.ok) self.loadSnippets(); });
+        }
+        this.persist();
+      },
+      cancelRename: function () { this.renamingId = null; },
+      // ---- 编辑区 tab 右键菜单 ----
+      openTabCtx: function (e, id) {
+        e.preventDefault();
+        this.tabCtx = { show: true, x: Math.min(e.clientX, window.innerWidth - 170), y: e.clientY + 4, id: id };
+      },
+      closeTabCtx: function () { this.tabCtx.show = false; },
+      tabCtxTarget: function () { var id = this.tabCtx.id; return this.tabs.find(function (x) { return x.id === id; }); },
+      tabCtxPin: function () { var t = this.tabCtxTarget(); if (t) this.togglePin(t.id); this.closeTabCtx(); },
+      tabCtxClose: function () { var id = this.tabCtx.id; this.closeTabCtx(); this.closeTab(id); },
+      closeOthers: function (id) {
+        this.closeTabCtx();
+        var self = this;
+        this.tabs.filter(function (t) { return t.id !== id && !t.pinned; })
+                 .forEach(function (t) { self.closeTab(t.id); });
+        if (this.activeId !== id && this.tabs.some(function (t) { return t.id === id; })) this.switchTab(id);
+      },
+      closeAll: function () {
+        this.closeTabCtx();
+        var self = this;
+        var kept = this.tabs.filter(function (t) { return t.pinned; });
+        this.tabs.filter(function (t) { return !t.pinned; }).forEach(function (t) {
+          var m = models.get(t.id); if (m) { m.dispose(); models.delete(t.id); }
+        });
+        this.tabs = kept;
+        if (!this.tabs.length) { this.newTab({}); return; }
+        this.switchTab(this.tabs[0].id);
+        this.persist();
+      },
+      toggleAcc: function (key) {
+        this.acc[key] = !this.acc[key];
+        if (key === "hist" && this.acc.hist && !this.history.length) this.loadHistory();
+        this.persistAcc();
+      },
+      // ---- 编辑器书签 ----
+      applyBookmarks: function () {
+        if (!bmCollection || !window.monaco) return;
+        var t = this.activeTab, lines = (t && t.bookmarks) || [];
+        bmCollection.set(lines.map(function (ln) {
+          return { range: new window.monaco.Range(ln, 1, ln, 1),
+            options: { glyphMarginClassName: "dg-bm-glyph", glyphMarginHoverMessage: { value: "书签（点击切换）" },
+              isWholeLine: true, className: "dg-bm-linebg",
+              overviewRuler: { color: "#e0a83e", position: window.monaco.editor.OverviewRulerLane.Left } } };
+        }));
+      },
+      toggleBookmark: function (line) {
+        var t = this.activeTab; if (!t || !editor) return;
+        if (line == null) { var p = editor.getPosition(); line = p ? p.lineNumber : 1; }
+        if (!t.bookmarks) t.bookmarks = [];
+        var i = t.bookmarks.indexOf(line);
+        if (i >= 0) t.bookmarks.splice(i, 1); else t.bookmarks.push(line);
+        t.bookmarks.sort(function (a, b) { return a - b; });
+        this.bmTick++; this.applyBookmarks(); this.persist();
+      },
+      clearBookmarks: function () {
+        var t = this.activeTab; if (!t) return;
+        t.bookmarks = []; this.applyBookmarks(); this.persist(); this.bmOpen = false;
+      },
+      // 跳到书签行（放置光标，方便 ⌘Enter 执行该句）
+      jumpBookmark: function (ln) {
+        if (!editor) return;
+        editor.setPosition({ lineNumber: ln, column: 1 });
+        editor.revealLineInCenter(ln); editor.focus(); this.bmOpen = false;
+      },
+      // 跳到书签行并直接执行该句（光标处执行）
+      runBookmark: function (ln) {
+        if (!editor) return;
+        editor.setPosition({ lineNumber: ln, column: 1 }); this.bmOpen = false;
+        var self = this; this.$nextTick(function () { self.run(false); });
+      },
+      gotoBookmark: function (dir) {
+        var t = this.activeTab; if (!t || !t.bookmarks || !t.bookmarks.length || !editor) return;
+        var cur = editor.getPosition() ? editor.getPosition().lineNumber : 1;
+        var bm = t.bookmarks.slice().sort(function (a, b) { return a - b; });
+        var target = null, k;
+        if (dir > 0) { for (k = 0; k < bm.length; k++) { if (bm[k] > cur) { target = bm[k]; break; } } if (target == null) target = bm[0]; }
+        else { for (k = bm.length - 1; k >= 0; k--) { if (bm[k] < cur) { target = bm[k]; break; } } if (target == null) target = bm[bm.length - 1]; }
+        editor.setPosition({ lineNumber: target, column: 1 });
+        editor.revealLineInCenter(target); editor.focus();
+      },
+      persistAcc: function () { try { localStorage.setItem("dbm-console-acc", JSON.stringify(this.acc)); } catch (e) {} },
       switchTab: function (id) {
         this.activeId = id;
         var t = this.activeTab;
         var m = models.get(id);
-        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); }
+        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); this.applyBookmarks(); }
         if (t && t.conn !== this.lastLoadedConn) this.loadTree();
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
@@ -2124,7 +2258,15 @@
           return r.blob().then(function (b) { download(b, name); self.flash("已导出 " + name); });
         }).catch(function (e) { self.flash("" + (e.message || e)); });
       },
-      saveSqlFile: function () {
+      // ⌘/Ctrl+S：把当前 SQL 保存到服务端片段库（服务管理的 dbm.sqlite3，不落用户磁盘）。
+      // 已保存过的 tab（有 snippetId）直接原地覆盖同一条；新 tab 弹命名表单。
+      saveCurrent: function () {
+        var t = this.activeTab; if (!t) return;
+        if (!this.currentSql().trim()) { this.flash("空 SQL，无需保存"); return; }
+        if (t.snippetId) { this.saveSnippet(); return; }
+        if (!this.showSnipForm) this.toggleSnipForm();
+      },
+      exportSqlFile: function () {
         var t = this.activeTab; if (!t) return;
         var name = (t.title || "query").replace(/[^\w一-龥.-]+/g, "_");
         if (!/\.sql$/i.test(name)) name += ".sql";
@@ -2142,18 +2284,51 @@
       },
       saveSnippet: function () {
         var self = this, t = this.activeTab; if (!t) return;
-        if (!this.snipDraft.title.trim()) { this.flash("请填写标题"); return; }
+        // 有 snippetId（⌘S 覆盖）时用 tab 现有标题；否则走命名表单要求填标题
+        var updating = !!t.snippetId;
+        var title = updating ? (t.title || "").trim() : this.snipDraft.title.trim();
+        if (!title) { this.flash("请填写标题"); return; }
+        var note = updating ? (t.snipNote || "") : this.snipDraft.note;
         apiPost("/admin/sql/snippets/save", {
-          title: this.snipDraft.title, note: this.snipDraft.note, sql: this.currentSql(), connection: t.conn
+          id: t.snippetId || "", title: title, note: note,
+          sql: this.currentSql(), connection: t.conn
         }).then(function (d) {
-          if (!d.ok) { self.flash(d.error); return; }
-          self.showSnipForm = false; self.flash("已保存片段"); self.loadSnippets();
+          if (!d.ok) {
+            // 覆盖时目标片段已被删除 → 断开链接，改走命名表单另存为新片段
+            if (updating) { t.snippetId = null; self.flash((d.error || "保存失败") + "，已断开链接，请重新保存"); self.toggleSnipForm(); }
+            else self.flash(d.error);
+            return;
+          }
+          t.snippetId = d.snippet.id; t.title = d.snippet.title; t.snipNote = d.snippet.note;
+          t.savedSql = self.currentSql(); t.dirty = false;   // 保存后清除改动标记
+          self.showSnipForm = false; self.flash("已保存到片段库：" + d.snippet.title);
+          self.loadSnippets(); self.persist();
         });
       },
       openSnippet: function (s) {
         var conn = this.connections.some(function (c) { return c.value === s.connection; })
           ? s.connection : (this.activeTab ? this.activeTab.conn : "");
-        this.newTab({ title: s.title, sql: s.sql, conn: conn });
+        this.newTab({ title: s.title, sql: s.sql, conn: conn, snippetId: s.id, snipNote: s.note });
+      },
+      _snipFileName: function (title) {
+        var name = (title || "snippet").replace(/[^\w一-龥.-]+/g, "_");
+        return /\.sql$/i.test(name) ? name : name + ".sql";
+      },
+      // 单条片段下载到本地 .sql
+      downloadSnippet: function (s) {
+        var head = "-- " + (s.title || "") + (s.connection ? "  [" + s.connection + "]" : "") +
+                   (s.note ? "\n-- " + s.note : "") + "\n\n";
+        download(new Blob([head + (s.sql || "")], { type: "application/sql" }), this._snipFileName(s.title));
+      },
+      // 全部片段合并导出为一个 .sql（避免多次下载弹窗）
+      downloadAllSnippets: function () {
+        if (!this.snippets.length) { this.flash("暂无片段可导出"); return; }
+        var parts = this.snippets.map(function (s) {
+          return "-- ===== " + (s.title || "") + (s.connection ? "  [" + s.connection + "]" : "") + " =====" +
+                 (s.note ? "\n-- " + s.note : "") + "\n" + (s.sql || "").trim() + "\n";
+        });
+        download(new Blob([parts.join("\n")], { type: "application/sql" }), "snippets_" + this.snippets.length + ".sql");
+        this.flash("已导出 " + this.snippets.length + " 条片段");
       },
       askDeleteSnippet: function (id) {
         if (this.delSnip !== id) {
@@ -2176,6 +2351,8 @@
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: this.sqlOf(t),
                      result: t.result, ok: t.ok, err: t.err, pinned: !!t.pinned,
+                     snippetId: t.snippetId || null, snipNote: t.snipNote || "",
+                     savedSql: t.savedSql || "", dirty: !!t.dirty, bookmarks: t.bookmarks || [],
                      where: t.where || "", orderBy: t.orderBy || "",
                      lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
@@ -2221,6 +2398,9 @@
                      type: t.type || "query", table: t.table || "", sql: t.sql || "",
                      result: t.result || null, ok: t.ok || null, err: t.err || null,
                      pinned: !!t.pinned,
+                     snippetId: t.snippetId || null, snipNote: t.snipNote || "",
+                     savedSql: t.savedSql != null ? t.savedSql : (t.sql || ""), dirty: !!t.dirty,
+                     bookmarks: t.bookmarks || [],
                      where: t.where || "",
                      orderBy: t.orderBy || (t.orderCol ? t.orderCol + " " + (t.orderDir || "ASC") : ""),
                      lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
@@ -2282,6 +2462,7 @@
           model: active, language: "sql",
           theme: this.theme === "light" ? "vs" : "vs-dark", automaticLayout: true,
           fontSize: 13, minimap: { enabled: true }, scrollBeyondLastLine: false, tabSize: 2,
+          glyphMargin: true,   // 书签图标显示在行号左侧的字形边栏
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
           readOnly: !!this.activeTab && this.activeTab.type === "ddl",
@@ -2289,9 +2470,25 @@
           // Monaco 会按真实可视空间决定弹在光标上方还是下方（顶部空间不够就弹下面）
           fixedOverflowWidgets: true,
         });
-        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { self.run(false); });
+        // 执行：右键菜单置顶 + 快捷键显示在右侧（keybindings 让 Monaco 自动渲染 ⌘↵）
+        editor.addAction({ id: "dbm-run", label: "执行（选中则跑选中，否则光标处语句）",
+          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+          contextMenuGroupId: "0_run", contextMenuOrder: 0, run: function () { self.run(false); } });
+        // ⌘/Ctrl+S：保存当前 SQL 到服务端片段库（Monaco 拦截，阻止浏览器「保存网页」）
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () { self.saveCurrent(); });
+        // 书签：⌘/Ctrl+B 切换、F2/⇧F2 跳下一个/上一个、点字形边栏切换
+        bmCollection = editor.createDecorationsCollection();
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, function () { self.toggleBookmark(); });
+        editor.addCommand(monaco.KeyCode.F2, function () { self.gotoBookmark(1); });
+        editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.F2, function () { self.gotoBookmark(-1); });
+        editor.onMouseDown(function (e) {
+          if (e.target && e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+            var ln = e.target.position && e.target.position.lineNumber; if (ln) self.toggleBookmark(ln);
+          }
+        });
+        this.applyBookmarks();
         editor.onDidBlurEditorText(function () { self.persist(); });
-        editor.onDidChangeModelContent(function () { self.scheduleLint(); });  // 实时语法检查
+        editor.onDidChangeModelContent(function () { self.scheduleLint(); self.markDirty(); if (self.bmOpen || self.acc.bm) self.bmTick++; });  // 实时语法检查 + 改动标记 + 书签预览刷新
         this.scheduleLint();
         // 右键菜单：格式化（选中/全部）/ EXPLAIN / EXPLAIN ANALYZE
         editor.addAction({ id: "dbm-format", label: "格式化 SQL（有选中则格式化选中，否则全部）",
@@ -2300,6 +2497,16 @@
           contextMenuGroupId: "dbm", contextMenuOrder: 2, run: function () { self.explainStmt(); } });
         editor.addAction({ id: "dbm-explain-analyze", label: "EXPLAIN ANALYZE（实际执行并分析）",
           contextMenuGroupId: "dbm", contextMenuOrder: 3, run: function () { self.explainAnalyze(); } });
+        editor.addAction({ id: "dbm-export-sql", label: "导出为 .sql 文件（下载到本地）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 4, run: function () { self.exportSqlFile(); } });
+        editor.addAction({ id: "dbm-bm-toggle", label: "给当前行加/去书签（⌘/Ctrl+B）",
+          contextMenuGroupId: "dbmbm", contextMenuOrder: 1, run: function () { self.toggleBookmark(); } });
+        editor.addAction({ id: "dbm-bm-next", label: "跳到下一个书签（F2）",
+          contextMenuGroupId: "dbmbm", contextMenuOrder: 2, run: function () { self.gotoBookmark(1); } });
+        editor.addAction({ id: "dbm-bm-prev", label: "跳到上一个书签（⇧F2）",
+          contextMenuGroupId: "dbmbm", contextMenuOrder: 3, run: function () { self.gotoBookmark(-1); } });
+        editor.addAction({ id: "dbm-bm-clear", label: "清除本页所有书签",
+          contextMenuGroupId: "dbmbm", contextMenuOrder: 4, run: function () { self.clearBookmarks(); } });
         // 函数文档 hover：光标悬停在 MySQL 内置函数上 → 中文说明 + 用法 + 官方文档链接
         monaco.languages.registerHoverProvider("sql", {
           provideHover: function (model, position) {
@@ -2431,6 +2638,7 @@
     mounted: function () {
       var self = this;
       this.restore();
+      try { var a = JSON.parse(localStorage.getItem("dbm-console-acc") || "null"); if (a) Object.assign(this.acc, a); } catch (e) {}
       // 切页/刷新前发起的查询在服务端继续跑：凭持久化的 job_id 续接轮询
       this.tabs.forEach(function (t) {
         if (t.jobId) self.pollJob(t.id, t.jobId, t.jobPage || 0);
@@ -2441,7 +2649,7 @@
       this.loadConnections().then(function () { self.loadSnippets(); });
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
-      document.addEventListener("click", function () { self.closeCtx(); self.exportOpen = false; self.copyOpen = false; self.schemaPickOpen = false; });
+      document.addEventListener("click", function () { self.closeCtx(); self.closeTabCtx(); self.exportOpen = false; self.copyOpen = false; self.schemaPickOpen = false; });
       // ⌘/Ctrl+F：焦点不在 Monaco 时打开网格内搜索（Monaco 自己的查找不受影响）
       // ⌘/Ctrl+P：全局表名搜索（跨库，回车直达表数据）
       document.addEventListener("keydown", function (e) {
@@ -2450,6 +2658,10 @@
           if (t && t.result && t.result.columns.length) { e.preventDefault(); self.openResQ(); }
         }
         if ((e.metaKey || e.ctrlKey) && e.key === "p") { e.preventDefault(); self.openTblSearch(); }
+        // ⌘/Ctrl+S：焦点不在 Monaco 时也保存到服务端（Monaco 内由 editor 命令处理）
+        if ((e.metaKey || e.ctrlKey) && e.key === "s" && (!editor || !editor.hasTextFocus())) {
+          e.preventDefault(); self.saveCurrent();
+        }
       });
       window.addEventListener("resize", function () { if (chartInst) chartInst.resize(); });
       // 恢复的活动 tab 若在图表视图，重画
@@ -2463,11 +2675,13 @@
       <dg-select :model-value="activeTab ? activeTab.conn : ''" :options="connOptions"
                  placeholder="选择连接…" @update:model-value="setConn"/>
     </div>
-    <div class="dg-tree">
-      <div class="dg-sec-hd"><span>{{ needsDb ? "库 / 表" : "表" }}</span>
+    <div class="dg-acc">
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('tree')"><span class="caret">{{ acc.tree ? '▾' : '▸' }}</span><span>{{ needsDb ? "库 / 表" : "表" }}</span>
+        <span class="acc-acts" @click.stop>
         <span v-if="selCount" class="selinfo">已选 {{ selCount }} <a @click="clearSel">清除</a></span>
         <span class="act" @click="openTblSearch" title="全局搜表跳转（⌘/Ctrl+P）">⌕</span>
-        <span class="act" @click="refreshTree" title="刷新（重新拉取）">↻</span></div>
+        <span class="act" @click="refreshTree" title="刷新（重新拉取）">↻</span></span></div>
+      <div v-show="acc.tree" class="acc-body grow">
       <div v-if="!activeTab || !activeTab.conn" class="dg-empty">先选择连接</div>
       <template v-else-if="needsDb">
         <div class="dg-schema-tools" v-if="databases.length">
@@ -2521,9 +2735,22 @@
             @ctxmenu="e=>openCtx(e,t,'')"/>
         </template>
       </template>
-      <div class="dg-sec-hd" style="margin-top:8px"><span>工作流</span>
+      </div>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('bm')"><span class="caret">{{ acc.bm ? '▾' : '▸' }}</span><span>书签{{ bmList.length ? "（"+bmList.length+"）" : "" }}</span>
+        <span class="acc-acts" @click.stop><span v-if="bmList.length" class="act" @click="clearBookmarks" title="清除本页所有书签">清空</span></span></div>
+      <div v-show="acc.bm" class="acc-body cap">
+        <div v-if="!bmList.length" class="dg-empty" style="line-height:1.5">给某句 SQL 加书签：把光标放到那行，按 <b>⌘/Ctrl+B</b> 或点行号左侧空白。之后在这里点它直接跳转/执行。</div>
+        <div v-for="b in bmList" :key="b.line" class="dg-bm-row" @click="jumpBookmark(b.line)" :title="b.text">
+          <span class="ln">{{ b.line }}</span>
+          <span class="tx">{{ b.text }}</span>
+          <span class="run" @click.stop="runBookmark(b.line)" title="跳转并执行这句">▶</span>
+        </div>
+      </div>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('wf')"><span class="caret">{{ acc.wf ? '▾' : '▸' }}</span><span>工作流</span>
+        <span class="acc-acts" @click.stop>
         <span class="act" @click="newFlowTab()" title="新建可视化流程（DAG 画布）">＋流程</span>
-        <span class="act" @click="loadWorkflows" title="刷新">↻</span></div>
+        <span class="act" @click="loadWorkflows" title="刷新">↻</span></span></div>
+      <div v-show="acc.wf" class="acc-body cap">
       <div v-if="!wfs.length" class="dg-empty">（暂无：点「＋流程」画一个，或在工作区写脚本点「存工作流」）</div>
       <div v-for="w in wfs" :key="w.name" class="dg-snip" @click="loadWorkflow(w)" :title="'工作区 '+w.workspace+(w.graph?' · 点击打开画布':' · 点击载入脚本')">
         <div class="t"><span>{{ w.graph ? "⧉" : "⚙" }} {{ w.name }}</span>
@@ -2531,18 +2758,19 @@
           <span class="x" :class="{arm: delWf===w.name}" @click.stop="askDeleteWf(w.name)">{{ delWf===w.name ? "确认?" : "✕" }}</span></div>
         <div class="c">⚗ {{ w.workspace }} · {{ w.sources.length }} 源 · {{ fmtTs(w.updated_at) }}</div>
       </div>
-      <div class="dg-sec-hd" style="margin-top:8px"><span>历史</span>
-        <span class="act" @click="showHistory=!showHistory">{{ showHistory ? "收起" : "展开" }}</span>
-        <span class="act" @click="loadHistory" title="刷新">↻</span></div>
-      <template v-if="showHistory">
+      </div>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('hist')"><span class="caret">{{ acc.hist ? '▾' : '▸' }}</span><span>历史</span>
+        <span class="acc-acts" @click.stop><span class="act" @click="loadHistory" title="刷新">↻</span></span></div>
+      <div v-show="acc.hist" class="acc-body cap">
         <div v-if="!history.length" class="dg-empty">（暂无历史）</div>
         <div v-for="(h,hi) in history" :key="hi" class="dg-hist" @click="openHistory(h)" :title="h.sql">
           <span class="st" :class="h.status==='ok'?'ok':'bad'">●</span>
           <span class="sq">{{ h.sql }}</span>
           <span class="tm">{{ fmtTs(h.ts).slice(5) }}</span>
         </div>
-      </template>
-      <div class="dg-sec-hd" style="margin-top:8px"><span>片段</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></div>
+      </div>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('snip')"><span class="caret">{{ acc.snip ? '▾' : '▸' }}</span><span>片段{{ snippets.length ? "（"+snippets.length+"）" : "" }}</span><span class="acc-acts" @click.stop><span v-if="snippets.length" class="act" @click="downloadAllSnippets" title="全部导出为一个 .sql 文件">⬇</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></span></div>
+      <div v-show="acc.snip" class="acc-body cap">
       <div v-if="showSnipForm" class="dg-snipform">
         <input v-model="snipDraft.title" placeholder="标题">
         <textarea v-model="snipDraft.note" rows="2" placeholder="备注（可选）"></textarea>
@@ -2550,40 +2778,31 @@
       </div>
       <div v-if="!snippets.length" class="dg-empty">（暂无片段）</div>
       <div v-for="s in snippets" :key="s.id" class="dg-snip" @click="openSnippet(s)">
-        <div class="t"><span>{{ s.title }}</span><span class="x" :class="{arm: delSnip===s.id}" @click.stop="askDeleteSnippet(s.id)">{{ delSnip===s.id ? "确认?" : "✕" }}</span></div>
+        <div class="t"><span>{{ s.title }}</span><span class="snip-acts"><span class="dl" @click.stop="downloadSnippet(s)" title="下载为 .sql">⬇</span><span class="x" :class="{arm: delSnip===s.id}" @click.stop="askDeleteSnippet(s.id)">{{ delSnip===s.id ? "确认?" : "✕" }}</span></span></div>
         <div v-if="s.note" class="n">{{ s.note }}</div>
         <div class="c">{{ s.connection || "—" }} · {{ fmtTs(s.updated_at) }}</div>
+      </div>
       </div>
     </div>
   </aside>
   <div class="dg-vsplit" @mousedown="beginDrag($event, 'x')"></div>
   <section class="dg-main">
-    <div v-if="isProd" class="dg-prod-ribbon">⚠ 生产环境 · PROD · 写操作将影响线上数据，请谨慎</div>
-    <div v-else-if="isStaging" class="dg-prod-ribbon staging">预发布 · STAGING 环境</div>
-    <div class="dg-top">
-      <button class="dg-btn run" :disabled="!activeTab || activeTab.running" @click="run(false)">▶ {{ activeTab && activeTab.running ? "执行中…" : (activeTab && activeTab.type==='data' ? "刷新" : (activeTab && activeTab.type==='flow' ? "运行流程" : "运行")) }}</button>
-      <button class="dg-btn" @click="formatSql">格式化</button>
-      <button class="dg-btn" @click="explainStmt" title="取执行计划（不执行语句）">解释</button>
-      <div class="dg-menu">
-        <button class="dg-btn" @click.stop="exportOpen=!exportOpen">导出 ▾</button>
-        <div v-if="exportOpen" class="dg-menu-pop">
-          <button @click="exportAs('csv')">CSV</button><button @click="exportAs('json')">JSON</button>
-          <button @click="exportAs('markdown')">Markdown</button><button @click="exportAs('xlsx')">Excel (.xlsx)</button>
-        </div>
-      </div>
-      <button class="dg-btn" @click="saveSqlFile">保存 .sql</button>
-      <button v-if="isAnalysis || (activeTab && activeTab.type==='flow')" class="dg-btn" @click="saveWorkflow" title="把当前脚本/流程图存为可重跑的 workflow">存工作流</button>
-      <span class="sp"></span>
-      <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres')" class="dg-schema-pick">执行 schema
-        <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
-                   placeholder="未指定" @update:model-value="setSchema"/></label>
-      <span class="hint">⌘/Ctrl+Enter 运行 · ⌃Space 补全</span>
+    <div v-if="isProd" class="dg-prod-ribbon" title="生产环境 · PROD · 写操作将影响线上数据，请谨慎"></div>
+    <div v-else-if="isStaging" class="dg-prod-ribbon staging" title="预发布 · STAGING 环境"></div>
+    <!-- 顶部栏只在「流程」或「分析工作区脚本」时显示（承载 运行流程/存工作流）；
+         普通 SQL 编辑器整条去掉：执行走 ⌘Enter/右键，schema 选择器浮在编辑器内 -->
+    <div class="dg-top" v-if="activeTab && (activeTab.type==='flow' || (isAnalysis && activeTab.type==='query'))">
+      <button v-if="activeTab.type==='flow'" class="dg-btn run" :disabled="activeTab.running" @click="run(false)">▶ {{ activeTab.running ? "执行中…" : "运行流程" }}</button>
+      <button class="dg-btn" @click="saveWorkflow" title="把当前脚本/流程图存为可重跑的 workflow">存工作流</button>
     </div>
     <div class="dg-tabs">
       <div v-for="t in tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId, drag: t.id===dragId}" @click="switchTab(t.id)"
+           @contextmenu="openTabCtx($event, t.id)"
            draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">
         <span class="ticon" v-if="t.type==='data'">▦</span><span class="ticon" v-else-if="t.type==='ddl'">≔</span>
-        <span class="nm">{{ t.title }}</span>
+        <input v-if="renamingId===t.id" class="rename-in" v-model="renameVal"
+               @click.stop @keydown.enter="commitRename" @keydown.esc="cancelRename" @blur="commitRename">
+        <span v-else class="nm" @dblclick.stop="beginRename(t.id)" title="双击改名 · 右键更多">{{ t.title }}<span v-if="t.dirty && t.type==='query'" class="dirty" title="有未保存改动">*</span></span>
         <span class="tconn" :class="'env-'+tabConn(t).env" :title="'连接：'+t.conn">{{ tabConn(t).name }}</span>
         <span class="pin" :class="{on: t.pinned}" @click.stop="togglePin(t.id)"
               :title="t.pinned ? '取消固定' : '固定（防误关）'">⚲</span>
@@ -2649,6 +2868,13 @@
       <div class="dg-estatus" :class="execState.cls" :title="execState.tip"><span>{{ execState.icon }}</span></div>
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
         <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>
+        <!-- 执行 schema 选择器浮在编辑器右上角（原顶部栏整条已去掉） -->
+        <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres') && activeTab && activeTab.type==='query'"
+               class="dg-schema-float" title="选择语句执行所在的库 / schema">
+          <span class="lb">schema</span>
+          <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
+                     placeholder="未指定" @update:model-value="setSchema"/>
+        </label>
       </div>
     </div>
     <div class="dg-flow" v-if="activeTab && activeTab.type==='flow' && activeTab.graph" :style="{height: editorH + 'px'}">
@@ -2737,11 +2963,11 @@
     <div class="dg-results" v-show="activeTab && activeTab.type!=='ddl'">
       <template v-if="activeTab">
         <div v-if="activeTab.type==='data'" class="dg-toolbar">
-          <button class="dg-btn" @click="refreshData" title="按当前条件重新查询（有未提交改动会提醒）">↻ 刷新</button>
+          <button class="dg-btn ic" @click="refreshData" title="刷新：按当前条件重新查询（有未提交改动会提醒）">↻</button>
           <span class="tb-sep"></span>
-          <button class="dg-btn" @click="addRow(null)" title="新增一行，提交时生成 INSERT">＋ 加行</button>
-          <button class="dg-btn" :disabled="!selRowCount()" @click="toggleDelSelected"
-                  title="标记/取消标记选中行删除，提交时生成 DELETE">－ 减行</button>
+          <button class="dg-btn ic" @click="addRow(null)" title="加行：新增一行，提交时生成 INSERT">＋</button>
+          <button class="dg-btn ic" :disabled="!selRowCount()" @click="toggleDelSelected"
+                  title="减行：标记/取消标记选中行删除，提交时生成 DELETE">－</button>
           <span class="tb-sep"></span>
           <span class="dg-menu">
             <button class="dg-btn run" :disabled="!hasPending()" @click.stop="submitOpen=!submitOpen">
@@ -2828,9 +3054,9 @@
             <span v-if="activeTab.result.duration_ms!=null">{{ activeTab.result.duration_ms }} ms</span>
             <span v-if="activeTab.result.paginated && activeTab.result.ordered===false" style="color:var(--dg-amber)" title="LIMIT/OFFSET 翻页在无 ORDER BY 时顺序不保证稳定">⚠ 无 ORDER BY</span>
             <span v-if="activeTab.result.paginated" class="pager">
-              <button class="pg" :disabled="activeTab.result.page<=0" @click="goPage(activeTab.result.page-1)">‹ 上一页</button>
+              <button class="pg ic" :disabled="activeTab.result.page<=0" @click="goPage(activeTab.result.page-1)" title="上一页">‹</button>
               <span class="pn">第 {{ activeTab.result.page+1 }} 页</span>
-              <button class="pg" :disabled="!activeTab.result.has_next" @click="goPage(activeTab.result.page+1)">下一页 ›</button>
+              <button class="pg ic" :disabled="!activeTab.result.has_next" @click="goPage(activeTab.result.page+1)" title="下一页">›</button>
             </span>
             <span v-else-if="activeTab.result.truncated" style="color:var(--dg-amber)">已截断到 max_rows</span>
             <span v-if="selRowCount()" class="rowops">
@@ -2860,10 +3086,16 @@
             <span v-if="activeTab.result.columns.length" class="exp">
               <button v-if="!activeTab.resQ" @click="openResQ" title="在结果中查找（⌘/Ctrl+F）">🔍</button>
               <span class="vswitch">
-                <button :class="{on: (activeTab.view||'table')==='table'}" @click="setView('table')">表格</button>
-                <button :class="{on: activeTab.view==='chart'}" @click="setView('chart')">图表</button>
+                <button :class="{on: (activeTab.view||'table')==='table'}" @click="setView('table')" title="表格视图">▦</button>
+                <button :class="{on: activeTab.view==='chart'}" @click="setView('chart')" title="图表视图">📊</button>
               </span>
-              <button @click="exportAs('csv')">CSV</button><button @click="exportAs('json')">JSON</button><button @click="exportAs('markdown')">MD</button><button @click="exportAs('xlsx')">XLSX</button>
+              <span class="dg-menu">
+                <button class="exp-dl" @click.stop="exportOpen=!exportOpen" title="导出结果">⬇</button>
+                <div v-if="exportOpen" class="dg-menu-pop">
+                  <button @click="exportAs('csv')">CSV</button><button @click="exportAs('json')">JSON</button>
+                  <button @click="exportAs('markdown')">Markdown</button><button @click="exportAs('xlsx')">Excel (.xlsx)</button>
+                </div>
+              </span>
             </span>
           </div>
           <div v-if="!activeTab.result.columns.length" class="dg-res-empty">语句已执行，无结果集。</div>
@@ -2980,6 +3212,14 @@
       </template>
     </div>
   </section>
+  <div v-if="tabCtx.show" class="dg-ctx" :style="{left: tabCtx.x+'px', top: tabCtx.y+'px'}" @click.stop>
+    <button @click="beginRename(tabCtx.id)">改名</button>
+    <button @click="tabCtxPin">{{ tabCtxTarget() && tabCtxTarget().pinned ? '取消固定' : '固定（防误关）' }}</button>
+    <div class="sep"></div>
+    <button @click="tabCtxClose">关闭</button>
+    <button @click="closeOthers(tabCtx.id)">关闭其他</button>
+    <button @click="closeAll">关闭全部</button>
+  </div>
   <div v-if="ctx.show" class="dg-ctx" :style="{left: ctx.x+'px', top: ctx.y+'px'}" @click.stop>
     <div class="hd">{{ ctx.multi ? ("已选 " + selCount + " 张表") : qualified() }}</div>
     <template v-if="!ctx.multi">

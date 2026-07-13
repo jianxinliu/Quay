@@ -66,7 +66,15 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   border-radius: 6px; padding: 7px 9px; font-size: 12.5px; font-family: var(--dg-mono);
 }
 .dg-conn select:focus { outline: none; border-color: var(--dg-accent); }
-.dg-tree { flex: 1; overflow: auto; padding: 6px 0; }
+/* 左栏手风琴：各区各自展开、有界高度，工作流/片段贴底不被树挤掉 */
+.dg-acc { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 4px 0; }
+.dg-acc .acc-hd { cursor: pointer; justify-content: flex-start; gap: 4px; flex: 0 0 auto; }
+.dg-acc .acc-hd:hover { color: var(--dg-muted); }
+.dg-acc .acc-hd .caret { color: var(--dg-faint); font-size: 10px; width: 10px; }
+.dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px; text-transform: none; letter-spacing: 0; }
+.dg-acc .acc-body { overflow: auto; }
+.dg-acc .acc-body.grow { flex: 1 1 auto; min-height: 80px; }          /* 库/表：占据剩余空间、内部滚动 */
+.dg-acc .acc-body.cap { flex: 0 0 auto; max-height: 30vh; }           /* 工作流/历史/片段：有界、贴底、内部滚动 */
 .dg-sec-hd {
   display: flex; align-items: center; justify-content: space-between;
   padding: 6px 12px; font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase;
@@ -121,9 +129,12 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-snip { padding: 5px 12px; cursor: pointer; }
 .dg-snip:hover { background: var(--dg-hover); }
 .dg-snip .t { font-size: 12.5px; color: var(--dg-text); display: flex; align-items: center; gap: 6px; }
-.dg-snip .t .x { margin-left: auto; opacity: 0; color: var(--dg-muted); }
-.dg-snip:hover .t .x { opacity: 1; }
+.dg-snip .t .snip-acts { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.dg-snip .t .x { opacity: 0; color: var(--dg-muted); }
+.dg-snip .t .dl { opacity: 0; color: var(--dg-muted); }
+.dg-snip:hover .t .x, .dg-snip:hover .t .dl { opacity: 1; }
 .dg-snip .t .x:hover { color: var(--dg-red); }
+.dg-snip .t .dl:hover { color: var(--dg-accent); }
 .dg-snip .n { font-size: 11px; color: var(--dg-muted); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dg-snip .c { font-size: 10.5px; color: var(--dg-faint); font-family: var(--dg-mono); }
 .dg-snipform { padding: 8px 12px; border-top: 1px solid var(--dg-border); }
@@ -170,6 +181,32 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-tab.drag { opacity: .4; }
 .dg-tab[draggable] { user-select: none; }
 .dg-tab .nm { overflow: hidden; text-overflow: ellipsis; }
+.dg-tab .nm .dirty { color: var(--dg-amber); font-weight: 700; margin-left: 2px; }
+.dg-tab .rename-in { width: 96px; font: inherit; font-size: 12px; padding: 1px 4px;
+  background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-accent); border-radius: 3px; outline: none; }
+/* 编辑器书签：字形边栏图标 + 整行淡黄底 */
+.dg-bm-glyph { cursor: pointer; background: var(--dg-amber); width: 8px !important; height: 8px !important;
+  border-radius: 50%; margin: 5px 0 0 5px; box-shadow: 0 0 3px rgba(224,168,62,.6); }
+.dg-bm-linebg { background: rgba(224,168,62,.10); }
+/* 左栏「书签」区行 */
+.dg-bm-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
+.dg-bm-row:hover { background: var(--dg-hover); }
+.dg-bm-row .ln { color: var(--dg-amber); font-family: var(--dg-mono); font-size: 10.5px; min-width: 20px; text-align: right; }
+.dg-bm-row .tx { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dg-text); font-family: var(--dg-mono); }
+.dg-bm-row .run { opacity: 0; color: var(--dg-green); font-size: 11px; }
+.dg-bm-row:hover .run { opacity: 1; }
+/* 后台壳有全局 label{margin:12px 0 5px}，会渗进 Monaco 的 body 级弹层
+   （命令面板行、补全项都是 <label>），把每行撑高造成重叠 —— 在这些容器内复位 */
+.quick-input-widget label, .suggest-widget label, .monaco-hover label,
+.monaco-list label, .parameter-hints-widget label, .monaco-menu label,
+.editor-widget label, .monaco-editor label { margin: 0; padding: 0; font-weight: inherit; }
+/* 命令面板/补全的选中行对比度：后台壳浅色样式渗入导致蓝底暗字看不清 —— 强制实心强调色 + 白字 */
+.quick-input-widget .monaco-list-row.focused { background: var(--dg-accent) !important; }
+.quick-input-widget .monaco-list-row.focused,
+.quick-input-widget .monaco-list-row.focused label,
+.quick-input-widget .monaco-list-row.focused .monaco-highlighted-label,
+.quick-input-widget .monaco-list-row.focused .monaco-highlighted-label span,
+.quick-input-widget .monaco-list-row.focused .keybinding .monaco-keybinding-key { color: #fff !important; }
 .dg-tab .x { color: var(--dg-faint); font-size: 13px; }
 .dg-tab .x:hover { color: var(--dg-red); }
 .dg-tab .dot { color: var(--dg-amber); }
@@ -183,6 +220,14 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-sel { position: relative; min-width: 0; }
 .dg-conn .dg-sel { width: 100%; }
 .dg-schema-pick .dg-sel { width: 200px; }
+/* 执行 schema 选择器：浮在编辑器右上角（顶部栏已整条去掉） */
+.dg-schema-float { position: absolute; top: 6px; right: 16px; z-index: 20;
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 6px;
+  opacity: .7; transition: opacity .12s; }
+.dg-schema-float:hover { opacity: 1; }
+.dg-schema-float .lb { font-family: var(--dg-mono); font-size: 10px; color: var(--dg-faint); }
+.dg-schema-float .dg-sel { width: 150px; }
 .dg-sel-btn {
   display: flex; align-items: center; gap: 6px; width: 100%;
   background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
@@ -266,10 +311,12 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-restabs .rtab .rx { color: var(--dg-faint); font-size: 10px; }
 .dg-restabs .rtab .rx:hover { color: var(--dg-red); }
 .dg-res-meta {
-  display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--dg-border);
-  font-size: 12px; color: var(--dg-muted); flex: none;
+  display: flex; align-items: center; gap: 8px; padding: 3px 12px; border-bottom: 1px solid var(--dg-border);
+  font-size: 12px; line-height: 20px; color: var(--dg-muted); flex: none;
 }
-.dg-res-meta .pager { display: inline-flex; align-items: center; gap: 8px; }
+.dg-res-meta > span { display: inline-flex; align-items: center; }
+/* margin:0 覆盖后台壳审计页 .pager{margin-top:16px} 的类名撞车渗漏（否则分页被推低、整行变厚） */
+.dg-res-meta .pager { display: inline-flex; align-items: center; gap: 3px; margin: 0; }
 .dg-res-meta .pager .pg {
   background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
   border-radius: 5px; padding: 3px 9px; font-size: 11.5px; cursor: pointer;
@@ -277,10 +324,11 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-res-meta .pager .pg:hover:not(:disabled) { background: var(--dg-hover); }
 .dg-res-meta .pager .pg:disabled { opacity: .4; cursor: default; }
 .dg-res-meta .pager .pn { color: var(--dg-text); font-family: var(--dg-mono); }
-.dg-res-meta .exp { margin-left: auto; display: flex; gap: 5px; }
+.dg-res-meta .exp { margin-left: auto; display: flex; align-items: center; gap: 5px; }
 .dg-res-meta .exp button {
+  display: inline-flex; align-items: center; justify-content: center; height: 20px; box-sizing: border-box;
   background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
-  border-radius: 5px; padding: 3px 9px; font-size: 11.5px; cursor: pointer;
+  border-radius: 5px; padding: 0 8px; font-size: 12px; cursor: pointer;
 }
 .dg-res-meta .exp button:hover { background: var(--dg-hover); }
 .dg-res-scroll { flex: 1; overflow: auto; min-height: 0; }
@@ -645,10 +693,7 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   vertical-align: middle; letter-spacing: .3px;
 }
 /* 生产环境警示条 */
-.dg-prod-ribbon {
-  flex: none; background: var(--dg-red); color: #fff; font-weight: 600; font-size: 12.5px;
-  text-align: center; padding: 5px 10px; letter-spacing: .5px;
-}
+.dg-prod-ribbon { flex: none; height: 8px; background: var(--dg-red); }
 .dg-prod-ribbon.staging { background: #d97706; }
 /* 全屏红框：套住整个查询台视口，一眼可辨生产环境 */
 .dg-prod-frame {
@@ -710,9 +755,14 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   font-family: var(--dg-mono); color: var(--dg-text); }
 .dg-datalog .dl-row .tm { flex: none; color: var(--dg-faint); font-family: var(--dg-mono); font-size: 11px; }
 /* 表数据工具栏（过滤条上方）：刷新/加行/减行/提交/DDL */
-.dg-toolbar { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+.dg-toolbar { flex: none; display: flex; align-items: center; gap: 4px; padding: 4px 8px;
   border-bottom: 1px solid var(--dg-border); background: var(--dg-panel); position: relative; z-index: 3; }
-.dg-toolbar .tb-sep { width: 1px; height: 16px; background: var(--dg-border); margin: 0 3px; }
+.dg-toolbar .tb-sep { width: 1px; height: 16px; background: var(--dg-border); margin: 0 2px; }
+/* 数据工具栏所有按钮（含 提交/DDL）整体压缩 */
+.dg-toolbar .dg-btn { padding: 3px 8px; font-size: 12px; }
+/* 紧凑图标按钮（数据工具栏 刷新/加行/减行、结果分页 ‹ ›） */
+.dg-btn.ic { padding: 3px 7px; min-width: 0; font-size: 14px; line-height: 1; }
+.dg-res-meta .pager .pg.ic { padding: 0 6px; font-size: 14px; line-height: 1; height: 20px; }
 .dg-toolbar .dg-btn.run:disabled { opacity: .45; cursor: not-allowed; }
 .dg-toolbar .tb-pending { margin-left: auto; color: var(--dg-amber); font-size: 12px; font-weight: 500; }
 .dg-toolbar .dg-menu-pop { top: 100%; left: 0; }
