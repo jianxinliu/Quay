@@ -340,6 +340,7 @@
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
+        colMenu: { show: false, x: 0, y: 0, ci: -1 },
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300, dataLogH: 150,
@@ -498,7 +499,8 @@
                     graph: opts.graph || null, sel: null, nodeStatus: {},
                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
-                    edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false };
+                    edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
+                    colDisplay: opts.colDisplay || {} };  // 列显示类型（仅展示，不写库）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -1313,12 +1315,13 @@
         if (!t || t.type !== "data" || !t.result) return;
         var k = this.mk(t.table, t.schema);
         if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
-        var v = t.result.rows[ri][ci], key = ri + ":" + ci;
-        var init = (t.edits && key in t.edits) ? t.edits[key] : (v == null ? "NULL" : this.cellText(v));
-        t.edit = { ri: ri, ci: ci, val: init };
+        var v = t.result.rows[ri][ci], key = ri + ":" + ci, isDt = this.isDatetimeCol(ci);
+        var cur = (t.edits && key in t.edits) ? t.edits[key] : (v == null ? "NULL" : this.cellText(v));
+        var init = isDt ? this.toDatetimeLocal(cur === "NULL" ? "" : cur) : cur;
+        t.edit = { ri: ri, ci: ci, val: init, dt: isDt };
         this.$nextTick(function () {
           var el = document.getElementById("dg-cell-input");
-          if (el) { el.focus(); el.select(); }
+          if (el) { el.focus(); if (!isDt) el.select(); }
         });
       },
       cancelEdit: function () { if (this.activeTab) this.activeTab.edit = null; },
@@ -1347,8 +1350,9 @@
       commitEdit: function () {
         var t = this.activeTab;
         if (!t || !t.edit || !t.result) return;
-        var ri = t.edit.ri, ci = t.edit.ci, key = ri + ":" + ci;
-        var oldV = t.result.rows[ri][ci], newRaw = t.edit.val;
+        var ri = t.edit.ri, ci = t.edit.ci, key = ri + ":" + ci, dt = t.edit.dt;
+        var oldV = t.result.rows[ri][ci];
+        var newRaw = dt ? this.fromDatetimeLocal(t.edit.val) : t.edit.val;
         t.edit = null;
         // 暂存：不立即执行，等工具栏「提交」。改回原值则撤销暂存。
         if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
@@ -1368,9 +1372,79 @@
       },
       cellShow: function (ri, ci) {
         var t = this.activeTab, key = ri + ":" + ci;
-        if (t.edits && key in t.edits) return t.edits[key];
-        var v = t.result.rows[ri][ci];
-        return v == null ? "NULL" : this.cellText(v);
+        var edited = t.edits && key in t.edits;
+        var raw = edited ? t.edits[key] : t.result.rows[ri][ci];
+        if (edited ? raw === "NULL" : raw == null) return "NULL";
+        // 列显示类型：数值列按时间戳格式化展示（铁律：仅展示，底层值不变）
+        var disp = this.displayTypeOf(ci);
+        if (disp && disp !== "number" && this.isNumericCol(ci) && raw !== "" && isFinite(+raw)) {
+          return this.formatTs(+raw, disp);
+        }
+        return this.cellText(raw);
+      },
+      // ---------- 列类型识别 + 显示类型（Change Display Type，仅展示不写库） ----------
+      colType: function (ci) {
+        var t = this.activeTab; if (!t || t.type !== "data" || !t.result) return "";
+        var meta = this.tableMeta[this.mk(t.table, t.schema)]; if (!meta) return "";
+        var col = t.result.columns[ci];
+        var c = (meta.columns || []).find(function (x) { return x.name === col; });
+        return c ? String(c.type || "").toLowerCase() : "";
+      },
+      isNumericCol: function (ci) {
+        return /\b(bigint|smallint|mediumint|tinyint|int|integer|decimal|numeric|float|double|real|bit)\b/.test(this.colType(ci));
+      },
+      isJsonCol: function (ci) { return this.colType(ci).indexOf("json") >= 0; },
+      isDatetimeCol: function (ci) {
+        var t = this.colType(ci); return /datetime|timestamp/.test(t) || t === "date" || t === "time";
+      },
+      displayTypeOf: function (ci) {
+        var t = this.activeTab; if (!t || !t.result) return "number";
+        return (t.colDisplay && t.colDisplay[t.result.columns[ci]]) || "number";
+      },
+      formatTs: function (n, disp) {
+        var ms = disp === "ts_s" ? n * 1000 : disp === "ts_us" ? n / 1000 : n;
+        var d = new Date(ms); if (isNaN(d.getTime())) return String(n);
+        return this.fmtDateLocal(d);
+      },
+      fmtDateLocal: function (d) {
+        function p(x) { return (x < 10 ? "0" : "") + x; }
+        return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+               p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      },
+      openColMenu: function (e, ci) {
+        var t = this.activeTab; if (!t || t.type !== "data") return;
+        if (!this.isNumericCol(ci)) return;   // 仅数值列可改显示类型（当前支持时间戳）
+        e.preventDefault();
+        this.colMenu = { show: true, x: e.clientX, y: e.clientY, ci: ci };
+      },
+      setDisplayType: function (disp) {
+        var t = this.activeTab, ci = this.colMenu.ci;
+        if (t && ci >= 0) {
+          var col = t.result.columns[ci];
+          if (disp === "number") delete t.colDisplay[col]; else t.colDisplay[col] = disp;
+          this.persist();
+        }
+        this.colMenu.show = false;
+      },
+      closeColMenu: function () { this.colMenu.show = false; },
+      // datetime 列编辑用日期选择器：SQL "YYYY-MM-DD HH:MM:SS" ↔ datetime-local "…T…"
+      toDatetimeLocal: function (s) {
+        if (s == null || s === "NULL" || s === "") return "";
+        return String(s).replace(" ", "T").slice(0, 19);
+      },
+      fromDatetimeLocal: function (s) {
+        if (!s) return "NULL";
+        s = s.replace("T", " ");
+        if (/ \d\d:\d\d$/.test(s)) s += ":00";   // 补秒
+        return s;
+      },
+      onCellBlur: function () {
+        var t = this.activeTab;
+        if (t && t.edit && !t.edit.dt) this.cancelEdit();   // datetime 选择器交互会失焦，不取消
+      },
+      onCellChange: function () {
+        var t = this.activeTab;
+        if (t && t.edit && t.edit.dt) this.commitEdit();     // 选好日期即提交暂存
       },
       hasPending: function () {
         var t = this.activeTab; if (!t) return false;
@@ -1754,7 +1828,9 @@
         var staged = t.edits && key in t.edits;   // 面板显示已暂存的改动值（若有）
         this.vpVal = staged ? (t.edits[key] === "NULL" ? "" : t.edits[key]) : (v == null ? "" : this.cellText(v));
         this.vpNull = staged ? t.edits[key] === "NULL" : v == null;
-        this.vpOpen = true; this.vpTab = this.vpTab || "value";
+        // JSON 列默认进 Record（格式化只读视图），其余保留上次选择
+        this.vpOpen = true;
+        this.vpTab = this.isJsonCol(ci) ? "record" : (this.vpTab || "value");
         var k = this.mk(t.table, t.schema);
         if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
       },
@@ -1790,7 +1866,16 @@
         if (!t || !t.vsel || !t.result) return [];
         var row = t.result.rows[t.vsel.ri], self = this;
         return t.result.columns.map(function (c, i) {
-          return { col: c, val: row[i] == null ? null : self.cellText(row[i]), cur: i === t.vsel.ci };
+          var val = row[i] == null ? null : self.cellText(row[i]);
+          var pretty = val, isJson = false;
+          if (val != null) {
+            var tt = ("" + val).trim();
+            if (tt && (tt[0] === "{" || tt[0] === "[")) {
+              try { pretty = JSON.stringify(JSON.parse(tt), null, 2); isJson = true; } catch (e) { /* 非 JSON */ }
+            }
+          }
+          return { col: c, val: val, pretty: pretty, isJson: isJson,
+                   type: self.colType(i) || "", cur: i === t.vsel.ci };
         });
       },
 
@@ -1901,6 +1986,7 @@
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
+                     colDisplay: t.colDisplay || {},
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null };
           }, this);
@@ -1937,6 +2023,7 @@
                      rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      submit: null, submitting: false, refreshWarn: false,
+                     colDisplay: t.colDisplay || {},
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -2543,11 +2630,13 @@
           <div class="dg-res-scroll"><table class="dg-rt">
             <thead><tr>
               <th class="gut" title="点击行号选择行（⇧范围 / ⌘多选）">#</th>
-              <th v-for="c in activeTab.result.columns" :key="c"
+              <th v-for="(c,ci) in activeTab.result.columns" :key="c"
                   :class="{sortable: activeTab.type==='data'}"
                   @click="activeTab.type==='data' && cycleOrder(c)"
-                  :title="activeTab.type==='data' ? '点击排序（走 SQL）' : c">
+                  @contextmenu="activeTab.type==='data' && openColMenu($event, ci)"
+                  :title="activeTab.type==='data' ? '点击排序（走 SQL）· 右键改显示类型' : c">
                 {{ c }}{{ orderMark(c) }}
+                <span v-if="activeTab.type==='data' && displayTypeOf(ci)!=='number'" class="disp-badge" title="按时间戳展示（仅展示，不改值）">🕒</span>
                 <span v-if="activeTab.type==='data'" class="funnel" @click.stop="funnel(c)" title="按此列筛选（填入 WHERE）">⧩</span>
               </th>
             </tr></thead>
@@ -2569,8 +2658,11 @@
                   @click="cellClick(ri,ci)"
                   @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
                 <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
-                       id="dg-cell-input" class="dg-cell-edit" v-model="activeTab.edit.val"
-                       @keydown.enter="commitEdit" @keydown.esc="cancelEdit" @blur="cancelEdit">
+                       id="dg-cell-input" class="dg-cell-edit"
+                       :type="activeTab.edit.dt ? 'datetime-local' : 'text'" step="1"
+                       v-model="activeTab.edit.val"
+                       @keydown.enter="commitEdit" @keydown.esc="cancelEdit"
+                       @blur="onCellBlur" @change="onCellChange">
                 <template v-else-if="activeTab.type==='data'"><span v-if="cellNull(ri,ci)" class="nul">NULL</span><span v-else>{{ cellShow(ri,ci) }}</span></template>
                 <template v-else><span v-if="v===null" class="nul">NULL</span><span v-else>{{ cellText(v) }}</span></template>
               </td>
@@ -2600,8 +2692,10 @@
             <template v-else>
               <div class="vp-rec">
                 <div v-for="r in vpRecord()" :key="r.col" class="vp-rec-row" :class="{cur: r.cur}">
-                  <span class="rc">{{ r.col }}</span>
-                  <span class="rv"><i v-if="r.val===null" class="nul">NULL</i><template v-else>{{ r.val }}</template></span>
+                  <div class="rc-hd"><span class="rc">{{ r.col }}</span><span class="rt" v-if="r.type">{{ r.type }}</span></div>
+                  <div class="rv"><i v-if="r.val===null" class="nul">NULL</i>
+                    <pre v-else-if="r.isJson" class="rj">{{ r.pretty }}</pre>
+                    <template v-else>{{ r.val }}</template></div>
                 </div>
               </div>
             </template>
@@ -2645,6 +2739,17 @@
     <div class="sep"></div>
     <button class="danger" @click="ctxAction('drop')">{{ ctx.multi ? ("DROP " + selCount + " 张表…") : "DROP 表…" }}</button>
   </div>
+  <!-- 列显示类型菜单（数值列右键；仅展示不改值） -->
+  <template v-if="colMenu.show">
+    <div class="dg-ctx-backdrop" @click="closeColMenu" @contextmenu.prevent="closeColMenu"></div>
+    <div class="dg-ctx dg-colmenu" :style="{left: colMenu.x+'px', top: colMenu.y+'px'}" @click.stop>
+      <div class="hd">更改显示类型 · {{ activeTab && activeTab.result ? activeTab.result.columns[colMenu.ci] : '' }}</div>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='number'}" @click="setDisplayType('number')">Number（原值）</button>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='ts_s'}" @click="setDisplayType('ts_s')">Timestamp（秒）</button>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='ts_ms'}" @click="setDisplayType('ts_ms')">Timestamp（毫秒）</button>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='ts_us'}" @click="setDisplayType('ts_us')">Timestamp（微秒）</button>
+    </div>
+  </template>
   <div v-if="tblSearch" class="dg-tblsearch" @click.self="tblSearch=null">
     <div class="box">
       <input id="dg-tblsearch-input" v-model="tblSearch.q" placeholder="输入表名跳转（当前连接跨库搜索）…"

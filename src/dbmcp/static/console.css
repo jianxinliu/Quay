@@ -706,3 +706,19 @@ table.dg-rt tr.delrow td.gut { color: var(--dg-red); text-decoration: none; }
 .dg-submit-sql { max-height: 260px; overflow: auto; margin: 8px 0; padding: 10px 12px;
   background: var(--dg-bg); border: 1px solid var(--dg-border); border-radius: 6px;
   font-family: var(--dg-mono); font-size: 12px; white-space: pre; color: var(--dg-text); }
+/* 列显示类型：表头徽章 + 右键菜单 */
+table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
+.dg-ctx-backdrop { position: fixed; inset: 0; z-index: 190; }
+.dg-colmenu { z-index: 191; min-width: 180px; }
+.dg-colmenu button.on { color: var(--dg-accent); font-weight: 600; }
+.dg-colmenu button.on::before { content: "✓ "; }
+/* Value 面板 Record 视图：字段名 + 类型标签 + 值（JSON 美化） */
+.dg-vp .vp-rec-row { flex-direction: column; align-items: stretch; gap: 3px; padding: 8px 12px; }
+.dg-vp .vp-rec-row .rc-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.dg-vp .vp-rec-row .rc-hd .rc { flex: 0 1 auto; color: var(--dg-muted); overflow: hidden; text-overflow: ellipsis; }
+.dg-vp .vp-rec-row .rc-hd .rt { flex: none; color: var(--dg-faint); font-family: var(--dg-mono);
+  font-size: 10.5px; text-transform: none; }
+.dg-vp .vp-rec-row .rv { color: var(--dg-text); white-space: normal; overflow: hidden; text-overflow: ellipsis; }
+.dg-vp .vp-rec-row .rv .rj { margin: 2px 0 0; max-height: 220px; overflow: auto; white-space: pre;
+  font-family: var(--dg-mono); font-size: 11.5px; background: var(--dg-bg); border: 1px solid var(--dg-border);
+  border-radius: 5px; padding: 6px 8px; color: var(--dg-text); }
