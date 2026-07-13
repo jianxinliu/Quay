@@ -62,6 +62,9 @@
         leftW: 300, docW: 300, editorH: 200,
         theme: "dark", pageSize: 100, // 系统设置：主题 + 结果每页行数
         keyPage: 0, cmdPage: 0,       // 键详情 / 命令结果分页页码
+        selField: null,               // 键详情里选中的字段/行 {k, v}
+        fmtJson: true,                 // 详情面板：是否美化 JSON
+        ctx: { show: false, x: 0, y: 0, kind: "", key: "", path: "" }, // 键树右键菜单
       };
     },
     computed: {
@@ -146,6 +149,55 @@
         if (typeof v === "object") return JSON.stringify(v);
         return String(v);
       },
+      // 字段详情面板：把值智能格式化——对象/数组→美化 JSON；是 JSON 字符串→美化；否则原样
+      formatValue: function (v) {
+        if (v == null) return "";
+        if (typeof v === "object") {
+          return this.fmtJson ? JSON.stringify(v, null, 2) : JSON.stringify(v);
+        }
+        var s = String(v);
+        if (this.fmtJson) {
+          var t = s.trim();
+          if (t && (t[0] === "{" || t[0] === "[" || t[0] === '"')) {
+            try { return JSON.stringify(JSON.parse(t), null, 2); } catch (e) { /* 非 JSON，原样 */ }
+          }
+        }
+        return s;
+      },
+      selectField: function (r) { this.selField = { k: r.k, v: r.v }; },
+
+      // ---------- 键树右键菜单 ----------
+      openCtx: function (e, kind, val) {
+        e.preventDefault();
+        this.ctx = { show: true, x: e.clientX, y: e.clientY, kind: kind,
+                     key: kind === "key" ? val : "", path: kind === "folder" ? val : "" };
+      },
+      closeCtx: function () { this.ctx.show = false; },
+      copyText: function (t) {
+        var self = this;
+        if (navigator.clipboard) navigator.clipboard.writeText(t).then(function () { self.flash("已复制"); });
+        else this.flash("浏览器不支持剪贴板");
+        this.closeCtx();
+      },
+      ctxCopyKey: function () { this.copyText(this.ctx.key); },
+      ctxCopyPrefix: function () { this.copyText(this.ctx.path); },
+      qkey: function (k) { return /[\s"']/.test(k) ? '"' + k.replace(/"/g, '\\"') + '"' : k; },
+      ctxDeleteKey: function () {
+        var k = this.ctx.key; this.closeCtx();
+        this.execCommand("DEL " + this.qkey(k), false);  // 走写确认旁路（confirm 条）
+      },
+      ctxDeleteFolder: function () {
+        var prefix = this.ctx.path + ":", exact = this.ctx.path;
+        // 该目录下所有已加载的键（前缀匹配，含目录名本身作为独立键的情况）
+        var names = this.keys.filter(function (x) {
+          return x.key.indexOf(prefix) === 0 || x.key === exact;
+        }).map(function (x) { return x.key; });
+        this.closeCtx();
+        if (!names.length) { this.flash("该目录下没有已加载的键"); return; }
+        var self = this;
+        var cmd = "DEL " + names.map(function (n) { return self.qkey(n); }).join(" ");
+        this.execCommand(cmd, false);  // 返回风险确认条，确认后批量删
+      },
 
       // ---------- 连接 / 库 ----------
       loadConnections: function () {
@@ -200,7 +252,7 @@
       viewKey: function (key) {
         var self = this;
         this.sel = key; this.view = "key"; this.keyLoading = true; this.keyView = null;
-        this.keyPage = 0;
+        this.keyPage = 0; this.selField = null;
         apiGet("/admin/redis/value?conn=" + encodeURIComponent(this.conn)
                + "&db=" + this.db + "&key=" + encodeURIComponent(key)).then(function (d) {
           self.keyLoading = false;
@@ -345,6 +397,7 @@
         self.loadConnections();
         loadMonaco(function () { self.$nextTick(function () { self.onEditorReady(); }); });
       });
+      document.addEventListener("click", function () { self.closeCtx(); });
     },
     template: `
 <div class="rd-root" :class="{'env-prod': isProd, 'env-staging': isStaging, 'theme-light': theme==='light'}">
@@ -362,27 +415,32 @@
     <div class="rd-tree">
       <div v-if="!conn" class="rd-empty">先选择连接</div>
       <template v-else>
-        <div class="rd-sec">库（仅列有数据的）</div>
-        <div v-if="!dbs.length" class="rd-empty">（无数据库有键）</div>
-        <div v-for="d in dbs" :key="d.db" class="rd-db" :class="{on: db===d.db}" @click="selectDb(d.db)">
-          <span class="ic">▤</span><span class="nm">db{{ d.db }}</span>
-          <span class="cnt">{{ d.keys }} 键</span>
-        </div>
-        <div class="rd-sec" v-if="db!=null">键列表 <span v-if="keysLoading">（扫描中…）</span>
+        <div class="rd-sec">键列表 <span v-if="keysLoading">（扫描中…）</span>
           <span v-else>（{{ keys.length }}{{ truncated ? '+，已截断' : '' }}）</span></div>
         <div v-if="db!=null && !keys.length && !keysLoading" class="rd-empty">（无匹配键）</div>
         <template v-for="n in keyNodes" :key="n.kind==='folder'?'f:'+n.path:'k:'+n.key">
           <div v-if="n.kind==='folder'" class="rd-item folder" :style="{paddingLeft: (8 + n.depth*14) + 'px'}"
-               @click="toggleFolder(n.path)">
+               @click="toggleFolder(n.path)" @contextmenu="openCtx($event,'folder',n.path)">
             <span class="tw">{{ n.open ? '▾' : '▸' }}</span><span class="ic">▸</span>
             <span class="nm">{{ n.name }}</span><span class="cnt">{{ n.count }}</span>
           </div>
           <div v-else class="rd-item key" :class="{on: sel===n.key}"
-               :style="{paddingLeft: (8 + n.depth*14) + 'px'}" @click="viewKey(n.key)">
+               :style="{paddingLeft: (8 + n.depth*14) + 'px'}" @click="viewKey(n.key)"
+               @contextmenu="openCtx($event,'key',n.key)">
             <span class="badge" :style="{background: tcolor(n.type)}">{{ n.type.toUpperCase() }}</span>
             <span class="nm" :title="n.key">{{ n.name }}</span>
           </div>
         </template>
+      </template>
+    </div>
+    <div v-if="ctx.show" class="rd-ctx" :style="{left: ctx.x + 'px', top: ctx.y + 'px'}" @click.stop>
+      <template v-if="ctx.kind==='key'">
+        <div class="mi" @click="ctxCopyKey">复制键名</div>
+        <div class="mi danger" @click="ctxDeleteKey">删除键</div>
+      </template>
+      <template v-else>
+        <div class="mi" @click="ctxCopyPrefix">复制前缀</div>
+        <div class="mi danger" @click="ctxDeleteFolder">删除该目录下所有键</div>
       </template>
     </div>
     <div class="rd-dbbar" v-if="db!=null">
@@ -450,9 +508,11 @@
                 <thead><tr>
                   <th>{{ keyView.type==='zset' ? '成员' : (keyView.type==='hash' ? '字段' : '#') }}</th>
                   <th>{{ keyView.type==='zset' ? '分值' : '内容' }}</th></tr></thead>
-                <tbody><tr v-for="(r,i) in keyRowsPaged" :key="i">
+                <tbody><tr v-for="(r,i) in keyRowsPaged" :key="i"
+                           :class="{on: selField && selField.k===r.k}" @click="selectField(r)">
                   <td class="rk">{{ r.k }}</td><td class="rv">{{ cellText(r.v) }}</td></tr></tbody>
               </table>
+              <div class="rd-hint2">点某行 → 右侧查看完整内容并格式化 JSON</div>
             </template>
           </template>
           <div v-else class="rd-empty">（点左侧键查看内容）</div>
@@ -488,17 +548,30 @@
 
   <div class="rd-vsplit" @mousedown="beginDrag($event,'doc')"></div>
   <aside class="rd-doc" :style="{width: docW + 'px'}">
-    <div class="rd-doc-hd">命令文档</div>
-    <div v-if="!doc" class="rd-empty">把光标放到某条命令上，这里显示它的文档</div>
-    <div v-else-if="doc.unknown" class="rd-empty">未收录命令：<b>{{ doc.unknown }}</b></div>
-    <div v-else class="rd-doc-body">
-      <div class="cmd">{{ docCmd }}</div>
-      <div class="grp">{{ doc.group }}</div>
-      <div class="sum">{{ doc.summary }}</div>
-      <div class="syn-hd">语法</div>
-      <pre class="syn">{{ doc.syntax }}</pre>
-      <a class="link" :href="doc.url" target="_blank" rel="noopener">在 redis.io 查看完整文档 →</a>
-    </div>
+    <!-- 键详情且选中了某行：字段详情面板（对标 Medis）；否则命令文档 -->
+    <template v-if="view==='key' && selField">
+      <div class="rd-doc-hd">字段详情</div>
+      <div class="rd-field">
+        <div class="fl">字段</div>
+        <div class="fv name">{{ selField.k }}</div>
+        <div class="fl">内容
+          <label class="fmt"><input type="checkbox" v-model="fmtJson"> 格式化 JSON</label></div>
+        <pre class="fv content">{{ formatValue(selField.v) }}</pre>
+      </div>
+    </template>
+    <template v-else>
+      <div class="rd-doc-hd">命令文档</div>
+      <div v-if="!doc" class="rd-empty">把光标放到某条命令上，这里显示它的文档</div>
+      <div v-else-if="doc.unknown" class="rd-empty">未收录命令：<b>{{ doc.unknown }}</b></div>
+      <div v-else class="rd-doc-body">
+        <div class="cmd">{{ docCmd }}</div>
+        <div class="grp">{{ doc.group }}</div>
+        <div class="sum">{{ doc.summary }}</div>
+        <div class="syn-hd">语法</div>
+        <pre class="syn">{{ doc.syntax }}</pre>
+        <a class="link" :href="doc.url" target="_blank" rel="noopener">在 redis.io 查看完整文档 →</a>
+      </div>
+    </template>
   </aside>
 
   <div v-if="toast" class="rd-toast">{{ toast }}</div>

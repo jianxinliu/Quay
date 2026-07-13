@@ -101,6 +101,29 @@
 .rd-err { padding: 12px; color: var(--dg-red); }
 .rd-pager { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
   border-bottom: 1px solid var(--dg-border); color: var(--dg-muted); font-size: 12.5px; }
+.rd-kt tr { cursor: pointer; }
+.rd-kt tr.on td { background: var(--dg-accent-soft); }
+.rd-hint2 { padding: 6px 12px; color: var(--dg-faint); font-size: 11.5px; }
+
+/* 键树右键菜单 */
+.rd-ctx { position: fixed; z-index: 300; background: var(--dg-panel); border: 1px solid var(--dg-border);
+  border-radius: 8px; padding: 4px; min-width: 168px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+.rd-ctx .mi { padding: 7px 12px; border-radius: 5px; cursor: pointer; font-size: 12.5px;
+  color: var(--dg-text); }
+.rd-ctx .mi:hover { background: var(--dg-hover); }
+.rd-ctx .mi.danger { color: var(--dg-red); }
+.rd-ctx .mi.danger:hover { background: rgba(217,83,79,.14); }
+
+/* 字段详情面板（右栏，键详情选中行时；对标 Medis） */
+.rd-field { padding: 12px; overflow: auto; }
+.rd-field .fl { color: var(--dg-faint); font-size: 11.5px; margin: 4px 0 3px;
+  display: flex; align-items: center; gap: 10px; }
+.rd-field .fl .fmt { color: var(--dg-muted); cursor: pointer; }
+.rd-field .fv.name { color: var(--dg-text); font-size: 13px; font-weight: 600; word-break: break-all;
+  margin-bottom: 8px; }
+.rd-field .fv.content { background: var(--dg-bg); border: 1px solid var(--dg-border); border-radius: 6px;
+  padding: 9px 11px; white-space: pre-wrap; word-break: break-word; color: var(--dg-text);
+  font-size: 12.5px; line-height: 1.5; max-height: calc(100vh - 130px); overflow: auto; }
 
 .rd-confirm { margin: 10px 12px; padding: 10px 12px; background: #2c2416;
   border: 1px solid var(--dg-amber); border-radius: 8px; }

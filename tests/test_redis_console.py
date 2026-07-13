@@ -65,14 +65,23 @@ class TestBrowse:
         assert val["fields"] == {"k1": "v1", "k2": "v2"}
         assert val["ttl"] == -1  # 永久
 
-    def test_binary_value_shown_as_hex_not_crash(self, service):
-        """二进制值（如 msgpack）不能让 UTF-8 解码崩，应转 BINARY HEX（对标 Medis）。"""
+    def test_non_msgpack_binary_shown_as_hex(self, service):
+        """非结构化二进制（既非 UTF-8 也非 msgpack 容器）→ BINARY HEX，不崩。"""
         import redis
         raw = redis.Redis(host="127.0.0.1", port=6379, db=TEST_DB)
-        raw.hset("bink", "f", b"\x88\xa7OfferId")  # 0x88 非法 UTF-8 起始字节
+        raw.hset("bink", "f", b"\xff\xfe\xfd\xfc")  # 任意二进制
         val = service.redis_value("local", "r", "bink", CALLER, db=TEST_DB)
         assert val["fields"]["f"].startswith("BINARY HEX ")
-        assert "88 A7" in val["fields"]["f"]
+
+    def test_msgpack_value_decoded_to_object(self, service):
+        """msgpack 编码的值应解码成对象（对标 Medis 的 JSON 展示）。"""
+        import msgpack
+        import redis
+        raw = redis.Redis(host="127.0.0.1", port=6379, db=TEST_DB)
+        packed = msgpack.packb({"OfferId": "admaven", "Cap": 2700}, use_bin_type=True)
+        raw.hset("mp", "admaven", packed)
+        val = service.redis_value("local", "r", "mp", CALLER, db=TEST_DB)
+        assert val["fields"]["admaven"] == {"OfferId": "admaven", "Cap": 2700}
 
 
 class TestCommandWindow:

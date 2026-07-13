@@ -265,14 +265,29 @@ def _hexdump(b: bytes) -> str:
     return "BINARY HEX " + " ".join(h[i:i + 2].upper() for i in range(0, len(h), 2))
 
 
+def _decode_bytes(b: bytes) -> Any:
+    """字节值智能解码：优先 UTF-8 文本；否则试 msgpack（仅当解出 dict/list 结构，
+    避免任意二进制被误判）→ 返回结构化对象（供 JSON 展示）；再否则回退 BINARY HEX。"""
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        import msgpack  # noqa: PLC0415  可选依赖，未装则跳过（回退 HEX）
+        obj = msgpack.unpackb(b, raw=False, strict_map_key=False)
+        if isinstance(obj, (dict, list)):   # 只认结构化，标量/误判一律按二进制
+            return obj
+    except Exception:  # noqa: BLE001  解码失败即非 msgpack，回退
+        pass
+    return _hexdump(b)
+
+
 def _jsonable(v: Any) -> Any:
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
     if isinstance(v, bytes):
-        try:
-            return v.decode("utf-8")
-        except UnicodeDecodeError:
-            return _hexdump(v)
+        decoded = _decode_bytes(v)
+        return _jsonable(decoded) if isinstance(decoded, (dict, list)) else decoded
     if isinstance(v, (list, tuple)):
         return [_jsonable(x) for x in v]
     if isinstance(v, dict):
