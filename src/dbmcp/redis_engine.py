@@ -42,14 +42,18 @@ class _PooledRedis:
 
 class RedisPool:
     def __init__(self, idle_reclaim_s: int = DEFAULT_IDLE_RECLAIM_S):
-        self._entries: dict[tuple[str, str, Role], _PooledRedis] = {}
+        # key 含 db 维度：Medis 式切库浏览时每个 (conn, role, db) 一个独立 client，
+        # 避免在共享 client 上 SELECT 造成并发竞态（db=None 表示用 cfg.database）。
+        self._entries: dict[tuple[str, str, Role, int], _PooledRedis] = {}
         self._lock = threading.Lock()
         self._idle_reclaim_s = idle_reclaim_s
 
     def get(
-        self, project: str, connection: str, cfg: ConnectionConfig, role: Role = "reader"
+        self, project: str, connection: str, cfg: ConnectionConfig,
+        role: Role = "reader", db: int | None = None,
     ) -> redis.Redis:
-        key = (project, connection, role)
+        eff_db = int(cfg.database or 0) if db is None else db
+        key = (project, connection, role, eff_db)
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None and (entry.tunnel is None or entry.tunnel.is_alive()):
@@ -58,7 +62,7 @@ class RedisPool:
             if entry is not None:
                 entry.dispose()
                 del self._entries[key]
-            entry = _build_client(cfg, role)
+            entry = _build_client(cfg, role, db=eff_db)
             self._entries[key] = entry
             return entry.client
 
@@ -91,7 +95,7 @@ def build_probe_client(cfg: ConnectionConfig, role: Role = "reader") -> _PooledR
     return _build_client(cfg, role)
 
 
-def _build_client(cfg: ConnectionConfig, role: Role) -> _PooledRedis:
+def _build_client(cfg: ConnectionConfig, role: Role, db: int | None = None) -> _PooledRedis:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host or "127.0.0.1", cfg.port or 6379
     if cfg.jump_hosts:
@@ -103,16 +107,18 @@ def _build_client(cfg: ConnectionConfig, role: Role) -> _PooledRedis:
         user, password = cfg.writer.user, resolve_secret(cfg.writer.password)
     else:
         user = cfg.user
+        # 无认证实例：password 引用为空 → None（redis-py 不发 AUTH）
         password = resolve_secret(cfg.password) if cfg.password else None
 
+    eff_db = int(cfg.database or 0) if db is None else db
     timeout = cfg.policy.statement_timeout_s
     try:
         client = redis.Redis(
             host=host,
             port=port,
-            db=int(cfg.database or 0),
+            db=eff_db,
             username=user,
-            password=password,
+            password=password or None,
             decode_responses=True,
             socket_connect_timeout=5,
             socket_timeout=timeout,
@@ -133,6 +139,109 @@ def run_command(
     value = client.execute_command(*parts)
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
     return RedisResult(value=_truncate(_jsonable(value), max_cell_chars), duration_ms=duration_ms)
+
+
+# ---------- Medis 式浏览（只读探测，不经审批）----------
+
+def keyspace_dbs(client: redis.Redis) -> list[dict]:
+    """`INFO keyspace` 解析出有数据的库（redis 只在有键时才列 dbN）。
+
+    返回 [{"db": 0, "keys": 12, "expires": 3}, ...]，按库号升序。空库不出现。
+    """
+    info = client.info("keyspace")  # {'db0': {'keys': 12, 'expires': 3, 'avg_ttl': 0}, ...}
+    out = []
+    for name, stats in info.items():
+        if not name.startswith("db"):
+            continue
+        try:
+            idx = int(name[2:])
+        except ValueError:
+            continue
+        keys = int(stats.get("keys", 0)) if isinstance(stats, dict) else 0
+        if keys <= 0:
+            continue
+        out.append({"db": idx, "keys": keys,
+                    "expires": int(stats.get("expires", 0)) if isinstance(stats, dict) else 0})
+    return sorted(out, key=lambda d: d["db"])
+
+
+def scan_keys(
+    client: redis.Redis, pattern: str = "*", max_keys: int = 2000, scan_count: int = 500,
+) -> dict:
+    """SCAN 出至多 max_keys 个键并逐键取类型（pipeline）。
+
+    返回 {"keys": [{"key": k, "type": t}, ...], "truncated": bool}。
+    用 SCAN 而非 KEYS：不阻塞 redis、可增量；超过上限即截断并标记。
+    """
+    names: list[str] = []
+    cursor = 0
+    truncated = False
+    while True:
+        cursor, batch = client.scan(cursor=cursor, match=pattern or "*", count=scan_count)
+        names.extend(batch)
+        if len(names) >= max_keys:
+            names = names[:max_keys]
+            truncated = truncated or cursor != 0
+            break
+        if cursor == 0:
+            break
+    if not names:
+        return {"keys": [], "truncated": truncated}
+    pipe = client.pipeline(transaction=False)
+    for k in names:
+        pipe.type(k)
+    types = pipe.execute()
+    keys = [{"key": k, "type": (t if isinstance(t, str) else str(t))}
+            for k, t in zip(names, types, strict=False)]
+    keys.sort(key=lambda d: d["key"])
+    return {"keys": keys, "truncated": truncated}
+
+
+def read_value(client: redis.Redis, key: str, max_cell_chars: int = 4096,
+               max_items: int = 1000) -> dict:
+    """按类型取键值 + 元信息（TTL / 内存 / 编码），对标 Medis 键详情面板。
+
+    string → {"value": s}；hash → {"fields": {f: v}}；list → {"items": [...]}；
+    set → {"members": [...]}；zset → {"members": [{"member","score"}]}。
+    """
+    ktype = client.type(key)
+    if ktype == "none":
+        raise KeyError(f"键 {key!r} 不存在")
+
+    ttl = client.ttl(key)  # -1 永久、-2 不存在
+    try:
+        encoding = client.object("encoding", key)
+    except Exception:
+        encoding = None
+    try:
+        mem = client.memory_usage(key)
+    except Exception:
+        mem = None
+
+    detail: dict = {"key": key, "type": ktype, "ttl": ttl, "encoding": encoding,
+                    "memory_bytes": mem}
+    if ktype == "string":
+        detail["value"] = _truncate(_jsonable(client.get(key)), max_cell_chars)
+    elif ktype == "hash":
+        h = client.hgetall(key)
+        detail["fields"] = {k: _truncate(_jsonable(v), max_cell_chars) for k, v in h.items()}
+        detail["length"] = client.hlen(key)
+    elif ktype == "list":
+        detail["items"] = [_truncate(_jsonable(v), max_cell_chars)
+                           for v in client.lrange(key, 0, max_items - 1)]
+        detail["length"] = client.llen(key)
+    elif ktype == "set":
+        members = list(client.sscan_iter(key, count=max_items))[:max_items]
+        detail["members"] = [_truncate(_jsonable(v), max_cell_chars) for v in members]
+        detail["length"] = client.scard(key)
+    elif ktype == "zset":
+        pairs = client.zrange(key, 0, max_items - 1, withscores=True)
+        detail["members"] = [{"member": _truncate(_jsonable(m), max_cell_chars), "score": s}
+                             for m, s in pairs]
+        detail["length"] = client.zcard(key)
+    else:
+        detail["value"] = f"（暂不支持的类型：{ktype}）"
+    return detail
 
 
 def _truncate(v: Any, max_chars: int) -> Any:

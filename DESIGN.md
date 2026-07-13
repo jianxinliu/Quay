@@ -157,7 +157,7 @@ agent 调 execute(conn, sql, reason?, change_id?)
 | `execute(project, connection, sql, reason?, change_id?)` | 统一入口，走完整审计+授权流程；批准后带 change_id 重提放行（见第六节） |
 | `get_change_status(change_id)` | 查询审批单状态 |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
-| `redis_command(project, connection, command, reason?, change_id?)` | Redis 命令入口，同样走命令分类+授权 |
+（Redis **不暴露为 MCP 工具**，仅供人通过 /admin/redis 管理后台操作）|
 | `test_connection(project, connection)` | 连通性检查（含隧道建立） |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` / `run_workflow` | 分析工作台（见第十二节与 ANALYSIS.md） |
 

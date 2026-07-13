@@ -72,10 +72,14 @@ class DbmService:
     # ---------- 元信息 ----------
 
     def list_projects(self) -> list[dict]:
-        return [
-            {"project": name, "connections": sorted(proj.connections)}
-            for name, proj in sorted(self.config.projects.items())
-        ]
+        # 对 agent 隐藏 Redis 连接（Redis 只供人通过 /admin/redis 操作）；
+        # 只剩 Redis 连接的项目也不出现
+        out = []
+        for name, proj in sorted(self.config.projects.items()):
+            conns = sorted(n for n, c in proj.connections.items() if c.engine != "redis")
+            if conns:
+                out.append({"project": name, "connections": conns})
+        return out
 
     def list_connections(self, project: str) -> list[dict]:
         proj = self.config.projects.get(project)
@@ -94,7 +98,8 @@ class DbmService:
                    if c.engine in ("mysql", "postgres") and not c.database else {}),
                 # 有意不返回 user/password/writer 等账号信息
             }
-            for name, c in sorted(proj.connections.items())
+            # Redis 有意不返回：agent 碰不到 Redis
+            for name, c in sorted(proj.connections.items()) if c.engine != "redis"
         ]
 
     # ---------- 查询 ----------
@@ -713,32 +718,68 @@ class DbmService:
 
         return provider
 
-    # ---------- Redis（同一套拒绝—重提审批流）----------
+    # ---------- Redis 浏览 / 命令窗口（管理后台，对标 Medis）----------
 
-    def redis_execute(
-        self,
-        project: str,
-        connection: str,
-        command: str,
-        caller: CallerInfo,
-        reason: str = "",
-        change_id: int | None = None,
-    ) -> dict:
-        """Redis 命令统一入口：读命令直通；写命令走审批（与 SQL 相同的流程）。"""
+    def _redis_cfg(self, project: str, connection: str) -> ConnectionConfig:
         cfg = self.config.get_connection(project, connection)
         if cfg.engine != "redis":
-            raise QueryRejected(f"连接 {project}/{connection} 引擎为 {cfg.engine}，请用 query/execute")
-        if self.approvals is None:
-            raise QueryRejected("审批子系统未启用，无法执行 Redis 写命令")
+            raise QueryRejected(f"连接 {project}/{connection} 引擎为 {cfg.engine}，不是 Redis")
+        return cfg
 
+    def redis_databases(self, project: str, connection: str, caller: CallerInfo) -> list[dict]:
+        """列出有数据的库（INFO keyspace，空库不出现）。对标 Medis 左侧库列表。"""
+        cfg = self._redis_cfg(project, connection)
+        return self._audited(
+            project, connection, cfg, "redis_keyspace", "", caller,
+            lambda: redis_engine.keyspace_dbs(self.redis_pool.get(project, connection, cfg)))
+
+    def redis_keys(
+        self, project: str, connection: str, caller: CallerInfo,
+        db: int | None = None, pattern: str = "*", max_keys: int = 2000,
+    ) -> dict:
+        cfg = self._redis_cfg(project, connection)
+        detail = f"db={db if db is not None else ''} match={pattern}"
+        return self._audited(
+            project, connection, cfg, "redis_scan", detail, caller,
+            lambda: redis_engine.scan_keys(
+                self.redis_pool.get(project, connection, cfg, db=db),
+                pattern=pattern or "*", max_keys=max_keys))
+
+    def redis_value(
+        self, project: str, connection: str, key: str, caller: CallerInfo,
+        db: int | None = None,
+    ) -> dict:
+        cfg = self._redis_cfg(project, connection)
+        detail = f"db={db if db is not None else ''} key={key}"
+        return self._audited(
+            project, connection, cfg, "redis_read", detail, caller,
+            lambda: redis_engine.read_value(
+                self.redis_pool.get(project, connection, cfg, db=db), key,
+                max_cell_chars=cfg.policy.max_cell_chars))
+
+    def admin_redis_run(
+        self, project: str, connection: str, command: str, caller: CallerInfo,
+        confirm: bool = False, db: int | None = None,
+    ) -> dict:
+        """后台命令窗口专用入口（对标 admin_run_sql 的 Redis 版）。
+
+        - 读命令：直通 reader 出结果。
+        - 写命令 + confirm=False：返回风险报告，不执行。
+        - 写命令 + confirm=True：writer（无 writer 则 reader）直接执行并审计（tool=admin_execute）。
+          Redis 只供人通过后台操作（不暴露给 agent），故无 agent 侧审批流。
+        """
+        cfg = self._redis_cfg(project, connection)
         verdict = classify_command(command)
-        rec = self._base_record(project, connection, cfg, "redis_command", command, caller)
-        rec.fingerprint = command_fingerprint(command)
+        parts = parse_command(command)
 
         if verdict.readonly:
+            rec = self._base_record(project, connection, cfg, "redis_command", command, caller)
+            rec.fingerprint = command_fingerprint(command)
+            if db is not None:
+                rec.detail = f"db={db}"
             try:
-                client = self.redis_pool.get(project, connection, cfg)
-                result = redis_engine.run_command(client, parse_command(command),
+                client = self.redis_pool.get(project, connection, cfg, db=db)
+                result = redis_engine.run_command(client, parts,
                                                   max_cell_chars=cfg.policy.max_cell_chars)
             except Exception as e:
                 rec.status = "error"
@@ -748,60 +789,20 @@ class DbmService:
             rec.status = "ok"
             rec.duration_ms = result.duration_ms
             self.store.record(rec)
-            return {"status": "executed", "readonly": True, "value": result.value,
-                    "duration_ms": result.duration_ms}
+            return {"kind": "read", "readonly": True, "command": verdict.command,
+                    "value": result.value, "duration_ms": result.duration_ms}
 
-        if change_id is not None:
-            return self._redis_execute_approved(project, connection, cfg, command, change_id, caller)
+        if not confirm:
+            return {"kind": "confirm", "statement_kind": f"Redis:{verdict.command}",
+                    "risk": {"level": verdict.level, "statement_kind": f"Redis:{verdict.command}",
+                             "tables": [], "reasons": [verdict.reason], "warnings": []}}
 
-        # 生成审批单并拒绝
-        report = {
-            "level": verdict.level,
-            "statement_kind": f"Redis:{verdict.command}",
-            "tables": [],
-            "reasons": [verdict.reason],
-            "warnings": [],
-        }
-        change = self.approvals.create(
-            project=project, connection=connection, environment=cfg.environment,
-            engine="redis", sql=command, fingerprint=command_fingerprint(command),
-            reason=reason, risk_level=verdict.level, risk_report=report,
-            agent=caller.agent, session_id=caller.session_id,
-        )
-        rec.status = "rejected"
-        rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {verdict.level}）"
-        self.store.record(rec)
-        return {
-            "status": "approval_required",
-            "change_id": change.id,
-            "risk": report,
-            "message": (
-                f"Redis 写命令需人工授权（风险 {verdict.level}）。已生成审批单 #{change.id}，"
-                f"请通知用户审批；批准后带 change_id={change.id} 重提相同命令。30 分钟内有效。"
-            ),
-        }
-
-    def _redis_execute_approved(
-        self, project: str, connection: str, cfg: ConnectionConfig,
-        command: str, change_id: int, caller: CallerInfo,
-    ) -> dict:
-        rec = self._base_record(project, connection, cfg, "redis_command", command, caller)
+        rec = self._base_record(project, connection, cfg, "admin_execute", command, caller)
         rec.fingerprint = command_fingerprint(command)
+        role = "writer" if cfg.writer is not None else "reader"
         try:
-            change = self.approvals.consume(
-                change_id, command_fingerprint(command), (project, connection)
-            )
-        except ApprovalError as e:
-            rec.status = "rejected"
-            rec.detail = str(e)
-            self.store.record(rec)
-            return {"status": "rejected", "change_id": change_id, "reason": str(e)}
-
-        try:
-            # 执行审批单存储的命令；配置了 writer（Redis ACL）则用 writer
-            role = "writer" if cfg.writer is not None else "reader"
-            client = self.redis_pool.get(project, connection, cfg, role=role)
-            result = redis_engine.run_command(client, parse_command(change.sql),
+            client = self.redis_pool.get(project, connection, cfg, role=role, db=db)
+            result = redis_engine.run_command(client, parts,
                                               max_cell_chars=cfg.policy.max_cell_chars)
         except Exception as e:
             rec.status = "error"
@@ -809,11 +810,11 @@ class DbmService:
             self.store.record(rec)
             raise
         rec.status = "ok"
-        rec.detail = f"审批单 #{change_id} 已核销（审批人 {change.decided_by}）"
+        rec.detail = "后台命令窗口直接执行（已二次确认）" + (f" db={db}" if db is not None else "")
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
-        return {"status": "executed", "change_id": change_id, "value": result.value,
-                "duration_ms": result.duration_ms}
+        return {"kind": "write", "command": verdict.command,
+                "value": result.value, "duration_ms": result.duration_ms}
 
     # ---------- 审批决策（管理后台 / elicitation 调用）----------
 
@@ -991,14 +992,15 @@ class DbmService:
 
         password = fields.get("password") or None
         eff_pw = f"plain://{password}" if password else existing_password
-        if eff_pw is None and fields.get("engine") not in ("sqlite",):
+        # sqlite 无账号；redis 允许无认证（本地无 auth 实例）——都不强制填密码
+        if eff_pw is None and fields.get("engine") not in ("sqlite", "redis"):
             from .probe import ProbeResult
             return ProbeResult(ok=False, message="请填写密码后再测试")
         cfg = ConnectionConfig(
             engine=fields["engine"], environment=fields.get("environment", "dev"),
             host=fields.get("host") or None, port=fields.get("port"),
             database=fields.get("database") or None, user=fields.get("user") or None,
-            password=eff_pw or "plain://", jump_hosts=fields.get("jump_hosts", []),
+            password=eff_pw, jump_hosts=fields.get("jump_hosts", []),
             ssh_options=fields.get("ssh_options", []),
             policy=Policy(max_rows=fields.get("max_rows", 500)),
         )

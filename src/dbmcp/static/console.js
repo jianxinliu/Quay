@@ -388,7 +388,9 @@
         return { height: this.editorH + "px" };
       },
       connOptions: function () {
-        var opts = [{ value: "", label: "选择连接…", env: "" }].concat(this.connections.map(function (c) {
+        // Redis 连接走独立的 /admin/redis 控制台，不在 SQL 查询台里
+        var sqlConns = this.connections.filter(function (c) { return c.engine !== "redis"; });
+        var opts = [{ value: "", label: "选择连接…", env: "" }].concat(sqlConns.map(function (c) {
           return { value: c.value, label: c.connection + " · " + c.engine, env: c.environment || "" };
         }));
         return opts.concat(this.workspaces.map(function (w) {

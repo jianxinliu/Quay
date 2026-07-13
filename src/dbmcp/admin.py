@@ -152,6 +152,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  .nico-approve{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 13.5 3.5v4c0 3.2-2.3 5.8-5.5 7-3.2-1.2-5.5-3.8-5.5-7v-4z' fill='none' stroke='%2356d364' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.8 6' fill='none' stroke='%2356d364' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}}
  .nico-audit{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3.5h8M2 8h6M2 12.5h5' stroke='%23e8b339' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='11.5' cy='10.5' r='3' fill='none' stroke='%23e8b339' stroke-width='1.5'/%3E%3Cpath d='M11.5 9v1.7l1.2.8' fill='none' stroke='%23e8b339' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E")}}
  .nico-conn{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%236f9be8'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3C/svg%3E")}}
+ .nico-redis{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 14 4 8 6.5 2 4z' fill='%23d9534f'/%3E%3Cpath d='M2 7.5 8 10l6-2.5' fill='none' stroke='%23d9534f' stroke-width='1.5' stroke-linejoin='round'/%3E%3Cpath d='M2 11 8 13.5 14 11' fill='none' stroke='%23d9534f' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E")}}
  .nav-count{{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
    min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}}
  .pending-banner{{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
@@ -250,6 +251,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
   <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
   <nav>
    <a href="/admin/sql"><span class="nico nico-sql"></span>查询台</a>
+   <a href="/admin/redis"><span class="nico nico-redis"></span>Redis</a>
    <a href="/admin/approvals"><span class="nico nico-approve"></span>审批中心{nav_badge}</a>
    <a href="/admin/audit"><span class="nico nico-audit"></span>操作审计</a>
    <a href="/admin/connections"><span class="nico nico-conn"></span>连接管理</a>
@@ -580,6 +582,18 @@ def _console_body() -> str:
         '<script src="/admin/static/echarts.min.js"></script>'
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         '<script src="/admin/static/console.js"></script>'
+    )
+
+
+def _redis_body() -> str:
+    """Redis 控制台页面（对标 Medis）：复用 console.css 外壳 + redis.css 布局，逻辑在 redis.js。"""
+    return (
+        '<link rel="stylesheet" href="/admin/static/console.css">'
+        '<link rel="stylesheet" href="/admin/static/redis.css">'
+        '<div id="dbm-redis"></div>'
+        '<script src="/admin/static/vue.global.prod.js"></script>'
+        '<script src="/admin/static/monaco/vs/loader.js"></script>'
+        '<script src="/admin/static/redis.js"></script>'
     )
 
 
@@ -1173,6 +1187,92 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
+
+    # ---------- Redis 浏览 / 命令窗口（对标 Medis）----------
+
+    def _db_param(raw: str | None) -> int | None:
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    @mcp.custom_route("/admin/redis/databases", methods=["GET"])
+    @guard
+    async def _redis_databases(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            dbs = await anyio.to_thread.run_sync(
+                service.redis_databases, project, connection, _caller(req))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, "databases": dbs})
+
+    @mcp.custom_route("/admin/redis/keys", methods=["GET"])
+    @guard
+    async def _redis_keys(req: Request) -> JSONResponse:
+        db = _db_param(req.query_params.get("db"))
+        pattern = req.query_params.get("pattern") or "*"
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.redis_keys, project, connection, _caller(req), db, pattern)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/redis/value", methods=["GET"])
+    @guard
+    async def _redis_value(req: Request) -> JSONResponse:
+        db = _db_param(req.query_params.get("db"))
+        key = req.query_params.get("key", "")
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.redis_value, project, connection, key, _caller(req), db)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/redis/run", methods=["POST"])
+    @guard
+    async def _redis_run(req: Request) -> JSONResponse:
+        f = await req.form()
+        db = _db_param(str(f.get("db") or "") or None)
+        confirm = str(f.get("confirm") or "") in ("1", "true", "on", "yes")
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            out = await anyio.to_thread.run_sync(
+                service.admin_redis_run, project, connection,
+                str(f.get("command") or ""), _caller(req), confirm, db)
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/redis/command-doc", methods=["GET"])
+    @guard
+    async def _redis_command_doc(req: Request) -> JSONResponse:
+        from .redis_docs import lookup
+        doc = lookup(req.query_params.get("cmd", ""))
+        return JSONResponse({"ok": True, "doc": doc})
+
+    @mcp.custom_route("/admin/redis/connections", methods=["GET"])
+    @guard
+    async def _redis_connections(_req: Request) -> JSONResponse:
+        conns = []
+        for pname, proj in sorted(service.config.projects.items()):
+            for cname, c in sorted(proj.connections.items()):
+                if c.engine != "redis":
+                    continue
+                conns.append({"value": f"{pname}/{cname}", "project": pname, "connection": cname,
+                              "environment": c.environment or ""})
+        return JSONResponse({"ok": True, "connections": conns})
+
+    @mcp.custom_route("/admin/redis", methods=["GET"])
+    @guard
+    async def _redis_console(_req: Request) -> HTMLResponse:
+        return _shell("Redis", _redis_body())
 
     @mcp.custom_route("/admin/workflows", methods=["GET"])
     @guard
