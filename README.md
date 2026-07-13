@@ -64,6 +64,20 @@ bash scripts/install-launchd.sh --uninstall
 tail -f ~/Library/Logs/db-manage-mcp.log
 ```
 
+### 双击启动（生成 macOS .app）
+
+不想记命令行的话，生成一个可双击的 `.app`：双击即确保服务已起（装了 launchd 就拉起、
+没装就直接后台启动），等端口就绪后用默认浏览器打开管理后台。
+
+```bash
+bash scripts/build-app.sh                 # 生成 ./db-manage-mcp.app
+bash scripts/build-app.sh ~/Applications  # 放进启动台/Spotlight（推荐）
+```
+
+本地构建无 quarantine 标记，双击不触发 Gatekeeper（无需签名/公证）。想要自定义图标，
+把 1024×1024 的 PNG 存成 `scripts/app-icon.png` 再重跑。**仓库整体搬家后需重跑**
+（PROJECT_DIR 在构建时写死）。
+
 ## MCP 工具
 
 | 工具 | 说明 |
