@@ -343,6 +343,7 @@
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300,
+        theme: "dark",          // 系统设置：dark | light（浅色主题）
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
       };
     },
@@ -1898,7 +1899,8 @@
         });
         var active = models.get(this.activeId) || (this.tabs[0] && models.get(this.tabs[0].id)) || null;
         editor = monaco.editor.create(this.$refs.editorEl, {
-          model: active, language: "sql", theme: "vs-dark", automaticLayout: true,
+          model: active, language: "sql",
+          theme: this.theme === "light" ? "vs" : "vs-dark", automaticLayout: true,
           fontSize: 13, minimap: { enabled: true }, scrollBeyondLastLine: false, tabSize: 2,
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
@@ -2017,6 +2019,11 @@
         this.editorReady = true;
       },
     },
+    watch: {
+      theme: function (v) {
+        if (window.monaco) window.monaco.editor.setTheme(v === "light" ? "vs" : "vs-dark");
+      }
+    },
     mounted: function () {
       var self = this;
       this.restore();
@@ -2024,6 +2031,9 @@
       this.tabs.forEach(function (t) {
         if (t.jobId) self.pollJob(t.id, t.jobId, t.jobPage || 0);
       });
+      apiGet("/admin/settings/get").then(function (d) {
+        if (d && d.ok && d.settings) self.theme = d.settings.theme || "dark";
+      }).catch(function () {});
       this.loadConnections().then(function () { self.loadSnippets(); });
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
@@ -2043,7 +2053,7 @@
       if (at && at.view === "chart" && at.result) this.renderChart();
     },
     template: `
-<div class="dg-root" :class="{'env-prod': isProd, 'env-staging': isStaging}">
+<div class="dg-root" :class="{'env-prod': isProd, 'env-staging': isStaging, 'theme-light': theme==='light'}">
   <aside class="dg-left" :style="{width: leftW + 'px'}">
     <div class="dg-conn" :class="{'env-prod': isProd, 'env-staging': isStaging}">
       <dg-select :model-value="activeTab ? activeTab.conn : ''" :options="connOptions"

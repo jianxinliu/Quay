@@ -152,7 +152,8 @@ def _page(title: str, body: str, pending: int = 0) -> str:
  .nico-approve{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 13.5 3.5v4c0 3.2-2.3 5.8-5.5 7-3.2-1.2-5.5-3.8-5.5-7v-4z' fill='none' stroke='%2356d364' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.8 6' fill='none' stroke='%2356d364' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}}
  .nico-audit{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3.5h8M2 8h6M2 12.5h5' stroke='%23e8b339' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='11.5' cy='10.5' r='3' fill='none' stroke='%23e8b339' stroke-width='1.5'/%3E%3Cpath d='M11.5 9v1.7l1.2.8' fill='none' stroke='%23e8b339' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E")}}
  .nico-conn{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%236f9be8'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3C/svg%3E")}}
- .nico-redis{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 14 4 8 6.5 2 4z' fill='%23d9534f'/%3E%3Cpath d='M2 7.5 8 10l6-2.5' fill='none' stroke='%23d9534f' stroke-width='1.5' stroke-linejoin='round'/%3E%3Cpath d='M2 11 8 13.5 14 11' fill='none' stroke='%23d9534f' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E")}}
+ .nico-redis{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2.5 13 4 8 5.5 3 4Z' fill='%23d9534f'/%3E%3Cpath d='M8 6.5 13 8 8 9.5 3 8Z' fill='%23d9534f'/%3E%3Cpath d='M8 10.5 13 12 8 13.5 3 12Z' fill='%23d9534f'/%3E%3C/svg%3E")}}
+ .nico-settings{{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='2.2' fill='none' stroke='%23aab2c0' stroke-width='1.5'/%3E%3Cpath d='M8 1.3v2.2M8 12.5v2.2M14.7 8h-2.2M3.5 8H1.3M12.7 3.3l-1.6 1.6M4.9 11.1l-1.6 1.6M12.7 12.7l-1.6-1.6M4.9 4.9 3.3 3.3' stroke='%23aab2c0' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E")}}
  .nav-count{{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
    min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}}
  .pending-banner{{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
@@ -255,6 +256,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
    <a href="/admin/approvals"><span class="nico nico-approve"></span>审批中心{nav_badge}</a>
    <a href="/admin/audit"><span class="nico nico-audit"></span>操作审计</a>
    <a href="/admin/connections"><span class="nico nico-conn"></span>连接管理</a>
+   <a href="/admin/settings"><span class="nico nico-settings"></span>系统设置</a>
   </nav>
   <div class="foot"><a href="/admin/logout">退出登录</a></div>
  </aside>
@@ -595,6 +597,52 @@ def _redis_body() -> str:
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         '<script src="/admin/static/redis.js"></script>'
     )
+
+
+def _settings_body(s: dict) -> str:
+    """系统设置页：主题 + Redis 分页/键加载上限。服务端持久化，作用于查询台与 Redis 控制台。"""
+    def sel(v: str) -> str:
+        return " selected" if s.get("theme") == v else ""
+    return f"""
+{_pagehead("Settings", "系统设置", "界面偏好，服务端保存、跨浏览器一致；作用于查询台与 Redis 控制台")}
+<div class="card" style="max-width:560px">
+  <form id="settings-form">
+    <div style="margin-bottom:16px">
+      <label>界面主题</label>
+      <select name="theme" style="width:200px">
+        <option value="dark"{sel("dark")}>深色（默认）</option>
+        <option value="light"{sel("light")}>浅色</option>
+      </select>
+      <div class="muted" style="margin-top:4px">作用于查询台与 Redis 控制台的深色 IDE 界面。</div>
+    </div>
+    <div style="margin-bottom:16px">
+      {_field("Redis 结果每页行数", "redis_page_size", s.get("redis_page_size", 100),
+              ph="100", typ="number", width="200px")}
+      <div class="muted" style="margin-top:4px">Redis 键详情（hash/list/set/zset）与命令结果分页大小。</div>
+    </div>
+    <div style="margin-bottom:16px">
+      {_field("Redis 键列表加载上限", "redis_key_limit", s.get("redis_key_limit", 1000),
+              ph="1000", typ="number", width="200px")}
+      <div class="muted" style="margin-top:4px">左侧键树 SCAN 一次最多加载的键数量。</div>
+    </div>
+    <button class="btn btn-primary" type="submit">保存</button>
+    <span id="settings-msg" class="muted" style="margin-left:12px"></span>
+  </form>
+</div>
+<script>
+document.getElementById('settings-form').addEventListener('submit', async function(e) {{
+  e.preventDefault();
+  var fd = new FormData(e.target);
+  var msg = document.getElementById('settings-msg');
+  msg.textContent = '保存中…';
+  try {{
+    var resp = await fetch('/admin/settings/save', {{ method: 'POST', body: fd }});
+    var data = await resp.json();
+    msg.textContent = data.ok ? '✓ 已保存（重新打开查询台/Redis 生效）' : ('保存失败：' + data.error);
+  }} catch (err) {{ msg.textContent = '保存失败：' + err; }}
+}});
+</script>
+"""
 
 
 def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None:
@@ -1273,6 +1321,32 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @guard
     async def _redis_console(_req: Request) -> HTMLResponse:
         return _shell("Redis", _redis_body())
+
+    # ---------- 系统设置 ----------
+
+    @mcp.custom_route("/admin/settings/get", methods=["GET"])
+    @guard
+    async def _settings_get(_req: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "settings": service.get_settings()})
+
+    @mcp.custom_route("/admin/settings/save", methods=["POST"])
+    @guard
+    async def _settings_save(req: Request) -> JSONResponse:
+        f = await req.form()
+        updates = {}
+        for key in ("theme", "redis_page_size", "redis_key_limit"):
+            if key in f:
+                updates[key] = str(f.get(key))
+        try:
+            settings = service.save_settings(updates)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "settings": settings})
+
+    @mcp.custom_route("/admin/settings", methods=["GET"])
+    @guard
+    async def _settings_page(_req: Request) -> HTMLResponse:
+        return _shell("系统设置", _settings_body(service.get_settings()))
 
     @mcp.custom_route("/admin/workflows", methods=["GET"])
     @guard

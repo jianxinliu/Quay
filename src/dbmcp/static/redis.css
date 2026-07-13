@@ -99,6 +99,8 @@
 .rd-kt td.rk { color: #8fb8f0; white-space: nowrap; width: 1%; }
 .rd-kt tr:hover td { background: var(--dg-hover); }
 .rd-err { padding: 12px; color: var(--dg-red); }
+.rd-pager { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+  border-bottom: 1px solid var(--dg-border); color: var(--dg-muted); font-size: 12.5px; }
 
 .rd-confirm { margin: 10px 12px; padding: 10px 12px; background: #2c2416;
   border: 1px solid var(--dg-amber); border-radius: 8px; }
@@ -132,33 +134,39 @@
 .rd-toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
   background: #000a; color: #fff; padding: 9px 16px; border-radius: 8px; font-size: 13px; z-index: 200; }
 
-/* ---------- 可读性：整体提亮 + 增大字号（原深色主题部分小字太淡看不清） ---------- */
-.rd-root { font-size: 13px; color: #ced1d6; }
-.rd-sec { color: #9aa0aa; font-size: 12px; }
-.rd-empty { color: #8f95a0; font-size: 12.5px; }
+/* ---------- 可读性：字号提升（主题无关）+ 用变量的文字色 ---------- */
+.rd-root { font-size: 13px; color: var(--dg-text); }
+.rd-sec { font-size: 12px; }
+.rd-empty { font-size: 12.5px; }
 .rd-item { font-size: 13px; }
-.rd-item .nm { color: #d3d6db; }
-.rd-item.folder .nm { color: #c3c7cd; }
-.rd-item .cnt, .rd-db .cnt { color: #9aa0aa; font-size: 12px; }
+.rd-item .nm { color: var(--dg-text); }
+.rd-item.folder .nm { color: var(--dg-text); }
+.rd-item .cnt, .rd-db .cnt { font-size: 12px; }
 .rd-db { font-size: 13px; }
-.rd-db .nm { color: #d3d6db; }
-.rd-conn select, .rd-dbbar select, .rd-search input { font-size: 13px; color: #d3d6db; }
-.rd-cmdbar .ttl { font-size: 13.5px; color: #e2e4e8; }
-.rd-cmdbar .hint { color: #9aa0aa; font-size: 12px; }
+.rd-db .nm { color: var(--dg-text); }
+.rd-conn select, .rd-dbbar select, .rd-search input { font-size: 13px; }
+.rd-cmdbar .ttl { font-size: 13.5px; color: var(--dg-text); }
+.rd-cmdbar .hint { font-size: 12px; }
 .rd-tabs .t { font-size: 13px; }
-.rd-tabs .t.on { color: #e2e4e8; }
-.rd-keymeta, .rd-resmeta { color: #b9bdc5; font-size: 12.5px; }
-.rd-keymeta .kn { color: #eef0f3; }
-.rd-strval { font-size: 13px; color: #d6d9de; }
+.rd-keymeta, .rd-resmeta { font-size: 12.5px; }
+.rd-strval { font-size: 13px; }
 .rd-kt { font-size: 12.5px; }
-.rd-kt th { color: #9aa0aa; font-size: 12px; }
-.rd-kt td { color: #d3d6db; }
-.rd-kt td.rk { color: #9cc2f5; }
+.rd-kt th { font-size: 12px; }
 .badge { font-size: 10px; }
-.rd-dbbar { color: #9aa0aa; font-size: 12.5px; }
-.rd-doc-hd { color: #c8ccd2; font-size: 13px; }
+.rd-dbbar { font-size: 12.5px; }
+.rd-doc-hd { font-size: 13px; }
 .rd-doc-body .grp { font-size: 12px; }
-.rd-doc-body .sum { color: #dadde2; font-size: 13.5px; line-height: 1.65; }
-.rd-doc-body .syn-hd { color: #9aa0aa; font-size: 12px; }
-.rd-doc-body .syn { font-size: 12.5px; color: #9cc2f5; }
+.rd-doc-body .sum { font-size: 13.5px; line-height: 1.65; }
+.rd-doc-body .syn-hd { font-size: 12px; }
+.rd-doc-body .syn { font-size: 12.5px; }
 .rd-doc-body .link { font-size: 12.5px; }
+
+/* 深色主题下把偏暗的辅助文字提亮（浅色主题走 --dg-* 变量即可，无需此提亮）。 */
+.rd-root:not(.theme-light) {
+  --dg-text: #ced1d6; --dg-muted: #9aa0aa; --dg-faint: #8b909a;
+}
+.rd-root:not(.theme-light) .rd-keymeta .kn,
+.rd-root:not(.theme-light) .rd-tabs .t.on { color: #eef0f3; }
+.rd-root:not(.theme-light) .rd-kt td { color: #d3d6db; }
+.rd-root:not(.theme-light) .rd-kt td.rk,
+.rd-root:not(.theme-light) .rd-doc-body .syn { color: #9cc2f5; }

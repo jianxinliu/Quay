@@ -60,6 +60,8 @@
         view: "result",               // result | key —— 主区展示命令结果还是键详情
         editorReady: false, toast: "",
         leftW: 300, docW: 300, editorH: 200,
+        theme: "dark", pageSize: 100, // 系统设置：主题 + 结果每页行数
+        keyPage: 0, cmdPage: 0,       // 键详情 / 命令结果分页页码
       };
     },
     computed: {
@@ -101,6 +103,24 @@
           });
         })(root, "", 0);
         return out;
+      },
+      // 结果分页（默认每页 pageSize 行，来自系统设置）
+      keyRowsAll: function () { return this.keyView ? this.kvRows(this.keyView) : []; },
+      keyRowsPaged: function () {
+        var s = this.keyPage * this.pageSize; return this.keyRowsAll.slice(s, s + this.pageSize);
+      },
+      keyPageCount: function () {
+        return Math.max(1, Math.ceil(this.keyRowsAll.length / this.pageSize));
+      },
+      cmdRowsAll: function () {
+        return this.cmdResult ? this.resultRows(this.cmdResult.value) : null;
+      },
+      cmdRowsPaged: function () {
+        if (!this.cmdRowsAll) return null;
+        var s = this.cmdPage * this.pageSize; return this.cmdRowsAll.slice(s, s + this.pageSize);
+      },
+      cmdPageCount: function () {
+        return this.cmdRowsAll ? Math.max(1, Math.ceil(this.cmdRowsAll.length / this.pageSize)) : 1;
       }
     },
     methods: {
@@ -148,8 +168,9 @@
         return apiGet("/admin/redis/databases?conn=" + encodeURIComponent(this.conn)).then(function (d) {
           if (!d.ok) { self.flash(d.error); self.dbs = []; return; }
           self.dbs = d.databases || [];
-          // 默认选第一个有数据的库
-          if (self.db == null && self.dbs.length) self.selectDb(self.dbs[0].db);
+          var valid = self.dbs.some(function (x) { return x.db === self.db; });
+          if (self.db != null && valid) self.loadKeys();       // 恢复的库：直接加载键
+          else if (self.dbs.length) self.selectDb(self.dbs[0].db);  // 默认选第一个有数据的库
         });
       },
       selectDb: function (db) {
@@ -179,6 +200,7 @@
       viewKey: function (key) {
         var self = this;
         this.sel = key; this.view = "key"; this.keyLoading = true; this.keyView = null;
+        this.keyPage = 0;
         apiGet("/admin/redis/value?conn=" + encodeURIComponent(this.conn)
                + "&db=" + this.db + "&key=" + encodeURIComponent(key)).then(function (d) {
           self.keyLoading = false;
@@ -201,10 +223,20 @@
       },
 
       // ---------- 命令窗口 ----------
+      loadSettings: function () {
+        var self = this;
+        return apiGet("/admin/settings/get").then(function (d) {
+          if (d && d.ok && d.settings) {
+            self.theme = d.settings.theme || "dark";
+            self.pageSize = d.settings.redis_page_size || 100;
+          }
+        }).catch(function () { /* 用默认 */ });
+      },
       onEditorReady: function () {
         var self = this;
         editor = window.monaco.editor.create(this.$refs.editorEl, {
-          value: "", language: "redis", theme: "vs-dark", automaticLayout: true,
+          value: "", language: "redis", theme: this.theme === "light" ? "vs" : "vs-dark",
+          automaticLayout: true,
           fontSize: 13, fontFamily: "'JetBrains Mono', ui-monospace, Menlo, monospace",
           minimap: { enabled: false }, lineNumbers: "on", scrollBeyondLastLine: false,
           renderLineHighlight: "line",
@@ -233,7 +265,7 @@
       },
       execCommand: function (cmd, confirm) {
         var self = this;
-        this.running = true; this.cmdErr = null;
+        this.running = true; this.cmdErr = null; this.cmdPage = 0;
         if (!confirm) { this.cmdResult = null; this.cmdConfirm = null; }
         this.view = "result";
         apiPost("/admin/redis/run", { conn: this.conn, db: this.db, command: cmd, confirm: confirm ? "1" : "" })
@@ -309,11 +341,13 @@
     mounted: function () {
       var self = this;
       this.restore();
-      this.loadConnections();
-      loadMonaco(function () { self.$nextTick(function () { self.onEditorReady(); }); });
+      this.loadSettings().then(function () {
+        self.loadConnections();
+        loadMonaco(function () { self.$nextTick(function () { self.onEditorReady(); }); });
+      });
     },
     template: `
-<div class="rd-root" :class="{'env-prod': isProd, 'env-staging': isStaging}">
+<div class="rd-root" :class="{'env-prod': isProd, 'env-staging': isStaging, 'theme-light': theme==='light'}">
   <aside class="rd-left" :style="{width: leftW + 'px'}">
     <div class="rd-conn">
       <select :value="conn" @change="setConn($event.target.value)">
@@ -406,13 +440,20 @@
               <span v-if="keyView.length!=null">元素：{{ keyView.length }}</span>
             </div>
             <div v-if="keyView.type==='string'" class="rd-strval">{{ keyView.value }}</div>
-            <table v-else class="rd-kt">
-              <thead><tr>
-                <th>{{ keyView.type==='zset' ? '成员' : (keyView.type==='hash' ? '字段' : '#') }}</th>
-                <th>{{ keyView.type==='zset' ? '分值' : '内容' }}</th></tr></thead>
-              <tbody><tr v-for="(r,i) in kvRows(keyView)" :key="i">
-                <td class="rk">{{ r.k }}</td><td class="rv">{{ cellText(r.v) }}</td></tr></tbody>
-            </table>
+            <template v-else>
+              <div v-if="keyPageCount>1" class="rd-pager">
+                <button class="dg-btn" :disabled="keyPage<=0" @click="keyPage--">‹ 上一页</button>
+                <span>第 {{ keyPage+1 }} / {{ keyPageCount }} 页 · 共 {{ keyRowsAll.length }} 行</span>
+                <button class="dg-btn" :disabled="keyPage>=keyPageCount-1" @click="keyPage++">下一页 ›</button>
+              </div>
+              <table class="rd-kt">
+                <thead><tr>
+                  <th>{{ keyView.type==='zset' ? '成员' : (keyView.type==='hash' ? '字段' : '#') }}</th>
+                  <th>{{ keyView.type==='zset' ? '分值' : '内容' }}</th></tr></thead>
+                <tbody><tr v-for="(r,i) in keyRowsPaged" :key="i">
+                  <td class="rk">{{ r.k }}</td><td class="rv">{{ cellText(r.v) }}</td></tr></tbody>
+              </table>
+            </template>
           </template>
           <div v-else class="rd-empty">（点左侧键查看内容）</div>
         </template>
@@ -426,10 +467,17 @@
               <span v-if="cmdResult.kind==='write'" class="wtag">写 · 已执行</span>
               <span v-if="cmdResult.duration_ms!=null">{{ cmdResult.duration_ms }} ms</span>
             </div>
-            <table v-if="resultRows(cmdResult.value)" class="rd-kt">
-              <tbody><tr v-for="(r,i) in resultRows(cmdResult.value)" :key="i">
-                <td class="rk">{{ r.k }}</td><td class="rv">{{ cellText(r.v) }}</td></tr></tbody>
-            </table>
+            <template v-if="cmdRowsAll">
+              <div v-if="cmdPageCount>1" class="rd-pager">
+                <button class="dg-btn" :disabled="cmdPage<=0" @click="cmdPage--">‹ 上一页</button>
+                <span>第 {{ cmdPage+1 }} / {{ cmdPageCount }} 页 · 共 {{ cmdRowsAll.length }} 行</span>
+                <button class="dg-btn" :disabled="cmdPage>=cmdPageCount-1" @click="cmdPage++">下一页 ›</button>
+              </div>
+              <table class="rd-kt">
+                <tbody><tr v-for="(r,i) in cmdRowsPaged" :key="i">
+                  <td class="rk">{{ r.k }}</td><td class="rv">{{ cellText(r.v) }}</td></tr></tbody>
+              </table>
+            </template>
             <div v-else class="rd-strval">{{ cellText(cmdResult.value) }}</div>
           </template>
           <div v-else class="rd-empty">（执行命令后在此显示结果）</div>

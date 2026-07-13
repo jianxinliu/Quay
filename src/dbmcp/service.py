@@ -65,6 +65,7 @@ class DbmService:
         self.metadata = metadata
         self.config_path = config_path
         self.snippets = snippets
+        self.settings = None   # SettingsStore（serve 时注入）
         self.analysis = None   # AnalysisStore（serve 时注入；未启用则分析功能不可用）
         self.workflows = None  # WorkflowStore（serve 时注入）
         self._housekeeping_stop: threading.Event | None = None
@@ -718,6 +719,20 @@ class DbmService:
 
         return provider
 
+    # ---------- 系统设置（后台界面偏好）----------
+
+    def get_settings(self) -> dict:
+        from .settings import DEFAULTS
+        return self.settings.get_all() if self.settings is not None else dict(DEFAULTS)
+
+    def save_settings(self, updates: dict) -> dict:
+        if self.settings is None:
+            raise QueryRejected("设置子系统未启用")
+        return self.settings.save(updates)
+
+    def _setting(self, key: str):
+        return self.get_settings().get(key)
+
     # ---------- Redis 浏览 / 命令窗口（管理后台，对标 Medis）----------
 
     def _redis_cfg(self, project: str, connection: str) -> ConnectionConfig:
@@ -735,15 +750,16 @@ class DbmService:
 
     def redis_keys(
         self, project: str, connection: str, caller: CallerInfo,
-        db: int | None = None, pattern: str = "*", max_keys: int = 2000,
+        db: int | None = None, pattern: str = "*", max_keys: int | None = None,
     ) -> dict:
         cfg = self._redis_cfg(project, connection)
+        limit = max_keys if max_keys is not None else int(self._setting("redis_key_limit"))
         detail = f"db={db if db is not None else ''} match={pattern}"
         return self._audited(
             project, connection, cfg, "redis_scan", detail, caller,
             lambda: redis_engine.scan_keys(
                 self.redis_pool.get(project, connection, cfg, db=db),
-                pattern=pattern or "*", max_keys=max_keys))
+                pattern=pattern or "*", max_keys=limit))
 
     def redis_value(
         self, project: str, connection: str, key: str, caller: CallerInfo,
@@ -1088,3 +1104,5 @@ class DbmService:
             self.metadata.close()
         if self.snippets is not None:
             self.snippets.close()
+        if self.settings is not None:
+            self.settings.close()
