@@ -116,7 +116,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
     return f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{_esc(title)} · db-manage-mcp</title>
+<title>{_esc(title)} · Quay</title>
 {_FAVICON_LINK}
 <style>
  :root{{
@@ -254,7 +254,7 @@ def _page(title: str, body: str, pending: int = 0) -> str:
 </style></head><body>
 <div class="shell">
  <aside class="side">
-  <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
+  <div class="brand">{_FAVICON_SVG}<div><b>Quay</b><span>gatekeeper</span></div></div>
   <nav>
    <a href="/admin/sql"><span class="nico nico-sql"></span>查询台</a>
    <a href="/admin/redis"><span class="nico nico-redis"></span>Redis</a>
@@ -289,7 +289,7 @@ def _login_page(error: str = "") -> str:
     mono = "ui-monospace,'SF Mono',Menlo,monospace"
     sans = "-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif"
     body = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · db-manage-mcp</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · Quay</title>
 {_FAVICON_LINK}
 <style>
  *{{box-sizing:border-box}}
@@ -311,7 +311,7 @@ def _login_page(error: str = "") -> str:
  button:hover{{filter:brightness(1.12)}}
 </style></head><body>
 <form class="box" method="post" action="/admin/login">
- <div class="brand">{_FAVICON_SVG}<div><b>db-manage-mcp</b><span>gatekeeper</span></div></div>
+ <div class="brand">{_FAVICON_SVG}<div><b>Quay</b><span>gatekeeper</span></div></div>
  {err}
  <label>管理 token</label>
  <input type="password" name="token" placeholder="输入管理 token" autofocus>
