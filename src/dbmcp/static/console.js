@@ -507,6 +507,13 @@
         this.persist();
         return tab;
       },
+      // 每个 tab 显示所属连接 + 环境（防止本地/线上混淆）
+      tabConn: function (t) {
+        if (!t.conn) return { name: "无连接", env: "none" };
+        if (t.conn.indexOf("analysis/") === 0) return { name: "⚗ " + t.conn.slice(9), env: "none" };
+        var m = this.connections.find(function (c) { return c.value === t.conn; });
+        return { name: m ? m.connection : t.conn.split("/").pop(), env: (m && m.environment) || "none" };
+      },
       togglePin: function (id) {
         var t = this.tabs.find(function (x) { return x.id === id; });
         if (t) { t.pinned = !t.pinned; this.persist(); }
@@ -571,7 +578,19 @@
           else if (self.activeTab) self.loadTree();
         });
       },
-      setConn: function (val) { if (this.activeTab) { this.activeTab.conn = val; this.persist(); this.loadTree(); } },
+      setConn: function (val) {
+        var t = this.activeTab; if (!t || t.conn === val) return;
+        t.conn = val;
+        // 结果/暂存改动都属于旧连接 → 全清，绝不让线上数据残留在新连接标签下
+        t.result = null; t.ok = null; t.err = null; t.confirm = null; t.explain = null;
+        t.readSql = null; t.edits = {}; t.dels = {}; t.adds = []; t.submit = null;
+        t.schema = this.schemaDefault[val] || "";
+        if (t.type === "data") {   // 数据 tab 的表属于旧连接 → 转成普通查询 tab
+          t.type = "query"; t.table = ""; t.title = "查询 " + t.id;
+          var m = models.get(t.id); if (m) m.setValue("");
+        }
+        this.persist(); this.loadTree();
+      },
       setSchema: function (val) {
         var t = this.activeTab; if (!t) return;
         t.schema = val;
@@ -1256,8 +1275,26 @@
             }
             self.flash(r.ok ? "workflow 运行完成" : "workflow 运行失败（见步骤）");
           }
-          else if (r.kind === "read") { t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page; }
-          else if (r.kind === "confirm") t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
+          else if (r.kind === "read") {
+            t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page;
+            // 数据 tab 预取表结构，保证时间列编辑能用日期选择器（依赖列类型）
+            if (t2.type === "data" && t2.table) {
+              var mk = self.mk(t2.table, t2.schema);
+              if (!self.tableMeta[mk]) self.fetchMeta(t2.table, t2.schema);
+            }
+          }
+          else if (r.kind === "confirm") {
+            // 读语句（含数据 tab 自动生成的 SELECT）被判为写，多半是 WHERE/ORDER BY 语法错，
+            // 直接报语法错，别弹「确认写操作」误导。
+            var ps = (t2.pendingSql || "").trim().toUpperCase();
+            if (t2.type === "data" || /^(SELECT|WITH|SHOW|DESC|DESCRIBE|EXPLAIN)\b/.test(ps)) {
+              t2.err = "SQL 无法解析，无法作为查询执行 —— 请检查语法" +
+                       (t2.type === "data" ? "（WHERE / ORDER BY 表达式，如 desc 别写成 des）" : "") + "。";
+              t2.confirm = null;
+            } else {
+              t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
+            }
+          }
           else if (r.kind === "write") {
             t2.ok = r;
             if (t2.type === "data") setTimeout(function () { self.run(false, t2.lastPage); }, 60);
@@ -1315,10 +1352,14 @@
         if (!t || t.type !== "data" || !t.result) return;
         var k = this.mk(t.table, t.schema);
         if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
-        var v = t.result.rows[ri][ci], key = ri + ":" + ci, isDt = this.isDatetimeCol(ci);
+        var v = t.result.rows[ri][ci], key = ri + ":" + ci, kind = this.dtKind(ci);
         var cur = (t.edits && key in t.edits) ? t.edits[key] : (v == null ? "NULL" : this.cellText(v));
-        var init = isDt ? this.toDatetimeLocal(cur === "NULL" ? "" : cur) : cur;
-        t.edit = { ri: ri, ci: ci, val: init, dt: isDt };
+        var raw = cur === "NULL" ? "" : cur, init;
+        if (kind === "datetime") init = this.toDatetimeLocal(raw);
+        else if (kind === "date") init = raw.slice(0, 10);
+        else if (kind === "time") init = raw.slice(0, 8);
+        else init = cur;
+        t.edit = { ri: ri, ci: ci, val: init, dt: !!kind, dtKind: kind };
         this.$nextTick(function () {
           var el = document.getElementById("dg-cell-input");
           if (el) { el.focus(); if (!isDt) el.select(); }
@@ -1350,9 +1391,11 @@
       commitEdit: function () {
         var t = this.activeTab;
         if (!t || !t.edit || !t.result) return;
-        var ri = t.edit.ri, ci = t.edit.ci, key = ri + ":" + ci, dt = t.edit.dt;
-        var oldV = t.result.rows[ri][ci];
-        var newRaw = dt ? this.fromDatetimeLocal(t.edit.val) : t.edit.val;
+        var ri = t.edit.ri, ci = t.edit.ci, key = ri + ":" + ci, kind = t.edit.dtKind;
+        var oldV = t.result.rows[ri][ci], newRaw;
+        if (kind === "datetime") newRaw = t.edit.val ? this.fromDatetimeLocal(t.edit.val) : "NULL";
+        else if (kind === "date" || kind === "time") newRaw = t.edit.val || "NULL";
+        else newRaw = t.edit.val;
         t.edit = null;
         // 暂存：不立即执行，等工具栏「提交」。改回原值则撤销暂存。
         if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
@@ -1396,6 +1439,17 @@
       isJsonCol: function (ci) { return this.colType(ci).indexOf("json") >= 0; },
       isDatetimeCol: function (ci) {
         var t = this.colType(ci); return /datetime|timestamp/.test(t) || t === "date" || t === "time";
+      },
+      dtKind: function (ci) {   // 'datetime' | 'date' | 'time' | null，决定用哪种选择器
+        var t = this.colType(ci);
+        if (/datetime|timestamp/.test(t)) return "datetime";
+        if (t === "date") return "date";
+        if (t === "time") return "time";
+        return null;
+      },
+      dtInputType: function (kind) {
+        return kind === "datetime" ? "datetime-local" : kind === "date" ? "date"
+             : kind === "time" ? "time" : "text";
       },
       displayTypeOf: function (ci) {
         var t = this.activeTab; if (!t || !t.result) return "number";
@@ -2350,6 +2404,7 @@
            draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">
         <span class="ticon" v-if="t.type==='data'">▦</span><span class="ticon" v-else-if="t.type==='ddl'">≔</span>
         <span class="nm">{{ t.title }}</span>
+        <span class="tconn" :class="'env-'+tabConn(t).env" :title="'连接：'+t.conn">{{ tabConn(t).name }}</span>
         <span class="pin" :class="{on: t.pinned}" @click.stop="togglePin(t.id)"
               :title="t.pinned ? '取消固定' : '固定（防误关）'">⚲</span>
         <span v-if="!t.pinned" class="x" @click.stop="closeTab(t.id)">✕</span>
@@ -2659,7 +2714,7 @@
                   @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
                 <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
                        id="dg-cell-input" class="dg-cell-edit"
-                       :type="activeTab.edit.dt ? 'datetime-local' : 'text'" step="1"
+                       :type="dtInputType(activeTab.edit.dtKind)" step="1"
                        v-model="activeTab.edit.val"
                        @keydown.enter="commitEdit" @keydown.esc="cancelEdit"
                        @blur="onCellBlur" @change="onCellChange">

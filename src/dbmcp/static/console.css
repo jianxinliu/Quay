@@ -722,3 +722,11 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-vp .vp-rec-row .rv .rj { margin: 2px 0 0; max-height: 220px; overflow: auto; white-space: pre;
   font-family: var(--dg-mono); font-size: 11.5px; background: var(--dg-bg); border: 1px solid var(--dg-border);
   border-radius: 5px; padding: 6px 8px; color: var(--dg-text); }
+/* tab 上的连接 + 环境徽章：防止本地/线上混淆 */
+.dg-tab .tconn { font-size: 10px; padding: 1px 5px; border-radius: 3px; color: var(--dg-faint);
+  background: var(--dg-panel-2); font-family: var(--dg-mono); max-width: 96px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: none; }
+.dg-tab .tconn.env-prod { background: rgba(220,60,60,.2); color: #ff6b6b; font-weight: 700; }
+.dg-tab .tconn.env-staging { background: rgba(200,140,20,.2); color: var(--dg-amber); font-weight: 600; }
+.dg-tab .tconn.env-dev { color: #6ea8fe; background: rgba(80,130,240,.15); }
+.dg-tab .tconn.env-local, .dg-tab .tconn.env-none { color: var(--dg-muted); }
