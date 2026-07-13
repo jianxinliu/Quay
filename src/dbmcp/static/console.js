@@ -537,7 +537,12 @@
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
         if (t && t.view === "chart" && t.result) this.renderChart(); else this.disposeChart();
-        if (t && t.type === "data") this.loadHistory();  // 底部执行记录面板用
+        if (t && t.type === "data") {
+          this.loadHistory();  // 底部执行记录面板用
+          // 预取表结构：切到（含刷新后恢复的）数据 tab 就备好列类型，
+          // 时间列编辑才能立刻用日期选择器（否则首次编辑取不到类型退化成文本框）
+          if (t.table) { var k = this.mk(t.table, t.schema); if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema); }
+        }
         this.scheduleLint();
       },
       onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
@@ -728,7 +733,7 @@
       },
       fetchMeta: function (t, db) {
         var self = this, tab = this.activeTab, k = this.mk(t, db);
-        apiGet("/admin/sql/table?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
+        return apiGet("/admin/sql/table?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
                + (db ? "&schema=" + encodeURIComponent(db) : "")).then(function (d) {
           if (!d.ok) { self.flash(d.error); return; }
           self.tableMeta[k] = { columns: d.columns || [], indexes: d.indexes || [],
@@ -1350,8 +1355,12 @@
       startEdit: function (ri, ci) {
         var t = this.activeTab;
         if (!t || t.type !== "data" || !t.result) return;
-        var k = this.mk(t.table, t.schema);
-        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
+        var k = this.mk(t.table, t.schema), self = this;
+        // 元数据未就绪：先拉列类型，到了再进入编辑——否则时间列取不到类型，退化成文本框
+        if (!this.tableMeta[k]) {
+          this.fetchMeta(t.table, t.schema).then(function () { self.startEdit(ri, ci); });
+          return;
+        }
         var v = t.result.rows[ri][ci], key = ri + ":" + ci, kind = this.dtKind(ci);
         var cur = (t.edits && key in t.edits) ? t.edits[key] : (v == null ? "NULL" : this.cellText(v));
         var raw = cur === "NULL" ? "" : cur, init;
@@ -1362,9 +1371,10 @@
         t.edit = { ri: ri, ci: ci, val: init, dt: !!kind, dtKind: kind };
         this.$nextTick(function () {
           var el = document.getElementById("dg-cell-input");
-          if (el) { el.focus(); if (!isDt) el.select(); }
+          if (el) { el.focus(); if (!kind) el.select(); }   // 时间选择器不 select
         });
       },
+
       cancelEdit: function () { if (this.activeTab) this.activeTab.edit = null; },
       // 生成按主键定位的单单元格 UPDATE；失败返回 null（原因已 flash）
       makeUpdateSql: function (t, ri, ci, newRaw) {
