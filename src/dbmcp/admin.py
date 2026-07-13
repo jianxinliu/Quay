@@ -587,6 +587,8 @@ def _console_body() -> str:
         # echarts 的 UMD 会走 AMD 注册而不挂 window.echarts
         '<script src="/admin/static/echarts.min.js"></script>'
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
+        # MySQL 内置函数文档（编辑器 hover 用），须先于 console.js 加载
+        '<script src="/admin/static/sqlfuncs.js"></script>'
         '<script src="/admin/static/console.js"></script>'
     )
 

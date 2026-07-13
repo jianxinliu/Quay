@@ -344,6 +344,7 @@
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
         colMenu: { show: false, x: 0, y: 0, ci: -1 },
+        sug: { open: false, items: [], sel: 0, which: "", word: "" },  // WHERE/ORDER BY 字段提示
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300, dataLogH: 150,
@@ -734,12 +735,19 @@
         this.openSub[k][section] = !this.openSub[k][section];
         this.persist();
       },
+      // 清理反射出来的类型串：去掉 collate/character set（字符编码不是类型，不展示）
+      cleanType: function (ty) {
+        return String(ty || "").replace(/\s+collate\s+\S+/ig, "").replace(/\s+character set\s+\S+/ig, "").trim();
+      },
       fetchMeta: function (t, db) {
         var self = this, tab = this.activeTab, k = this.mk(t, db);
         return apiGet("/admin/sql/table?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
                + (db ? "&schema=" + encodeURIComponent(db) : "")).then(function (d) {
           if (!d.ok) { self.flash(d.error); return; }
-          self.tableMeta[k] = { columns: d.columns || [], indexes: d.indexes || [],
+          var cols = (d.columns || []).map(function (c) {
+            return Object.assign({}, c, { type: self.cleanType(c.type) });  // 类型去掉字符编码
+          });
+          self.tableMeta[k] = { columns: cols, indexes: d.indexes || [],
                                 primary_key: d.primary_key || [] };
           self.persist();
         });
@@ -1324,6 +1332,47 @@
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
       applyWhere: function () { this.run(false, 0); },
+      // ---------- WHERE / ORDER BY 字段提示 ----------
+      filterCols: function () {
+        var t = this.activeTab; if (!t) return [];
+        if (t.result && t.result.columns && t.result.columns.length) return t.result.columns;
+        var meta = this.tableMeta[this.mk(t.table, t.schema)];
+        return meta ? meta.columns.map(function (c) { return c.name; }) : [];
+      },
+      onFilterInput: function (which, e) {
+        var el = e.target;
+        if (which === "where") this.activeTab.where = el.value; else this.activeTab.orderBy = el.value;
+        var m = el.value.slice(0, el.selectionStart).match(/[\w.]*$/);
+        var word = m ? m[0] : "";
+        if (!word) { this.sug.open = false; return; }
+        var lw = word.toLowerCase();
+        var items = this.filterCols().filter(function (c) {
+          return c.toLowerCase().indexOf(lw) >= 0 && c.toLowerCase() !== lw;
+        }).slice(0, 12);
+        if (!items.length) { this.sug.open = false; return; }
+        this.sug = { open: true, items: items, sel: 0, which: which, word: word };
+      },
+      pickSug: function (col) {
+        var which = this.sug.which;
+        var id = which === "where" ? "dg-where-input" : "dg-order-input";
+        var el = document.getElementById(id);
+        var cur = which === "where" ? this.activeTab.where : this.activeTab.orderBy;
+        var pos = el ? el.selectionStart : cur.length;
+        var before = cur.slice(0, pos).replace(/[\w.]*$/, col), after = cur.slice(pos);
+        if (which === "where") this.activeTab.where = before + after; else this.activeTab.orderBy = before + after;
+        this.sug.open = false;
+        this.$nextTick(function () { if (el) { el.focus(); el.setSelectionRange(before.length, before.length); } });
+      },
+      filterKey: function (which, e) {
+        if (this.sug.open && this.sug.which === which) {
+          if (e.key === "ArrowDown") { e.preventDefault(); this.sug.sel = Math.min(this.sug.sel + 1, this.sug.items.length - 1); return; }
+          if (e.key === "ArrowUp") { e.preventDefault(); this.sug.sel = Math.max(this.sug.sel - 1, 0); return; }
+          if (e.key === "Tab" || e.key === "Enter") { e.preventDefault(); this.pickSug(this.sug.items[this.sug.sel]); return; }
+          if (e.key === "Escape") { e.preventDefault(); this.sug.open = false; return; }
+        }
+        if (e.key === "Enter") this.applyWhere();
+      },
+      blurSug: function () { var self = this; setTimeout(function () { self.sug.open = false; }, 150); },
       // 列头点击与 ORDER BY 输入框联动：点头写入表达式，手写表达式亦可（支持多列/函数）
       cycleOrder: function (col) {
         var t = this.activeTab;
@@ -2013,10 +2062,23 @@
       },
       cancelConfirm: function () { if (this.activeTab) this.activeTab.confirm = null; },
       formatSql: function () {
-        var t = this.activeTab; if (!t || t.type === "ddl") return;
-        apiPost("/admin/sql/format", { conn: t.conn, sql: this.currentSql() }).then(function (d) {
-          if (d.ok && d.sql != null) { var m = models.get(t.id); if (m) m.setValue(d.sql); }
+        var self = this, t = this.activeTab; if (!t || t.type === "ddl") return;
+        var model = models.get(t.id), sel = editor && editor.getSelection();
+        var hasSel = sel && !sel.isEmpty();
+        var sql = hasSel ? model.getValueInRange(sel) : this.currentSql();
+        if (!sql.trim()) return;
+        apiPost("/admin/sql/format", { conn: t.conn, sql: sql }).then(function (d) {
+          if (!d.ok || d.sql == null) { if (d.error) self.flash(d.error); return; }
+          if (hasSel && editor) editor.executeEdits("dbm-fmt", [{ range: sel, text: d.sql }]);
+          else if (model) model.setValue(d.sql);
         });
+      },
+      // EXPLAIN ANALYZE：实际执行并返回分析（MySQL 8.0.18+/PG），结果进结果表
+      explainAnalyze: function () {
+        var t = this.activeTab; if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        var sql = t.type === "data" ? this.buildDataSql(t) : this.stmtAtCursor();
+        if (!sql.trim()) { this.flash("请输入 SQL"); return; }
+        this.run(false, 0, "EXPLAIN ANALYZE " + sql);
       },
       exportAs: function (fmt) {
         this.exportOpen = false;
@@ -2182,6 +2244,28 @@
         editor.onDidBlurEditorText(function () { self.persist(); });
         editor.onDidChangeModelContent(function () { self.scheduleLint(); });  // 实时语法检查
         this.scheduleLint();
+        // 右键菜单：格式化（选中/全部）/ EXPLAIN / EXPLAIN ANALYZE
+        editor.addAction({ id: "dbm-format", label: "格式化 SQL（有选中则格式化选中，否则全部）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 1, run: function () { self.formatSql(); } });
+        editor.addAction({ id: "dbm-explain", label: "EXPLAIN（执行计划）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 2, run: function () { self.explainStmt(); } });
+        editor.addAction({ id: "dbm-explain-analyze", label: "EXPLAIN ANALYZE（实际执行并分析）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 3, run: function () { self.explainAnalyze(); } });
+        // 函数文档 hover：光标悬停在 MySQL 内置函数上 → 中文说明 + 用法 + 官方文档链接
+        monaco.languages.registerHoverProvider("sql", {
+          provideHover: function (model, position) {
+            var w = model.getWordAtPosition(position); if (!w) return null;
+            var doc = window.SQL_FUNCS_DOC && window.SQL_FUNCS_DOC[w.word.toUpperCase()];
+            if (!doc) return null;
+            return { range: new monaco.Range(position.lineNumber, w.startColumn, position.lineNumber, w.endColumn),
+              contents: [
+                { value: "**" + w.word.toUpperCase() + "()**" + (doc.group ? "　· " + doc.group : "") },
+                { value: doc.summary || "" },
+                { value: "```sql\n" + (doc.syntax || "") + "\n```" },
+                { value: doc.url ? "[📖 MySQL 官方文档](" + doc.url + ")" : "" },
+              ] };
+          }
+        });
         // 上下文感知补全（DataGrip 式）：
         // - `库.` → 该库的表；`表./别名.` → 列
         // - FROM/JOIN/UPDATE/INTO 后 → 表；SELECT/WHERE/ON/BY/SET 等后 → 当前语句各表的列
@@ -2625,11 +2709,24 @@
         </div>
         <div v-if="activeTab.type==='data'" class="dg-where">
           <span class="k">WHERE</span>
-          <input id="dg-where-input" v-model="activeTab.where" placeholder="status = 'paid' AND amount > 100"
-                 @keydown.enter="applyWhere">
+          <span class="dg-sug-wrap">
+            <input id="dg-where-input" :value="activeTab.where" placeholder="status = 'paid' AND amount > 100"
+                   @input="onFilterInput('where',$event)" @keydown="filterKey('where',$event)" @blur="blurSug">
+            <div v-if="sug.open && sug.which==='where'" class="dg-sug">
+              <div v-for="(c,i) in sug.items" :key="c" class="item" :class="{sel:i===sug.sel}"
+                   @mousedown.prevent="pickSug(c)">{{ c }}</div>
+            </div>
+          </span>
           <span class="k">ORDER BY</span>
-          <input class="obin" v-model="activeTab.orderBy" placeholder="amount DESC, id"
-                 @keydown.enter="applyWhere" title="任意排序表达式，回车应用；点列头快捷设置">
+          <span class="dg-sug-wrap obwrap">
+            <input id="dg-order-input" class="obin" :value="activeTab.orderBy" placeholder="amount DESC, id"
+                   @input="onFilterInput('orderBy',$event)" @keydown="filterKey('orderBy',$event)" @blur="blurSug"
+                   title="任意排序表达式，回车应用；点列头快捷设置">
+            <div v-if="sug.open && sug.which==='orderBy'" class="dg-sug">
+              <div v-for="(c,i) in sug.items" :key="c" class="item" :class="{sel:i===sug.sel}"
+                   @mousedown.prevent="pickSug(c)">{{ c }}</div>
+            </div>
+          </span>
           <button class="dg-btn" @click="applyWhere">应用</button>
           <button v-if="activeTab.where || activeTab.orderBy" class="dg-btn"
                   @click="activeTab.where='';activeTab.orderBy='';applyWhere()">清除</button>
