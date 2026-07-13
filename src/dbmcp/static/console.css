@@ -255,6 +255,16 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-confirm .acts { margin-top: 8px; display: flex; gap: 8px; }
 .dg-confirm .acts .ok { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
 
+/* 结果 tab（查询每执行一次新增一个；hover 显示 SQL） */
+.dg-restabs { flex: none; display: flex; gap: 2px; padding: 4px 8px 0; overflow-x: auto;
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-bg); }
+.dg-restabs .rtab { display: flex; align-items: center; gap: 6px; padding: 4px 11px; font-size: 12px;
+  color: var(--dg-muted); cursor: pointer; border: 1px solid transparent; border-bottom: none;
+  border-radius: 6px 6px 0 0; white-space: nowrap; flex: none; }
+.dg-restabs .rtab:hover { background: var(--dg-hover); color: var(--dg-text); }
+.dg-restabs .rtab.on { background: var(--dg-panel); color: var(--dg-text); border-color: var(--dg-border); }
+.dg-restabs .rtab .rx { color: var(--dg-faint); font-size: 10px; }
+.dg-restabs .rtab .rx:hover { color: var(--dg-red); }
 .dg-res-meta {
   display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--dg-border);
   font-size: 12px; color: var(--dg-muted); flex: none;

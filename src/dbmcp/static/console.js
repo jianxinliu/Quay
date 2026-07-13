@@ -504,7 +504,8 @@
                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
-                    colDisplay: opts.colDisplay || {} };  // 列显示类型（仅展示，不写库）
+                    colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
+                    results: [], resultIdx: 0, isPaging: false };  // 结果 tab（每次执行新增一个）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
@@ -1235,12 +1236,13 @@
         }
         return text.slice(ranges[ranges.length - 1].s);
       },
-      run: function (confirm, page, sqlOverride) {
+      run: function (confirm, page, sqlOverride, isPage) {
         var self = this, t = this.activeTab;
         if (!t) return;
         if (t.type === "ddl") { this.flash("DDL 为只读视图"); return; }
         if (t.type === "flow" && sqlOverride == null) { this.runFlow(); return; }
         if (!t.conn) { this.flash("请先选择连接"); return; }
+        t.isPaging = !!isPage;  // 翻页更新当前结果 tab；否则新执行=新结果 tab
         var sql;
         if (sqlOverride != null) sql = sqlOverride;
         else if (confirm && t.pendingSql) sql = t.pendingSql;   // 确认执行的是刚才那条
@@ -1298,6 +1300,16 @@
               var mk = self.mk(t2.table, t2.schema);
               if (!self.tableMeta[mk]) self.fetchMeta(t2.table, t2.schema);
               if (t2.id === self.activeId) self.loadHistory();  // 底部执行记录及时反映刚才的过滤/排序 SQL
+            } else if (t2.type === "query") {
+              // 查询 tab：每次新执行新增一个结果 tab；翻页只更新当前结果 tab
+              if (t2.isPaging && t2.results[t2.resultIdx]) {
+                t2.results[t2.resultIdx].result = r;
+              } else {
+                var nid = t2.results.length ? t2.results[t2.results.length - 1].rid + 1 : 1;
+                t2.results.push({ rid: nid, sql: t2.pendingSql, result: r });
+                if (t2.results.length > 10) t2.results.shift();  // 上限，防 localStorage 膨胀
+                t2.resultIdx = t2.results.length - 1;
+              }
             }
           }
           else if (r.kind === "confirm") {
@@ -1326,8 +1338,22 @@
       goPage: function (p) {
         var t = this.activeTab;
         if (p < 0 || !t) return;
-        // 翻页沿用上次执行的读语句（光标可能已移动到别的语句上）
-        this.run(false, p, t.type === "data" ? null : t.readSql);
+        // 翻页沿用上次执行的读语句（光标可能已移动到别的语句上），isPage=true → 更新当前结果 tab
+        this.run(false, p, t.type === "data" ? null : t.readSql, true);
+      },
+      // 结果 tab（查询 tab 每次执行新增一个）
+      selectResult: function (i) {
+        var t = this.activeTab; if (!t || !t.results[i]) return;
+        t.resultIdx = i; t.result = t.results[i].result; t.readSql = t.results[i].sql;
+        t.err = null; t.ok = null;
+        this.persist();
+        if (t.view === "chart" && t.result) this.$nextTick(this.renderChart);
+      },
+      closeResult: function (i) {
+        var t = this.activeTab; if (!t || !t.results[i]) return;
+        t.results.splice(i, 1);
+        if (!t.results.length) { t.result = null; t.resultIdx = 0; this.persist(); return; }
+        this.selectResult(Math.min(t.resultIdx, t.results.length - 1));
       },
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
@@ -2151,6 +2177,7 @@
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      colDisplay: t.colDisplay || {},
+                     results: t.results || [], resultIdx: t.resultIdx || 0,
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null };
           }, this);
@@ -2158,8 +2185,11 @@
                        leftW: this.leftW, editorH: this.editorH, dataLogH: this.dataLogH,
                        schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
           var s = JSON.stringify(data);
-          if (s.length > 3800000) {  // localStorage 上限兜底：丢结果、保 SQL 与树
-            tabs.forEach(function (t) { t.result = null; });
+          if (s.length > 3800000) {  // localStorage 上限兜底：丢结果集（保 SQL/结果 tab 骨架与树）
+            tabs.forEach(function (t) {
+              t.result = null;
+              (t.results || []).forEach(function (rt) { rt.result = null; });
+            });
             s = JSON.stringify(data);
           }
           localStorage.setItem(STORE_KEY, s);
@@ -2188,6 +2218,7 @@
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      submit: null, submitting: false, refreshWarn: false,
                      colDisplay: t.colDisplay || {},
+                     results: t.results || [], resultIdx: t.resultIdx || 0, isPaging: false,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
@@ -2257,13 +2288,12 @@
             var w = model.getWordAtPosition(position); if (!w) return null;
             var doc = window.SQL_FUNCS_DOC && window.SQL_FUNCS_DOC[w.word.toUpperCase()];
             if (!doc) return null;
+            // 单个 markdown 块（多块在编辑器顶部易被裁切，只剩最后一行）
+            var md = "**" + w.word.toUpperCase() + "()**" + (doc.group ? "　·　" + doc.group : "") + "\n\n" +
+                     (doc.summary || "") + "\n\n`" + (doc.syntax || "") + "`" +
+                     (doc.url ? "\n\n[📖 MySQL 官方文档](" + doc.url + ")" : "");
             return { range: new monaco.Range(position.lineNumber, w.startColumn, position.lineNumber, w.endColumn),
-              contents: [
-                { value: "**" + w.word.toUpperCase() + "()**" + (doc.group ? "　· " + doc.group : "") },
-                { value: doc.summary || "" },
-                { value: "```sql\n" + (doc.syntax || "") + "\n```" },
-                { value: doc.url ? "[📖 MySQL 官方文档](" + doc.url + ")" : "" },
-              ] };
+              contents: [{ value: md }] };
           }
         });
         // 上下文感知补全（DataGrip 式）：
@@ -2768,6 +2798,13 @@
         <div v-if="activeTab.err" class="dg-res-err">⚠ {{ activeTab.err }}</div>
         <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{ activeTab.ok.affected_rows }} 行 · {{ activeTab.ok.duration_ms }} ms</div>
         <template v-else-if="activeTab.result">
+          <div v-if="activeTab.type==='query' && activeTab.results && activeTab.results.length" class="dg-restabs">
+            <div v-for="(rt,i) in activeTab.results" :key="rt.rid" class="rtab" :class="{on: i===activeTab.resultIdx}"
+                 :title="rt.sql" @click="selectResult(i)">
+              <span class="rl">结果 {{ i+1 }}</span>
+              <span class="rx" @click.stop="closeResult(i)">✕</span>
+            </div>
+          </div>
           <div class="dg-res-meta">
             <span>{{ activeTab.result.paginated ? "本页 " : "" }}{{ activeTab.result.rows.length }} 行</span>
             <span v-if="activeTab.result.duration_ms!=null">{{ activeTab.result.duration_ms }} ms</span>
