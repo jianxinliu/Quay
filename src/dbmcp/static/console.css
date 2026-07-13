@@ -255,6 +255,16 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-confirm .acts { margin-top: 8px; display: flex; gap: 8px; }
 .dg-confirm .acts .ok { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
 
+/* 结果 tab（查询每执行一次新增一个；hover 显示 SQL） */
+.dg-restabs { flex: none; display: flex; gap: 2px; padding: 4px 8px 0; overflow-x: auto;
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-bg); }
+.dg-restabs .rtab { display: flex; align-items: center; gap: 6px; padding: 4px 11px; font-size: 12px;
+  color: var(--dg-muted); cursor: pointer; border: 1px solid transparent; border-bottom: none;
+  border-radius: 6px 6px 0 0; white-space: nowrap; flex: none; }
+.dg-restabs .rtab:hover { background: var(--dg-hover); color: var(--dg-text); }
+.dg-restabs .rtab.on { background: var(--dg-panel); color: var(--dg-text); border-color: var(--dg-border); }
+.dg-restabs .rtab .rx { color: var(--dg-faint); font-size: 10px; }
+.dg-restabs .rtab .rx:hover { color: var(--dg-red); }
 .dg-res-meta {
   display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--dg-border);
   font-size: 12px; color: var(--dg-muted); flex: none;
@@ -279,7 +289,9 @@ table.dg-rt th, table.dg-rt td {
   border: 1px solid var(--dg-border); padding: 4px 10px; white-space: nowrap;
   max-width: 460px; overflow: hidden; text-overflow: ellipsis; text-align: left;
 }
-table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: var(--dg-muted); z-index: 1; }
+/* 列名保持原样大小写：覆盖后台外壳全局 th{text-transform:uppercase} */
+table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: var(--dg-muted);
+  z-index: 1; text-transform: none; letter-spacing: 0; }
 table.dg-rt td .nul { color: var(--dg-faint); font-style: italic; }
 table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 .dg-res-ok { padding: 12px 14px; color: var(--dg-green); }
@@ -331,8 +343,17 @@ table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
   border-radius: 6px; padding: 5px 10px; font-size: 12.5px; font-family: var(--dg-mono);
 }
 .dg-where input:focus { outline: none; border-color: var(--dg-accent); }
-.dg-where .obin { flex: 0 1 240px; }
+.dg-where .dg-sug-wrap { position: relative; flex: 1; display: flex; min-width: 0; }
+.dg-where .dg-sug-wrap.obwrap { flex: 0 1 240px; }
+.dg-where .obin { flex: 1; }
 .dg-where .dg-btn { padding: 4px 10px; font-size: 12px; }
+/* WHERE/ORDER BY 字段提示下拉 */
+.dg-sug { position: absolute; top: calc(100% + 3px); left: 0; z-index: 30; min-width: 160px;
+  max-height: 220px; overflow: auto; background: var(--dg-panel); border: 1px solid var(--dg-border);
+  border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.35); padding: 3px; }
+.dg-sug .item { padding: 4px 10px; font-size: 12.5px; font-family: var(--dg-mono); color: var(--dg-text);
+  cursor: pointer; border-radius: 4px; white-space: nowrap; }
+.dg-sug .item.sel, .dg-sug .item:hover { background: var(--dg-accent-soft); color: var(--dg-accent); }
 .dg-where .ob { font-family: var(--dg-mono); font-size: 11.5px; color: var(--dg-amber); white-space: nowrap; }
 .dg-where .ob a { cursor: pointer; color: var(--dg-muted); margin-left: 3px; }
 .dg-where .ob a:hover { color: var(--dg-red); }
@@ -667,3 +688,77 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   flex: none; width: 15px; height: 15px; min-width: 0; margin: 0; padding: 0;
   accent-color: var(--dg-accent);
 }
+/* 表数据视图底部：可拖拽的 SQL 执行记录面板 */
+.dg-loghandle { height: 6px; flex: none; cursor: row-resize; background: var(--dg-border); }
+.dg-loghandle:hover { background: var(--dg-accent); }
+.dg-datalog { flex: none; display: flex; flex-direction: column; overflow: hidden;
+  border-top: 1px solid var(--dg-border); background: var(--dg-panel); }
+.dg-datalog .dl-hd { flex: none; padding: 5px 12px; font-size: 11px; letter-spacing: .5px;
+  color: var(--dg-faint); text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+.dg-datalog .dl-hd .muted { text-transform: none; letter-spacing: 0; color: var(--dg-muted); }
+.dg-datalog .dl-hd .dl-x { margin-left: auto; cursor: pointer; color: var(--dg-muted); padding: 0 4px; }
+.dg-datalog .dl-hd .dl-x:hover { color: var(--dg-accent); }
+.dg-datalog .dl-body { flex: 1; overflow: auto; }
+.dg-datalog .dl-empty { padding: 10px 12px; color: var(--dg-faint); font-size: 12px; }
+.dg-datalog .dl-row { display: flex; align-items: center; gap: 8px; padding: 4px 12px;
+  font-size: 12px; cursor: pointer; border-bottom: 1px solid var(--dg-border); }
+.dg-datalog .dl-row:hover { background: var(--dg-hover); }
+.dg-datalog .dl-row .st { flex: none; font-weight: 700; }
+.dg-datalog .dl-row .st.ok { color: var(--dg-green); }
+.dg-datalog .dl-row .st.bad { color: var(--dg-red); }
+.dg-datalog .dl-row .sql { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--dg-mono); color: var(--dg-text); }
+.dg-datalog .dl-row .tm { flex: none; color: var(--dg-faint); font-family: var(--dg-mono); font-size: 11px; }
+/* 表数据工具栏（过滤条上方）：刷新/加行/减行/提交/DDL */
+.dg-toolbar { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-panel); position: relative; z-index: 3; }
+.dg-toolbar .tb-sep { width: 1px; height: 16px; background: var(--dg-border); margin: 0 3px; }
+.dg-toolbar .dg-btn.run:disabled { opacity: .45; cursor: not-allowed; }
+.dg-toolbar .tb-pending { margin-left: auto; color: var(--dg-amber); font-size: 12px; font-weight: 500; }
+.dg-toolbar .dg-menu-pop { top: 100%; left: 0; }
+/* 暂存改动的可视标记 */
+table.dg-rt td.edited { background: color-mix(in srgb, var(--dg-amber) 22%, transparent);
+  box-shadow: inset 0 0 0 1px var(--dg-amber); }
+table.dg-rt tr.delrow td { text-decoration: line-through; color: var(--dg-faint);
+  background: color-mix(in srgb, var(--dg-red) 12%, transparent); }
+table.dg-rt tr.delrow td.gut { color: var(--dg-red); text-decoration: none; }
+.dg-submit-sql { max-height: 260px; overflow: auto; margin: 8px 0; padding: 10px 12px;
+  background: var(--dg-bg); border: 1px solid var(--dg-border); border-radius: 6px;
+  font-family: var(--dg-mono); font-size: 12px; white-space: pre; color: var(--dg-text); }
+/* 列类型图标（表头，DataGrip 风） */
+table.dg-rt th .ctype { display: inline-block; width: 15px; margin-right: 5px; text-align: center;
+  font-family: var(--dg-mono); font-size: 10px; font-weight: 700; border-radius: 3px;
+  color: var(--dg-bg); line-height: 14px; vertical-align: baseline; }
+.ct-number { background: #3574f0; }
+.ct-string { background: #57965c; }
+.ct-datetime, .ct-date, .ct-time { background: #d9a343; }
+.ct-json { background: #bc8cff; }
+.ct-bool { background: #39c5cf; }
+.ct-binary { background: #d9534f; }
+.ct- { background: var(--dg-faint); }
+/* 列显示类型：表头徽章 + 右键菜单 */
+table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
+.dg-ctx-backdrop { position: fixed; inset: 0; z-index: 190; }
+.dg-colmenu { z-index: 191; min-width: 180px; }
+.dg-colmenu button.on { color: var(--dg-accent); font-weight: 600; }
+.dg-colmenu button.on::before { content: "✓ "; }
+/* Value 面板 Record 视图：字段名 + 类型标签 + 值（JSON 美化） */
+.dg-vp .vp-rec-row { flex-direction: column; align-items: stretch; gap: 3px; padding: 8px 12px; }
+.dg-vp .vp-rec-row .rc-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+/* 字段名优先完整展示；类型标签太长时先被压缩/省略，不再挤掉字段名 */
+.dg-vp .vp-rec-row .rc-hd .rc { flex: 1 1 auto; min-width: 0; color: var(--dg-text); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dg-vp .vp-rec-row .rc-hd .rt { flex: 0 1 auto; min-width: 0; color: var(--dg-faint); font-family: var(--dg-mono);
+  font-size: 10.5px; text-transform: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dg-vp .vp-rec-row .rv { color: var(--dg-text); white-space: normal; overflow: hidden; text-overflow: ellipsis; }
+.dg-vp .vp-rec-row .rv .rj { margin: 2px 0 0; max-height: 220px; overflow: auto; white-space: pre;
+  font-family: var(--dg-mono); font-size: 11.5px; background: var(--dg-bg); border: 1px solid var(--dg-border);
+  border-radius: 5px; padding: 6px 8px; color: var(--dg-text); }
+/* tab 上的连接 + 环境徽章：防止本地/线上混淆 */
+.dg-tab .tconn { font-size: 10px; padding: 1px 5px; border-radius: 3px; color: var(--dg-faint);
+  background: var(--dg-panel-2); font-family: var(--dg-mono); max-width: 96px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex: none; }
+.dg-tab .tconn.env-prod { background: rgba(220,60,60,.2); color: #ff6b6b; font-weight: 700; }
+.dg-tab .tconn.env-staging { background: rgba(200,140,20,.2); color: var(--dg-amber); font-weight: 600; }
+.dg-tab .tconn.env-dev { color: #6ea8fe; background: rgba(80,130,240,.15); }
+.dg-tab .tconn.env-local, .dg-tab .tconn.env-none { color: var(--dg-muted); }

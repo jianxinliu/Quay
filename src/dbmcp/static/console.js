@@ -49,6 +49,9 @@
   var ENV_COLORS = { local: "#64748b", dev: "#2563eb", staging: "#d97706", prod: "#dc2626" };
   var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
   var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
+  // 列类型 → 表头小图标（DataGrip 风）
+  var COL_GLYPH = { number: "#", string: "T", datetime: "◷", date: "◷", time: "◷",
+                    json: "{}", bool: "☑", binary: "⬡", "": "·" };
 
   var RESERVED = {};
   ("where on group order by having limit join inner left right full outer cross " +
@@ -339,10 +342,12 @@
         delSnip: null, delWf: null, wfAsk: null,
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
-        exportOpen: false, copyOpen: false, editorReady: false, toast: "",
+        exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
+        colMenu: { show: false, x: 0, y: 0, ci: -1 },
+        sug: { open: false, items: [], sel: 0, which: "", word: "" },  // WHERE/ORDER BY 字段提示
         schemaShow: {}, schemaDefault: {}, schemaPickOpen: false,
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
-        leftW: 264, editorH: 300,
+        leftW: 264, editorH: 300, dataLogH: 150,
         theme: "dark",          // 系统设置：dark | light（浅色主题）
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
       };
@@ -496,12 +501,23 @@
                     wfName: opts.wfName || "", wfSteps: null, vsel: null,
                     view: "table", chart: null,
                     graph: opts.graph || null, sel: null, nodeStatus: {},
-                    rowSel: {}, lastSelRi: -1, newRow: null, resQ: null };
+                    rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
+                    // 暂存式编辑：改动先攒着，工具栏「提交」才写库
+                    edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
+                    colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
+                    results: [], resultIdx: 0, isPaging: false };  // 结果 tab（每次执行新增一个）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
         this.switchTab(id);
         this.persist();
         return tab;
+      },
+      // 每个 tab 显示所属连接 + 环境（防止本地/线上混淆）
+      tabConn: function (t) {
+        if (!t.conn) return { name: "无连接", env: "none" };
+        if (t.conn.indexOf("analysis/") === 0) return { name: "⚗ " + t.conn.slice(9), env: "none" };
+        var m = this.connections.find(function (c) { return c.value === t.conn; });
+        return { name: m ? m.connection : t.conn.split("/").pop(), env: (m && m.environment) || "none" };
       },
       togglePin: function (id) {
         var t = this.tabs.find(function (x) { return x.id === id; });
@@ -526,6 +542,12 @@
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
         if (t && t.view === "chart" && t.result) this.renderChart(); else this.disposeChart();
+        if (t && t.type === "data") {
+          this.loadHistory();  // 底部执行记录面板用
+          // 预取表结构：切到（含刷新后恢复的）数据 tab 就备好列类型，
+          // 时间列编辑才能立刻用日期选择器（否则首次编辑取不到类型退化成文本框）
+          if (t.table) { var k = this.mk(t.table, t.schema); if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema); }
+        }
         this.scheduleLint();
       },
       onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
@@ -566,7 +588,19 @@
           else if (self.activeTab) self.loadTree();
         });
       },
-      setConn: function (val) { if (this.activeTab) { this.activeTab.conn = val; this.persist(); this.loadTree(); } },
+      setConn: function (val) {
+        var t = this.activeTab; if (!t || t.conn === val) return;
+        t.conn = val;
+        // 结果/暂存改动都属于旧连接 → 全清，绝不让线上数据残留在新连接标签下
+        t.result = null; t.ok = null; t.err = null; t.confirm = null; t.explain = null;
+        t.readSql = null; t.edits = {}; t.dels = {}; t.adds = []; t.submit = null;
+        t.schema = this.schemaDefault[val] || "";
+        if (t.type === "data") {   // 数据 tab 的表属于旧连接 → 转成普通查询 tab
+          t.type = "query"; t.table = ""; t.title = "查询 " + t.id;
+          var m = models.get(t.id); if (m) m.setValue("");
+        }
+        this.persist(); this.loadTree();
+      },
       setSchema: function (val) {
         var t = this.activeTab; if (!t) return;
         t.schema = val;
@@ -702,12 +736,19 @@
         this.openSub[k][section] = !this.openSub[k][section];
         this.persist();
       },
+      // 清理反射出来的类型串：去掉 collate/character set（字符编码不是类型，不展示）
+      cleanType: function (ty) {
+        return String(ty || "").replace(/\s+collate\s+\S+/ig, "").replace(/\s+character set\s+\S+/ig, "").trim();
+      },
       fetchMeta: function (t, db) {
         var self = this, tab = this.activeTab, k = this.mk(t, db);
-        apiGet("/admin/sql/table?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
+        return apiGet("/admin/sql/table?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
                + (db ? "&schema=" + encodeURIComponent(db) : "")).then(function (d) {
           if (!d.ok) { self.flash(d.error); return; }
-          self.tableMeta[k] = { columns: d.columns || [], indexes: d.indexes || [],
+          var cols = (d.columns || []).map(function (c) {
+            return Object.assign({}, c, { type: self.cleanType(c.type) });  // 类型去掉字符编码
+          });
+          self.tableMeta[k] = { columns: cols, indexes: d.indexes || [],
                                 primary_key: d.primary_key || [] };
           self.persist();
         });
@@ -1195,12 +1236,13 @@
         }
         return text.slice(ranges[ranges.length - 1].s);
       },
-      run: function (confirm, page, sqlOverride) {
+      run: function (confirm, page, sqlOverride, isPage) {
         var self = this, t = this.activeTab;
         if (!t) return;
         if (t.type === "ddl") { this.flash("DDL 为只读视图"); return; }
         if (t.type === "flow" && sqlOverride == null) { this.runFlow(); return; }
         if (!t.conn) { this.flash("请先选择连接"); return; }
+        t.isPaging = !!isPage;  // 翻页更新当前结果 tab；否则新执行=新结果 tab
         var sql;
         if (sqlOverride != null) sql = sqlOverride;
         else if (confirm && t.pendingSql) sql = t.pendingSql;   // 确认执行的是刚才那条
@@ -1251,8 +1293,37 @@
             }
             self.flash(r.ok ? "workflow 运行完成" : "workflow 运行失败（见步骤）");
           }
-          else if (r.kind === "read") { t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page; }
-          else if (r.kind === "confirm") t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
+          else if (r.kind === "read") {
+            t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page;
+            // 数据 tab 预取表结构，保证时间列编辑能用日期选择器（依赖列类型）
+            if (t2.type === "data" && t2.table) {
+              var mk = self.mk(t2.table, t2.schema);
+              if (!self.tableMeta[mk]) self.fetchMeta(t2.table, t2.schema);
+              if (t2.id === self.activeId) self.loadHistory();  // 底部执行记录及时反映刚才的过滤/排序 SQL
+            } else if (t2.type === "query") {
+              // 查询 tab：每次新执行新增一个结果 tab；翻页只更新当前结果 tab
+              if (t2.isPaging && t2.results[t2.resultIdx]) {
+                t2.results[t2.resultIdx].result = r;
+              } else {
+                var nid = t2.results.length ? t2.results[t2.results.length - 1].rid + 1 : 1;
+                t2.results.push({ rid: nid, sql: t2.pendingSql, result: r });
+                if (t2.results.length > 10) t2.results.shift();  // 上限，防 localStorage 膨胀
+                t2.resultIdx = t2.results.length - 1;
+              }
+            }
+          }
+          else if (r.kind === "confirm") {
+            // 读语句（含数据 tab 自动生成的 SELECT）被判为写，多半是 WHERE/ORDER BY 语法错，
+            // 直接报语法错，别弹「确认写操作」误导。
+            var ps = (t2.pendingSql || "").trim().toUpperCase();
+            if (t2.type === "data" || /^(SELECT|WITH|SHOW|DESC|DESCRIBE|EXPLAIN)\b/.test(ps)) {
+              t2.err = "SQL 无法解析，无法作为查询执行 —— 请检查语法" +
+                       (t2.type === "data" ? "（WHERE / ORDER BY 表达式，如 desc 别写成 des）" : "") + "。";
+              t2.confirm = null;
+            } else {
+              t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
+            }
+          }
           else if (r.kind === "write") {
             t2.ok = r;
             if (t2.type === "data") setTimeout(function () { self.run(false, t2.lastPage); }, 60);
@@ -1267,12 +1338,72 @@
       goPage: function (p) {
         var t = this.activeTab;
         if (p < 0 || !t) return;
-        // 翻页沿用上次执行的读语句（光标可能已移动到别的语句上）
-        this.run(false, p, t.type === "data" ? null : t.readSql);
+        // 翻页沿用上次执行的读语句（光标可能已移动到别的语句上），isPage=true → 更新当前结果 tab
+        this.run(false, p, t.type === "data" ? null : t.readSql, true);
+      },
+      // 结果 tab（查询 tab 每次执行新增一个）
+      selectResult: function (i) {
+        var t = this.activeTab, entry = t && t.results[i]; if (!entry) return;
+        t.resultIdx = i; t.readSql = entry.sql; t.err = null; t.ok = null;
+        if (entry.result) {
+          t.result = entry.result; this.persist();
+          if (t.view === "chart") this.$nextTick(this.renderChart);
+        } else {
+          // 刷新后被释放的历史结果 → 重跑该 SQL 恢复（isPaging=true 更新本结果 tab）
+          t.result = null;
+          this.run(false, 0, entry.sql, true);
+        }
+      },
+      closeResult: function (i) {
+        var t = this.activeTab; if (!t || !t.results[i]) return;
+        t.results.splice(i, 1);
+        if (!t.results.length) { t.result = null; t.resultIdx = 0; this.persist(); return; }
+        this.selectResult(Math.min(t.resultIdx, t.results.length - 1));
       },
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
       applyWhere: function () { this.run(false, 0); },
+      // ---------- WHERE / ORDER BY 字段提示 ----------
+      filterCols: function () {
+        var t = this.activeTab; if (!t) return [];
+        if (t.result && t.result.columns && t.result.columns.length) return t.result.columns;
+        var meta = this.tableMeta[this.mk(t.table, t.schema)];
+        return meta ? meta.columns.map(function (c) { return c.name; }) : [];
+      },
+      onFilterInput: function (which, e) {
+        var el = e.target;
+        if (which === "where") this.activeTab.where = el.value; else this.activeTab.orderBy = el.value;
+        var m = el.value.slice(0, el.selectionStart).match(/[\w.]*$/);
+        var word = m ? m[0] : "";
+        if (!word) { this.sug.open = false; return; }
+        var lw = word.toLowerCase();
+        var items = this.filterCols().filter(function (c) {
+          return c.toLowerCase().indexOf(lw) >= 0 && c.toLowerCase() !== lw;
+        }).slice(0, 12);
+        if (!items.length) { this.sug.open = false; return; }
+        this.sug = { open: true, items: items, sel: 0, which: which, word: word };
+      },
+      pickSug: function (col) {
+        var which = this.sug.which;
+        var id = which === "where" ? "dg-where-input" : "dg-order-input";
+        var el = document.getElementById(id);
+        var cur = which === "where" ? this.activeTab.where : this.activeTab.orderBy;
+        var pos = el ? el.selectionStart : cur.length;
+        var before = cur.slice(0, pos).replace(/[\w.]*$/, col), after = cur.slice(pos);
+        if (which === "where") this.activeTab.where = before + after; else this.activeTab.orderBy = before + after;
+        this.sug.open = false;
+        this.$nextTick(function () { if (el) { el.focus(); el.setSelectionRange(before.length, before.length); } });
+      },
+      filterKey: function (which, e) {
+        if (this.sug.open && this.sug.which === which) {
+          if (e.key === "ArrowDown") { e.preventDefault(); this.sug.sel = Math.min(this.sug.sel + 1, this.sug.items.length - 1); return; }
+          if (e.key === "ArrowUp") { e.preventDefault(); this.sug.sel = Math.max(this.sug.sel - 1, 0); return; }
+          if (e.key === "Tab" || e.key === "Enter") { e.preventDefault(); this.pickSug(this.sug.items[this.sug.sel]); return; }
+          if (e.key === "Escape") { e.preventDefault(); this.sug.open = false; return; }
+        }
+        if (e.key === "Enter") this.applyWhere();
+      },
+      blurSug: function () { var self = this; setTimeout(function () { self.sug.open = false; }, 150); },
       // 列头点击与 ORDER BY 输入框联动：点头写入表达式，手写表达式亦可（支持多列/函数）
       cycleOrder: function (col) {
         var t = this.activeTab;
@@ -1308,15 +1439,26 @@
       startEdit: function (ri, ci) {
         var t = this.activeTab;
         if (!t || t.type !== "data" || !t.result) return;
-        var k = this.mk(t.table, t.schema);
-        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
-        var v = t.result.rows[ri][ci];
-        t.edit = { ri: ri, ci: ci, val: v == null ? "NULL" : this.cellText(v) };
+        var k = this.mk(t.table, t.schema), self = this;
+        // 元数据未就绪：先拉列类型，到了再进入编辑——否则时间列取不到类型，退化成文本框
+        if (!this.tableMeta[k]) {
+          this.fetchMeta(t.table, t.schema).then(function () { self.startEdit(ri, ci); });
+          return;
+        }
+        var v = t.result.rows[ri][ci], key = ri + ":" + ci, kind = this.dtKind(ci);
+        var cur = (t.edits && key in t.edits) ? t.edits[key] : (v == null ? "NULL" : this.cellText(v));
+        var raw = cur === "NULL" ? "" : cur, init;
+        if (kind === "datetime") init = this.toDatetimeLocal(raw);
+        else if (kind === "date") init = raw.slice(0, 10);
+        else if (kind === "time") init = raw.slice(0, 8);
+        else init = cur;
+        t.edit = { ri: ri, ci: ci, val: init, dt: !!kind, dtKind: kind };
         this.$nextTick(function () {
           var el = document.getElementById("dg-cell-input");
-          if (el) { el.focus(); el.select(); }
+          if (el) { el.focus(); if (!kind) el.select(); }   // 时间选择器不 select
         });
       },
+
       cancelEdit: function () { if (this.activeTab) this.activeTab.edit = null; },
       // 生成按主键定位的单单元格 UPDATE；失败返回 null（原因已 flash）
       makeUpdateSql: function (t, ri, ci, newRaw) {
@@ -1343,12 +1485,263 @@
       commitEdit: function () {
         var t = this.activeTab;
         if (!t || !t.edit || !t.result) return;
-        var oldV = t.result.rows[t.edit.ri][t.edit.ci];
-        var newRaw = t.edit.val;
-        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) { t.edit = null; return; }
-        var sql = this.makeUpdateSql(t, t.edit.ri, t.edit.ci, newRaw);
+        var ri = t.edit.ri, ci = t.edit.ci, key = ri + ":" + ci, kind = t.edit.dtKind;
+        var oldV = t.result.rows[ri][ci], newRaw;
+        if (kind === "datetime") newRaw = t.edit.val ? this.fromDatetimeLocal(t.edit.val) : "NULL";
+        else if (kind === "date" || kind === "time") newRaw = t.edit.val || "NULL";
+        else newRaw = t.edit.val;
         t.edit = null;
-        if (sql) this.run(false, 0, sql);  // 写确认流：风险报告 → 确认 → writer 执行 → 自动刷新
+        // 暂存：不立即执行，等工具栏「提交」。改回原值则撤销暂存。
+        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
+        else t.edits[key] = newRaw;
+        this.persist();
+      },
+
+      // ---------- 暂存式编辑：攒改动 → 工具栏提交 ----------
+      isEditedCell: function (ri, ci) {
+        var t = this.activeTab; return !!(t && t.edits && (ri + ":" + ci) in t.edits);
+      },
+      isDelRow: function (ri) { var t = this.activeTab; return !!(t && t.dels && t.dels[ri]); },
+      cellNull: function (ri, ci) {
+        var t = this.activeTab, key = ri + ":" + ci;
+        if (t.edits && key in t.edits) return t.edits[key] === "NULL";
+        return t.result.rows[ri][ci] === null;
+      },
+      cellShow: function (ri, ci) {
+        var t = this.activeTab, key = ri + ":" + ci;
+        var edited = t.edits && key in t.edits;
+        var raw = edited ? t.edits[key] : t.result.rows[ri][ci];
+        if (edited ? raw === "NULL" : raw == null) return "NULL";
+        // 列显示类型：数值列按时间戳格式化展示（铁律：仅展示，底层值不变）
+        var disp = this.displayTypeOf(ci);
+        if (disp && disp !== "number" && this.isNumericCol(ci) && raw !== "" && isFinite(+raw)) {
+          return this.formatTs(+raw, disp);
+        }
+        return this.cellText(raw);
+      },
+      // ---------- 列类型识别 + 显示类型（Change Display Type，仅展示不写库） ----------
+      colType: function (ci) {
+        var t = this.activeTab; if (!t || t.type !== "data" || !t.result) return "";
+        var meta = this.tableMeta[this.mk(t.table, t.schema)]; if (!meta) return "";
+        var col = t.result.columns[ci];
+        var c = (meta.columns || []).find(function (x) { return x.name === col; });
+        return c ? String(c.type || "").toLowerCase() : "";
+      },
+      isNumericCol: function (ci) {
+        return /\b(bigint|smallint|mediumint|tinyint|int|integer|decimal|numeric|float|double|real|bit)\b/.test(this.colType(ci));
+      },
+      // 列类型归类：数据 tab 用表结构类型，查询 tab 从本页数据推断
+      colCat: function (ci) {
+        var t = this.activeTab; if (!t || !t.result) return "";
+        var type = t.type === "data" ? this.colType(ci) : "";
+        if (type) {
+          if (/json/.test(type)) return "json";
+          if (/int|decimal|numeric|float|double|real|bit|serial/.test(type)) return "number";
+          if (/datetime|timestamp/.test(type)) return "datetime";
+          if (type === "date") return "date";
+          if (type === "time") return "time";
+          if (/bool/.test(type)) return "bool";
+          if (/blob|binary|bytea/.test(type)) return "binary";
+          return "string";
+        }
+        var rows = t.result.rows;   // 无表结构：扫本页首个非空值推断
+        for (var i = 0; i < rows.length && i < 40; i++) {
+          var v = rows[i][ci]; if (v != null) return this.inferCat(v);
+        }
+        return "";
+      },
+      inferCat: function (v) {
+        if (typeof v === "number") return "number";
+        if (typeof v === "boolean") return "bool";
+        if (typeof v === "object") return "json";
+        var s = String(v).trim();
+        if (/^-?\d+(\.\d+)?$/.test(s)) return "number";
+        if (s[0] === "{" || s[0] === "[") return "json";
+        if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s)) return "datetime";
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return "date";
+        return "string";
+      },
+      colGlyph: function (ci) { return COL_GLYPH[this.colCat(ci)] || "·"; },
+      isJsonCol: function (ci) { return this.colType(ci).indexOf("json") >= 0; },
+      isDatetimeCol: function (ci) {
+        var t = this.colType(ci); return /datetime|timestamp/.test(t) || t === "date" || t === "time";
+      },
+      dtKind: function (ci) {   // 'datetime' | 'date' | 'time' | null，决定用哪种选择器
+        var t = this.colType(ci);
+        if (/datetime|timestamp/.test(t)) return "datetime";
+        if (t === "date") return "date";
+        if (t === "time") return "time";
+        return null;
+      },
+      dtInputType: function (kind) {
+        return kind === "datetime" ? "datetime-local" : kind === "date" ? "date"
+             : kind === "time" ? "time" : "text";
+      },
+      displayTypeOf: function (ci) {
+        var t = this.activeTab; if (!t || !t.result) return "number";
+        return (t.colDisplay && t.colDisplay[t.result.columns[ci]]) || "number";
+      },
+      formatTs: function (n, disp) {
+        var ms = disp === "ts_s" ? n * 1000 : disp === "ts_us" ? n / 1000 : n;
+        var d = new Date(ms); if (isNaN(d.getTime())) return String(n);
+        return this.fmtDateLocal(d);
+      },
+      fmtDateLocal: function (d) {
+        function p(x) { return (x < 10 ? "0" : "") + x; }
+        return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+               p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      },
+      openColMenu: function (e, ci) {
+        var t = this.activeTab; if (!t || t.type !== "data") return;
+        if (!this.isNumericCol(ci)) return;   // 仅数值列可改显示类型（当前支持时间戳）
+        e.preventDefault();
+        this.colMenu = { show: true, x: e.clientX, y: e.clientY, ci: ci };
+      },
+      setDisplayType: function (disp) {
+        var t = this.activeTab, ci = this.colMenu.ci;
+        if (t && ci >= 0) {
+          var col = t.result.columns[ci];
+          if (disp === "number") delete t.colDisplay[col]; else t.colDisplay[col] = disp;
+          this.persist();
+        }
+        this.colMenu.show = false;
+      },
+      closeColMenu: function () { this.colMenu.show = false; },
+      // datetime 列编辑用日期选择器：SQL "YYYY-MM-DD HH:MM:SS" ↔ datetime-local "…T…"
+      toDatetimeLocal: function (s) {
+        if (s == null || s === "NULL" || s === "") return "";
+        return String(s).replace(" ", "T").slice(0, 19);
+      },
+      fromDatetimeLocal: function (s) {
+        if (!s) return "NULL";
+        s = s.replace("T", " ");
+        if (/ \d\d:\d\d$/.test(s)) s += ":00";   // 补秒
+        return s;
+      },
+      onCellBlur: function () {
+        var t = this.activeTab;
+        if (t && t.edit && !t.edit.dt) this.cancelEdit();   // datetime 选择器交互会失焦，不取消
+      },
+      onCellChange: function () {
+        var t = this.activeTab;
+        if (t && t.edit && t.edit.dt) this.commitEdit();     // 选好日期即提交暂存
+      },
+      hasPending: function () {
+        var t = this.activeTab; if (!t) return false;
+        return !!((t.edits && Object.keys(t.edits).length) ||
+                  (t.dels && Object.keys(t.dels).length) || (t.adds && t.adds.length));
+      },
+      pendingCount: function () {
+        var t = this.activeTab; if (!t) return 0;
+        return Object.keys(t.edits || {}).length + Object.keys(t.dels || {}).length + (t.adds || []).length;
+      },
+      clearPending: function (t) { t.edits = {}; t.dels = {}; t.adds = []; },
+      addRow: function (cloneRi) {
+        var t = this.activeTab; if (!t || t.type !== "data" || !t.result) return;
+        var k = this.mk(t.table, t.schema); if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
+        var self = this, meta = this.tableMeta[k];
+        var vals = t.result.columns.map(function (c, ci) {
+          if (cloneRi == null) return "";
+          if (meta && (meta.primary_key || []).indexOf(c) >= 0) return "";  // 主键留自增/默认
+          var v = t.result.rows[cloneRi][ci];
+          return v == null ? "NULL" : self.cellText(v);
+        });
+        t.adds.push({ values: vals }); this.persist();
+      },
+      removeAdd: function (idx) {
+        var t = this.activeTab; if (t && t.adds) { t.adds.splice(idx, 1); this.persist(); }
+      },
+      toggleDelSelected: function () {
+        var t = this.activeTab; if (!t) return;
+        var ris = this.selRis();
+        if (!ris.length) { this.flash("先点行号选中要删除的行"); return; }
+        ris.forEach(function (ri) { if (t.dels[ri]) delete t.dels[ri]; else t.dels[ri] = true; });
+        this.clearRowSel(); this.persist();
+      },
+      pkConds: function (t, ri) {
+        var k = this.mk(t.table, t.schema), meta = this.tableMeta[k];
+        if (!meta) { this.fetchMeta(t.table, t.schema); return { err: "表结构加载中，请稍后再试" }; }
+        var pk = meta.primary_key || [];
+        if (!pk.length) return { err: "该表无主键，改动/删除无法定位行" };
+        var cols = t.result.columns, row = t.result.rows[ri], self = this, miss = false;
+        var conds = pk.map(function (p) {
+          var idx = cols.indexOf(p); if (idx < 0) { miss = true; return null; }
+          var pv = row[idx];
+          return p + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
+        });
+        if (miss) return { err: "结果集缺少主键列，无法定位行" };
+        return { conds: conds };
+      },
+      // 汇总所有暂存改动为 SQL 语句数组（INSERT/UPDATE/DELETE）
+      buildPendingStatements: function (t) {
+        var q = t.schema ? t.schema + "." + t.table : t.table, cols = t.result.columns, self = this;
+        var stmts = [];
+        (t.adds || []).forEach(function (add) {
+          var c = [], v = [];
+          for (var i = 0; i < cols.length; i++) {
+            var raw = add.values[i]; if (raw === "" || raw == null) continue;
+            c.push(cols[i]); v.push(self.sqlLit(raw, null));
+          }
+          if (c.length) stmts.push("INSERT INTO " + q + " (" + c.join(", ") + ") VALUES (" + v.join(", ") + ")");
+        });
+        var byRow = {};
+        Object.keys(t.edits || {}).forEach(function (key) {
+          var p = key.split(":"); (byRow[p[0]] = byRow[p[0]] || []).push({ ci: +p[1], val: t.edits[key] });
+        });
+        for (var ri in byRow) {
+          var pc = this.pkConds(t, ri); if (pc.err) return { err: pc.err };
+          var row = t.result.rows[ri];
+          var sets = byRow[ri].map(function (e) { return cols[e.ci] + " = " + self.sqlLit(e.val, row[e.ci]); });
+          stmts.push("UPDATE " + q + " SET " + sets.join(", ") + " WHERE " + pc.conds.join(" AND "));
+        }
+        var delRis = Object.keys(t.dels || {});
+        for (var di = 0; di < delRis.length; di++) {
+          var pc2 = this.pkConds(t, delRis[di]); if (pc2.err) return { err: pc2.err };
+          stmts.push("DELETE FROM " + q + " WHERE " + pc2.conds.join(" AND "));
+        }
+        return { statements: stmts };
+      },
+      submitPending: function (mode) {
+        this.submitOpen = false;
+        var t = this.activeTab; if (!t) return;
+        if (!this.hasPending()) { this.flash("没有未提交的改动"); return; }
+        var res = this.buildPendingStatements(t);
+        if (res.err) { this.flash(res.err); return; }
+        if (!res.statements.length) { this.flash("无有效改动（新增行至少填一列）"); return; }
+        if (mode === "sql") t.submit = { statements: res.statements, sql: res.statements.join(";\n") + ";" };
+        else this.doSubmit(res.statements);
+      },
+      cancelSubmit: function () { if (this.activeTab) this.activeTab.submit = null; },
+      doSubmit: function (statements) {
+        var t = this.activeTab; if (!t) return;
+        var stmts = statements || (t.submit && t.submit.statements);
+        if (!stmts || !stmts.length) return;
+        var self = this; t.submit = null; t.submitting = true; t.err = null;
+        var chain = Promise.resolve(), fails = [], okc = 0;
+        stmts.forEach(function (sql) {
+          chain = chain.then(function () {
+            return apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: "1" }).then(function (d) {
+              if (d && d.ok) okc++; else fails.push((d && d.error) || ("失败：" + sql));
+            }).catch(function (e) { fails.push("" + e); });
+          });
+        });
+        chain.then(function () {
+          t.submitting = false; self.clearPending(t);
+          self.flash(fails.length ? ("提交完成：成功 " + okc + " 条，失败 " + fails.length + " —— " + fails[0])
+                                  : ("已提交 " + okc + " 条改动"));
+          self.loadHistory();
+          self.run(false, t.result ? t.result.page : 0);  // 重新按条件查询刷新
+        });
+      },
+      refreshData: function () {
+        var t = this.activeTab; if (!t) return;
+        if (this.hasPending()) { t.refreshWarn = true; return; }
+        this.run(false, t.result ? t.result.page : 0);
+      },
+      doRefresh: function () {
+        var t = this.activeTab; if (!t) return;
+        t.refreshWarn = false; this.clearPending(t);
+        this.run(false, t.result ? t.result.page : 0);
       },
 
       // ---------- SQL 实时语法检查（sqlglot 按方言，防抖 600ms → Monaco 红波浪） ----------
@@ -1512,74 +1905,6 @@
         var t = this.activeTab;
         return Object.keys(t.rowSel || {}).map(Number).sort(function (a, b) { return a - b; });
       },
-      // 新增行：网格顶部出现编辑行；留空 = 用列默认值，填 NULL = 显式 NULL
-      startNewRow: function (cloneRi) {
-        var t = this.activeTab;
-        if (!t || t.type !== "data" || !t.result) return;
-        var k = this.mk(t.table, t.schema);
-        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
-        var self = this;
-        var vals = t.result.columns.map(function (c, ci) {
-          if (cloneRi == null) return "";
-          var meta = self.tableMeta[k];
-          if (meta && (meta.primary_key || []).indexOf(c) >= 0) return "";  // 主键留给自增/默认
-          var v = t.result.rows[cloneRi][ci];
-          return v == null ? "NULL" : self.cellText(v);
-        });
-        t.newRow = { values: vals };
-        this.$nextTick(function () {
-          var el = document.querySelector(".dg-newrow input");
-          if (el) el.focus();
-        });
-      },
-      commitNewRow: function () {
-        var t = this.activeTab;
-        if (!t || !t.newRow) return;
-        var cols = [], vals = [];
-        for (var i = 0; i < t.result.columns.length; i++) {
-          var raw = t.newRow.values[i];
-          if (raw === "") continue;               // 留空 → 列默认值
-          cols.push(t.result.columns[i]);
-          vals.push(this.sqlLit(raw, null));      // "NULL" → NULL，其余按字面量
-        }
-        if (!cols.length) { this.flash("至少填写一列（留空 = 用默认值）"); return; }
-        var q = t.schema ? t.schema + "." + t.table : t.table;
-        var sql = "INSERT INTO " + q + " (" + cols.join(", ") + ") VALUES (" + vals.join(", ") + ")";
-        t.newRow = null;
-        this.run(false, 0, sql);   // 写确认流 → writer 执行 → 自动刷新
-      },
-      deleteSelRows: function () {
-        var t = this.activeTab;
-        if (!t || t.type !== "data" || !t.result) return;
-        var ris = this.selRis();
-        if (!ris.length) return;
-        var k = this.mk(t.table, t.schema);
-        var meta = this.tableMeta[k];
-        if (!meta) { this.fetchMeta(t.table, t.schema); this.flash("表结构加载中，请稍后再试"); return; }
-        var pk = meta.primary_key || [];
-        if (!pk.length) { this.flash("该表无主键，无法定位行删除"); return; }
-        var cols = t.result.columns, self = this;
-        var pkIdx = pk.map(function (p) { return cols.indexOf(p); });
-        if (pkIdx.some(function (i) { return i < 0; })) { this.flash("结果集缺少主键列"); return; }
-        var q = t.schema ? t.schema + "." + t.table : t.table;
-        var where;
-        if (pk.length === 1) {
-          var vs = ris.map(function (ri) {
-            var v = t.result.rows[ri][pkIdx[0]];
-            return self.sqlLit(self.cellText(v), v);
-          });
-          where = pk[0] + " IN (" + vs.join(", ") + ")";
-        } else {
-          where = ris.map(function (ri) {
-            return "(" + pk.map(function (p, j) {
-              var v = t.result.rows[ri][pkIdx[j]];
-              return p + (v == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(v), v));
-            }).join(" AND ") + ")";
-          }).join(" OR ");
-        }
-        this.clearRowSel();
-        this.run(false, 0, "DELETE FROM " + q + " WHERE " + where);  // 走写确认流
-      },
       // 选中行复制为各种格式（无选中 = 当前页全部）
       copyRows: function (fmt) {
         var t = this.activeTab;
@@ -1677,14 +2002,19 @@
       // ---------- Value Editor（DataGrip 式侧栏编辑面板，选中单元格展开） ----------
       cellClick: function (ri, ci) {
         var t = this.activeTab;
-        if (!t || t.type !== "data" || !t.result) return;
+        if (!t || !t.result || (t.type !== "data" && t.type !== "query")) return;
         t.vsel = { ri: ri, ci: ci };
-        var v = t.result.rows[ri][ci];
-        this.vpVal = v == null ? "" : this.cellText(v);
-        this.vpNull = v == null;
-        this.vpOpen = true; this.vpTab = this.vpTab || "value";
-        var k = this.mk(t.table, t.schema);
-        if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);  // 预取主键
+        var v = t.result.rows[ri][ci], key = ri + ":" + ci;
+        var staged = t.type === "data" && t.edits && key in t.edits;   // 面板显示已暂存的改动值（若有）
+        this.vpVal = staged ? (t.edits[key] === "NULL" ? "" : t.edits[key]) : (v == null ? "" : this.cellText(v));
+        this.vpNull = staged ? t.edits[key] === "NULL" : v == null;
+        // JSON 列默认进 Record（格式化视图），其余保留上次选择
+        this.vpOpen = true;
+        this.vpTab = this.colCat(ci) === "json" ? "record" : (this.vpTab || "value");
+        if (t.type === "data") {   // 查询 tab 无表/主键，不预取
+          var k = this.mk(t.table, t.schema);
+          if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
+        }
       },
       vpDirty: function () {
         var t = this.activeTab;
@@ -1697,9 +2027,14 @@
         var t = this.activeTab;
         if (!t || !t.vsel) return;
         if (!this.vpDirty()) { this.flash("值未变化"); return; }
+        var key = t.vsel.ri + ":" + t.vsel.ci;
         var newRaw = this.vpNull ? "NULL" : this.vpVal;
-        var sql = this.makeUpdateSql(t, t.vsel.ri, t.vsel.ci, newRaw);
-        if (sql) this.run(false, 0, sql);  // 走写确认流（二次确认）
+        var oldV = t.result.rows[t.vsel.ri][t.vsel.ci];
+        // 暂存到 edits，等工具栏「提交」统一写库（铁律：展示态不写库）
+        if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
+        else t.edits[key] = newRaw;
+        this.persist();
+        this.flash("已暂存改动，点工具栏「提交」写库");
       },
       // Value 面板格式化：JSON 美化 / 压缩（非 JSON 给提示不破坏原值）
       vpFormat: function (pretty) {
@@ -1713,7 +2048,16 @@
         if (!t || !t.vsel || !t.result) return [];
         var row = t.result.rows[t.vsel.ri], self = this;
         return t.result.columns.map(function (c, i) {
-          return { col: c, val: row[i] == null ? null : self.cellText(row[i]), cur: i === t.vsel.ci };
+          var val = row[i] == null ? null : self.cellText(row[i]);
+          var pretty = val, isJson = false;
+          if (val != null) {
+            var tt = ("" + val).trim();
+            if (tt && (tt[0] === "{" || tt[0] === "[")) {
+              try { pretty = JSON.stringify(JSON.parse(tt), null, 2); isJson = true; } catch (e) { /* 非 JSON */ }
+            }
+          }
+          return { col: c, val: val, pretty: pretty, isJson: isJson,
+                   type: self.colType(i) || self.colCat(i) || "", cur: i === t.vsel.ci };
         });
       },
 
@@ -1749,10 +2093,23 @@
       },
       cancelConfirm: function () { if (this.activeTab) this.activeTab.confirm = null; },
       formatSql: function () {
-        var t = this.activeTab; if (!t || t.type === "ddl") return;
-        apiPost("/admin/sql/format", { conn: t.conn, sql: this.currentSql() }).then(function (d) {
-          if (d.ok && d.sql != null) { var m = models.get(t.id); if (m) m.setValue(d.sql); }
+        var self = this, t = this.activeTab; if (!t || t.type === "ddl") return;
+        var model = models.get(t.id), sel = editor && editor.getSelection();
+        var hasSel = sel && !sel.isEmpty();
+        var sql = hasSel ? model.getValueInRange(sel) : this.currentSql();
+        if (!sql.trim()) return;
+        apiPost("/admin/sql/format", { conn: t.conn, sql: sql }).then(function (d) {
+          if (!d.ok || d.sql == null) { if (d.error) self.flash(d.error); return; }
+          if (hasSel && editor) editor.executeEdits("dbm-fmt", [{ range: sel, text: d.sql }]);
+          else if (model) model.setValue(d.sql);
         });
+      },
+      // EXPLAIN ANALYZE：实际执行并返回分析（MySQL 8.0.18+/PG），结果进结果表
+      explainAnalyze: function () {
+        var t = this.activeTab; if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        var sql = t.type === "data" ? this.buildDataSql(t) : this.stmtAtCursor();
+        if (!sql.trim()) { this.flash("请输入 SQL"); return; }
+        this.run(false, 0, "EXPLAIN ANALYZE " + sql);
       },
       exportAs: function (fmt) {
         this.exportOpen = false;
@@ -1823,16 +2180,32 @@
                      lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
+                     edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
+                     colDisplay: t.colDisplay || {},
+                     // 只持久化「当前」结果 tab 的行数据，其余只留 SQL 骨架（点击时重跑）
+                     results: (t.results || []).map(function (rt, i) {
+                       return { rid: rt.rid, sql: rt.sql, result: i === t.resultIdx ? rt.result : null };
+                     }),
+                     resultIdx: t.resultIdx || 0,
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null };
           }, this);
-          var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
-                       leftW: this.leftW, editorH: this.editorH,
+          var activeId = this.activeId;
+          var data = { v: 2, tabs: tabs, activeId: activeId, treeCache: this.treeCache,
+                       leftW: this.leftW, editorH: this.editorH, dataLogH: this.dataLogH,
                        schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
+          function dropResults(pred) {
+            tabs.forEach(function (t) {
+              if (!pred(t)) return;
+              t.result = null;
+              (t.results || []).forEach(function (rt) { rt.result = null; });
+            });
+          }
           var s = JSON.stringify(data);
-          if (s.length > 3800000) {  // localStorage 上限兜底：丢结果、保 SQL 与树
-            tabs.forEach(function (t) { t.result = null; });
+          if (s.length > 3000000) {  // 逐级降级：先丢非当前 tab 的结果集（保 SQL/树），再丢全部
+            dropResults(function (t) { return t.id !== activeId; });
             s = JSON.stringify(data);
+            if (s.length > 3800000) { dropResults(function () { return true; }); s = JSON.stringify(data); }
           }
           localStorage.setItem(STORE_KEY, s);
         } catch (e) { /* 存储失败不影响使用 */ }
@@ -1857,12 +2230,17 @@
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null, sel: null, nodeStatus: {},
                      rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
+                     edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
+                     submit: null, submitting: false, refreshWarn: false,
+                     colDisplay: t.colDisplay || {},
+                     results: t.results || [], resultIdx: t.resultIdx || 0, isPaging: false,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
           this.activeId = d.activeId || this.tabs[0].id;
           this.treeCache = d.treeCache || {};
           if (d.leftW) this.leftW = d.leftW;
           if (d.editorH) this.editorH = d.editorH;
+          if (d.dataLogH != null) this.dataLogH = d.dataLogH;
           this.schemaShow = d.schemaShow || {};
           this.schemaDefault = d.schemaDefault || {};
           seq = Math.max.apply(null, this.tabs.map(function (t) { return t.id; })) + 1;
@@ -1872,11 +2250,13 @@
       // ---------- 拖动分隔条 ----------
       beginDrag: function (e, axis) {
         var self = this, start = axis === "x" ? e.clientX : e.clientY;
-        var base = axis === "x" ? this.leftW : this.editorH;
+        var base = axis === "x" ? this.leftW : axis === "log" ? this.dataLogH : this.editorH;
         e.preventDefault();
         function move(ev) {
           var delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
           if (axis === "x") self.leftW = Math.max(180, Math.min(560, base + delta));
+          // log 面板在底部：手柄在其上方，往下拖变矮 → base - delta
+          else if (axis === "log") self.dataLogH = Math.max(0, Math.min(window.innerHeight - 240, base - delta));
           else self.editorH = Math.max(100, Math.min(window.innerHeight - 160, base + delta));
         }
         function up() {
@@ -1905,11 +2285,35 @@
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
           readOnly: !!this.activeTab && this.activeTab.type === "ddl",
+          // hover/补全等浮层渲染到 body 层的固定容器：不再被编辑器容器裁切，
+          // Monaco 会按真实可视空间决定弹在光标上方还是下方（顶部空间不够就弹下面）
+          fixedOverflowWidgets: true,
         });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { self.run(false); });
         editor.onDidBlurEditorText(function () { self.persist(); });
         editor.onDidChangeModelContent(function () { self.scheduleLint(); });  // 实时语法检查
         this.scheduleLint();
+        // 右键菜单：格式化（选中/全部）/ EXPLAIN / EXPLAIN ANALYZE
+        editor.addAction({ id: "dbm-format", label: "格式化 SQL（有选中则格式化选中，否则全部）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 1, run: function () { self.formatSql(); } });
+        editor.addAction({ id: "dbm-explain", label: "EXPLAIN（执行计划）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 2, run: function () { self.explainStmt(); } });
+        editor.addAction({ id: "dbm-explain-analyze", label: "EXPLAIN ANALYZE（实际执行并分析）",
+          contextMenuGroupId: "dbm", contextMenuOrder: 3, run: function () { self.explainAnalyze(); } });
+        // 函数文档 hover：光标悬停在 MySQL 内置函数上 → 中文说明 + 用法 + 官方文档链接
+        monaco.languages.registerHoverProvider("sql", {
+          provideHover: function (model, position) {
+            var w = model.getWordAtPosition(position); if (!w) return null;
+            var doc = window.SQL_FUNCS_DOC && window.SQL_FUNCS_DOC[w.word.toUpperCase()];
+            if (!doc) return null;
+            // 单个 markdown 块（多块在编辑器顶部易被裁切，只剩最后一行）
+            var md = "**" + w.word.toUpperCase() + "()**" + (doc.group ? "　·　" + doc.group : "") + "\n\n" +
+                     (doc.summary || "") + "\n\n`" + (doc.syntax || "") + "`" +
+                     (doc.url ? "\n\n[📖 MySQL 官方文档](" + doc.url + ")" : "");
+            return { range: new monaco.Range(position.lineNumber, w.startColumn, position.lineNumber, w.endColumn),
+              contents: [{ value: md }] };
+          }
+        });
         // 上下文感知补全（DataGrip 式）：
         // - `库.` → 该库的表；`表./别名.` → 列
         // - FROM/JOIN/UPDATE/INTO 后 → 表；SELECT/WHERE/ON/BY/SET 等后 → 当前语句各表的列
@@ -2180,6 +2584,7 @@
            draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">
         <span class="ticon" v-if="t.type==='data'">▦</span><span class="ticon" v-else-if="t.type==='ddl'">≔</span>
         <span class="nm">{{ t.title }}</span>
+        <span class="tconn" :class="'env-'+tabConn(t).env" :title="'连接：'+t.conn">{{ tabConn(t).name }}</span>
         <span class="pin" :class="{on: t.pinned}" @click.stop="togglePin(t.id)"
               :title="t.pinned ? '取消固定' : '固定（防误关）'">⚲</span>
         <span v-if="!t.pinned" class="x" @click.stop="closeTab(t.id)">✕</span>
@@ -2331,17 +2736,48 @@
     <div class="dg-hsplit" v-show="activeTab && (activeTab.type==='query' || activeTab.type==='flow')" @mousedown="beginDrag($event, 'y')"></div>
     <div class="dg-results" v-show="activeTab && activeTab.type!=='ddl'">
       <template v-if="activeTab">
+        <div v-if="activeTab.type==='data'" class="dg-toolbar">
+          <button class="dg-btn" @click="refreshData" title="按当前条件重新查询（有未提交改动会提醒）">↻ 刷新</button>
+          <span class="tb-sep"></span>
+          <button class="dg-btn" @click="addRow(null)" title="新增一行，提交时生成 INSERT">＋ 加行</button>
+          <button class="dg-btn" :disabled="!selRowCount()" @click="toggleDelSelected"
+                  title="标记/取消标记选中行删除，提交时生成 DELETE">－ 减行</button>
+          <span class="tb-sep"></span>
+          <span class="dg-menu">
+            <button class="dg-btn run" :disabled="!hasPending()" @click.stop="submitOpen=!submitOpen">
+              提交<template v-if="pendingCount()">（{{ pendingCount() }}）</template> ▾</button>
+            <div v-if="submitOpen" class="dg-menu-pop">
+              <button @click="submitPending('sql')">SQL 确认后提交</button>
+              <button @click="submitPending('direct')">直接提交</button>
+            </div>
+          </span>
+          <button class="dg-btn" @click="openDdlTab(activeTab.table, activeTab.schema)"
+                  title="在新 tab 查看格式化的建表语句">DDL</button>
+          <span v-if="hasPending()" class="tb-pending">● {{ pendingCount() }} 处未提交</span>
+        </div>
         <div v-if="activeTab.type==='data'" class="dg-where">
           <span class="k">WHERE</span>
-          <input id="dg-where-input" v-model="activeTab.where" placeholder="status = 'paid' AND amount > 100"
-                 @keydown.enter="applyWhere">
+          <span class="dg-sug-wrap">
+            <input id="dg-where-input" :value="activeTab.where" placeholder="status = 'paid' AND amount > 100"
+                   @input="onFilterInput('where',$event)" @keydown="filterKey('where',$event)" @blur="blurSug">
+            <div v-if="sug.open && sug.which==='where'" class="dg-sug">
+              <div v-for="(c,i) in sug.items" :key="c" class="item" :class="{sel:i===sug.sel}"
+                   @mousedown.prevent="pickSug(c)">{{ c }}</div>
+            </div>
+          </span>
           <span class="k">ORDER BY</span>
-          <input class="obin" v-model="activeTab.orderBy" placeholder="amount DESC, id"
-                 @keydown.enter="applyWhere" title="任意排序表达式，回车应用；点列头快捷设置">
+          <span class="dg-sug-wrap obwrap">
+            <input id="dg-order-input" class="obin" :value="activeTab.orderBy" placeholder="amount DESC, id"
+                   @input="onFilterInput('orderBy',$event)" @keydown="filterKey('orderBy',$event)" @blur="blurSug"
+                   title="任意排序表达式，回车应用；点列头快捷设置">
+            <div v-if="sug.open && sug.which==='orderBy'" class="dg-sug">
+              <div v-for="(c,i) in sug.items" :key="c" class="item" :class="{sel:i===sug.sel}"
+                   @mousedown.prevent="pickSug(c)">{{ c }}</div>
+            </div>
+          </span>
           <button class="dg-btn" @click="applyWhere">应用</button>
           <button v-if="activeTab.where || activeTab.orderBy" class="dg-btn"
                   @click="activeTab.where='';activeTab.orderBy='';applyWhere()">清除</button>
-          <button class="dg-btn" @click="startNewRow(null)" title="在网格里填一行，生成 INSERT 走写确认">＋ 新增行</button>
         </div>
         <div v-if="activeTab.explain" class="dg-explain">
           <div class="hd"><b>执行计划</b><span class="act" @click="closeExplain">✕ 关闭</span></div>
@@ -2364,9 +2800,29 @@
             {{ st.ok ? "✓" : "✗" }} {{ st.step }}<template v-if="st.rows!=null">（{{ st.rows }} 行）</template>
             <template v-if="st.error">— {{ st.error }}</template></div>
         </div>
+        <div v-if="activeTab.refreshWarn" class="dg-confirm">
+          <h4>有未提交的改动</h4>
+          <div style="font-size:13px;color:var(--dg-muted)">刷新会丢弃当前所有未提交改动（{{ pendingCount() }} 处），确定继续？</div>
+          <div class="acts"><button class="dg-btn danger" @click="doRefresh">继续刷新（丢弃改动）</button>
+            <button class="dg-btn" @click="activeTab.refreshWarn=false">取消</button></div>
+        </div>
+        <div v-if="activeTab.submit" class="dg-confirm">
+          <h4>确认提交 · {{ activeTab.submit.statements.length }} 条语句</h4>
+          <div style="font-size:12px;color:var(--dg-muted)">将由 writer 账号依次执行并记入审计（后台旁路，不进审批单）。</div>
+          <pre class="dg-submit-sql">{{ activeTab.submit.sql }}</pre>
+          <div class="acts"><button class="dg-btn ok" @click="doSubmit()">确认提交（writer 执行）</button>
+            <button class="dg-btn" @click="cancelSubmit">取消</button></div>
+        </div>
         <div v-if="activeTab.err" class="dg-res-err">⚠ {{ activeTab.err }}</div>
         <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{ activeTab.ok.affected_rows }} 行 · {{ activeTab.ok.duration_ms }} ms</div>
         <template v-else-if="activeTab.result">
+          <div v-if="activeTab.type==='query' && activeTab.results && activeTab.results.length" class="dg-restabs">
+            <div v-for="(rt,i) in activeTab.results" :key="rt.rid" class="rtab" :class="{on: i===activeTab.resultIdx}"
+                 :title="rt.sql" @click="selectResult(i)">
+              <span class="rl">结果 {{ i+1 }}</span>
+              <span class="rx" @click.stop="closeResult(i)">✕</span>
+            </div>
+          </div>
           <div class="dg-res-meta">
             <span>{{ activeTab.result.paginated ? "本页 " : "" }}{{ activeTab.result.rows.length }} 行</span>
             <span v-if="activeTab.result.duration_ms!=null">{{ activeTab.result.duration_ms }} ms</span>
@@ -2387,9 +2843,9 @@
                   <button @click="copyRows('json')">JSON</button>
                 </div></span>
               <button v-if="activeTab.type==='data' && selRowCount()===1" class="dg-btn"
-                      @click="startNewRow(selRis()[0])" title="以选中行为模板新增（主键留空）">克隆</button>
+                      @click="addRow(selRis()[0])" title="以选中行为模板暂存新增（主键留空）">克隆</button>
               <button v-if="activeTab.type==='data'" class="dg-btn danger"
-                      @click="deleteSelRows" title="按主键生成 DELETE，走写确认">删除</button>
+                      @click="toggleDelSelected" title="标记选中行删除（提交时执行）">标记删除</button>
               <a class="act" @click="clearRowSel">✕</a>
             </span>
             <span v-if="activeTab.resQ" class="dg-resq">
@@ -2429,42 +2885,45 @@
           <div class="dg-res-scroll"><table class="dg-rt">
             <thead><tr>
               <th class="gut" title="点击行号选择行（⇧范围 / ⌘多选）">#</th>
-              <th v-for="c in activeTab.result.columns" :key="c"
+              <th v-for="(c,ci) in activeTab.result.columns" :key="c"
                   :class="{sortable: activeTab.type==='data'}"
                   @click="activeTab.type==='data' && cycleOrder(c)"
-                  :title="activeTab.type==='data' ? '点击排序（走 SQL）' : c">
-                {{ c }}{{ orderMark(c) }}
+                  @contextmenu="activeTab.type==='data' && openColMenu($event, ci)"
+                  :title="activeTab.type==='data' ? '点击排序（走 SQL）· 右键改显示类型' : c">
+                <span class="ctype" :class="'ct-'+colCat(ci)" :title="'类型：'+(colCat(ci)||'未知')">{{ colGlyph(ci) }}</span>{{ c }}{{ orderMark(c) }}
+                <span v-if="activeTab.type==='data' && displayTypeOf(ci)!=='number'" class="disp-badge" title="按时间戳展示（仅展示，不改值）">🕒</span>
                 <span v-if="activeTab.type==='data'" class="funnel" @click.stop="funnel(c)" title="按此列筛选（填入 WHERE）">⧩</span>
               </th>
             </tr></thead>
             <tbody>
-            <tr v-if="activeTab.newRow" class="dg-newrow">
-              <td class="gut nw" title="填写后回车提交；留空列用默认值，填 NULL 为显式 NULL">＋</td>
-              <td v-for="(c,ci) in activeTab.result.columns" :key="'n'+ci">
-                <input v-model="activeTab.newRow.values[ci]" :placeholder="c"
-                       @keydown.enter="commitNewRow" @keydown.esc="activeTab.newRow=null">
+            <!-- 暂存的新增行 -->
+            <tr v-for="(add,ai) in activeTab.adds" :key="'a'+ai" class="dg-newrow">
+              <td class="gut nw" @click="removeAdd(ai)" title="移除此新增行">✕</td>
+              <td v-for="(c,ci) in activeTab.result.columns" :key="'a'+ai+'-'+ci">
+                <input v-model="add.values[ci]" :placeholder="c" @keydown.esc="removeAdd(ai)">
               </td>
             </tr>
-            <tr v-for="(row,ri) in activeTab.result.rows" :key="ri" :class="{rsel: activeTab.rowSel && activeTab.rowSel[ri]}">
-              <td class="gut" @mousedown.prevent @click.stop="rowClick(ri,$event)">{{ ri+1 }}</td>
+            <tr v-for="(row,ri) in activeTab.result.rows" :key="ri"
+                :class="{rsel: activeTab.rowSel && activeTab.rowSel[ri], delrow: isDelRow(ri)}">
+              <td class="gut" @mousedown.prevent @click.stop="rowClick(ri,$event)"
+                  :title="isDelRow(ri) ? '已标记删除（提交时执行）' : '点击选择行'">{{ isDelRow(ri) ? '␡' : ri+1 }}</td>
               <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)" :data-cell="ri+':'+ci"
                   :class="{editable: activeTab.type==='data', vsel: activeTab.vsel && activeTab.vsel.ri===ri && activeTab.vsel.ci===ci,
-                           hit: isHit(ri,ci), curhit: isCurHit(ri,ci)}"
+                           edited: isEditedCell(ri,ci), hit: isHit(ri,ci), curhit: isCurHit(ri,ci)}"
                   @click="cellClick(ri,ci)"
                   @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
                 <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
-                       id="dg-cell-input" class="dg-cell-edit" v-model="activeTab.edit.val"
-                       @keydown.enter="commitEdit" @keydown.esc="cancelEdit" @blur="cancelEdit">
+                       id="dg-cell-input" class="dg-cell-edit"
+                       :type="dtInputType(activeTab.edit.dtKind)" step="1"
+                       v-model="activeTab.edit.val"
+                       @keydown.enter="commitEdit" @keydown.esc="cancelEdit"
+                       @blur="onCellBlur" @change="onCellChange">
+                <template v-else-if="activeTab.type==='data'"><span v-if="cellNull(ri,ci)" class="nul">NULL</span><span v-else>{{ cellShow(ri,ci) }}</span></template>
                 <template v-else><span v-if="v===null" class="nul">NULL</span><span v-else>{{ cellText(v) }}</span></template>
               </td>
             </tr></tbody>
-          </table>
-          <div v-if="activeTab.newRow" class="dg-newrow-acts">
-            <button class="dg-btn run" @click="commitNewRow">插入（生成 INSERT）</button>
-            <button class="dg-btn" @click="activeTab.newRow=null">取消</button>
-            <span class="hint">留空列用数据库默认值；填 NULL 为显式 NULL</span>
-          </div></div>
-          <div v-if="vpOpen && activeTab.type==='data' && activeTab.vsel" class="dg-vp">
+          </table></div>
+          <div v-if="vpOpen && (activeTab.type==='data' || activeTab.type==='query') && activeTab.vsel" class="dg-vp">
             <div class="vp-hd">
               <span class="vt" :class="{on: vpTab==='value'}" @click="vpTab='value'">Value</span>
               <span class="vt" :class="{on: vpTab==='record'}" @click="vpTab='record'">Record</span>
@@ -2472,29 +2931,50 @@
             </div>
             <template v-if="vpTab==='value'">
               <div class="vp-col">{{ activeTab.result.columns[activeTab.vsel.ci] }}</div>
-              <textarea class="vp-ta" v-model="vpVal" :disabled="vpNull"
+              <textarea class="vp-ta" v-model="vpVal" :disabled="vpNull" :readonly="activeTab.type!=='data'"
                         placeholder="（空字符串）" spellcheck="false"></textarea>
               <div class="vp-fmt">
                 <button class="dg-btn" @click="vpFormat(true)" title="JSON 美化（缩进 2 空格）">格式化 JSON</button>
                 <button class="dg-btn" @click="vpFormat(false)" title="JSON 压缩为单行">压缩</button>
               </div>
-              <label class="vp-null"><input type="checkbox" v-model="vpNull"> 设为 NULL</label>
-              <div class="vp-acts">
-                <button class="dg-btn run" :disabled="!vpDirty()" @click="vpSave"
-                        title="生成 UPDATE，经风险确认后由 writer 执行">保存（生成 UPDATE）</button>
-                <span v-if="vpDirty()" class="vp-dirty">已修改</span>
-              </div>
+              <template v-if="activeTab.type==='data'">
+                <label class="vp-null"><input type="checkbox" v-model="vpNull"> 设为 NULL</label>
+                <div class="vp-acts">
+                  <button class="dg-btn run" :disabled="!vpDirty()" @click="vpSave"
+                          title="暂存改动，点工具栏「提交」写库">保存改动（暂存）</button>
+                  <span v-if="vpDirty()" class="vp-dirty">已修改</span>
+                </div>
+              </template>
+              <div v-else class="vp-null">只读 · 查询结果不可就地编辑（可格式化查看）</div>
             </template>
             <template v-else>
               <div class="vp-rec">
                 <div v-for="r in vpRecord()" :key="r.col" class="vp-rec-row" :class="{cur: r.cur}">
-                  <span class="rc">{{ r.col }}</span>
-                  <span class="rv"><i v-if="r.val===null" class="nul">NULL</i><template v-else>{{ r.val }}</template></span>
+                  <div class="rc-hd"><span class="rc">{{ r.col }}</span><span class="rt" v-if="r.type">{{ r.type }}</span></div>
+                  <div class="rv"><i v-if="r.val===null" class="nul">NULL</i>
+                    <pre v-else-if="r.isJson" class="rj">{{ r.pretty }}</pre>
+                    <template v-else>{{ r.val }}</template></div>
                 </div>
               </div>
             </template>
           </div>
           </div>
+          <!-- 表数据视图：底部可拖拽的 SQL 执行记录面板 -->
+          <template v-if="activeTab.type==='data' && dataLogH>0">
+            <div class="dg-loghandle" @mousedown="beginDrag($event,'log')" title="拖动调整高度"></div>
+            <div class="dg-datalog" :style="{height: dataLogH+'px'}">
+              <div class="dl-hd">SQL 执行记录 <span class="muted">· 本连接最近</span>
+                <span class="dl-x" @click="loadHistory" title="刷新">↻</span></div>
+              <div class="dl-body">
+                <div v-if="!history.length" class="dl-empty">（暂无记录）</div>
+                <div v-for="(h,hi) in history" :key="hi" class="dl-row" :title="h.sql" @click="openHistory(h)">
+                  <span class="st" :class="h.status==='ok'?'ok':'bad'">{{ h.status==='ok'?'✓':'✗' }}</span>
+                  <span class="sql">{{ h.sql }}</span>
+                  <span class="tm">{{ fmtTs(h.ts).slice(5) }}</span>
+                </div>
+              </div>
+            </div>
+          </template>
         </template>
         <div v-else class="dg-res-empty">{{ activeTab.type==='data' ? "加载中…" : "运行查询查看结果（⌘/Ctrl+Enter）。" }}</div>
       </template>
@@ -2517,6 +2997,17 @@
     <div class="sep"></div>
     <button class="danger" @click="ctxAction('drop')">{{ ctx.multi ? ("DROP " + selCount + " 张表…") : "DROP 表…" }}</button>
   </div>
+  <!-- 列显示类型菜单（数值列右键；仅展示不改值） -->
+  <template v-if="colMenu.show">
+    <div class="dg-ctx-backdrop" @click="closeColMenu" @contextmenu.prevent="closeColMenu"></div>
+    <div class="dg-ctx dg-colmenu" :style="{left: colMenu.x+'px', top: colMenu.y+'px'}" @click.stop>
+      <div class="hd">更改显示类型 · {{ activeTab && activeTab.result ? activeTab.result.columns[colMenu.ci] : '' }}</div>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='number'}" @click="setDisplayType('number')">Number（原值）</button>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='ts_s'}" @click="setDisplayType('ts_s')">Timestamp（秒）</button>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='ts_ms'}" @click="setDisplayType('ts_ms')">Timestamp（毫秒）</button>
+      <button :class="{on: displayTypeOf(colMenu.ci)==='ts_us'}" @click="setDisplayType('ts_us')">Timestamp（微秒）</button>
+    </div>
+  </template>
   <div v-if="tblSearch" class="dg-tblsearch" @click.self="tblSearch=null">
     <div class="box">
       <input id="dg-tblsearch-input" v-model="tblSearch.q" placeholder="输入表名跳转（当前连接跨库搜索）…"
