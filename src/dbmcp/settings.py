@@ -13,11 +13,13 @@ from pathlib import Path
 # 已知设置项及默认值。get_all 始终返回全部键（缺失回落默认），前端无需兜底。
 DEFAULTS: dict[str, object] = {
     "theme": "dark",           # 界面主题：dark（深色）/ light（浅色），作用于查询台与 Redis 控制台
+    "sql_page_size": 100,      # 查询台（DB）结果每页行数
     "redis_page_size": 100,    # Redis 结果每页行数（键详情集合 / 命令结果）
     "redis_key_limit": 1000,   # Redis 键列表默认加载上限（SCAN）
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
+    "sql_page_size": (10, 2000),
     "redis_page_size": (10, 2000),
     "redis_key_limit": (100, 100_000),
 }

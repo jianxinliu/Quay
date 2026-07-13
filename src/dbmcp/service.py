@@ -196,7 +196,8 @@ class DbmService:
         verdict = classify(sql, cfg.engine)
         if verdict.readonly:
             page = max(page, 0)
-            size = min(page_size or ADMIN_PAGE_SIZE, cfg.policy.max_rows)
+            default_size = int(self._setting("sql_page_size") or ADMIN_PAGE_SIZE)
+            size = min(page_size or default_size, cfg.policy.max_rows)
             paged_sql, paginated, ordered = engines.paginate_sql(
                 sql, cfg.engine, size + 1, page * size)
             if paginated:
