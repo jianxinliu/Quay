@@ -1316,11 +1316,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         db = _db_param(str(f.get("db") or "") or None)
         confirm = str(f.get("confirm") or "") in ("1", "true", "on", "yes")
+        confirm_text = str(f.get("confirm_text") or "") or None
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             out = await anyio.to_thread.run_sync(
                 service.admin_redis_run, project, connection,
-                str(f.get("command") or ""), _caller(req), confirm, db)
+                str(f.get("command") or ""), _caller(req), confirm, db, confirm_text)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **out})

@@ -743,7 +743,7 @@ class DbmService:
         return cfg
 
     def redis_databases(self, project: str, connection: str, caller: CallerInfo) -> list[dict]:
-        """列出有数据的库（INFO keyspace，空库不出现）。对标 Medis 左侧库列表。"""
+        """列出全部逻辑库（db0..N-1），有数据的带键数。对标 Medis 底部库切换器。"""
         cfg = self._redis_cfg(project, connection)
         return self._audited(
             project, connection, cfg, "redis_keyspace", "", caller,
@@ -776,7 +776,7 @@ class DbmService:
 
     def admin_redis_run(
         self, project: str, connection: str, command: str, caller: CallerInfo,
-        confirm: bool = False, db: int | None = None,
+        confirm: bool = False, db: int | None = None, confirm_text: str | None = None,
     ) -> dict:
         """后台命令窗口专用入口（对标 admin_run_sql 的 Redis 版）。
 
@@ -784,8 +784,11 @@ class DbmService:
         - 写命令 + confirm=False：返回风险报告，不执行。
         - 写命令 + confirm=True：writer（无 writer 则 reader）直接执行并审计（tool=admin_execute）。
           Redis 只供人通过后台操作（不暴露给 agent），故无 agent 侧审批流。
+        - **生产环境写命令**：单次确认不够，须额外输入连接名（confirm_text）匹配才放行，
+          防误清线上库（对齐 SQL 侧 prod 强管控）。
         """
         cfg = self._redis_cfg(project, connection)
+        is_prod = (cfg.environment or "").lower() == "prod"
         verdict = classify_command(command)
         parts = parse_command(command)
 
@@ -811,8 +814,14 @@ class DbmService:
 
         if not confirm:
             return {"kind": "confirm", "statement_kind": f"Redis:{verdict.command}",
+                    "prod": is_prod, "expect_text": connection if is_prod else None,
                     "risk": {"level": verdict.level, "statement_kind": f"Redis:{verdict.command}",
                              "tables": [], "reasons": [verdict.reason], "warnings": []}}
+
+        # 生产环境：确认之外还须输入连接名匹配，否则拒绝执行
+        if is_prod and (confirm_text or "").strip() != connection:
+            raise QueryRejected(
+                f"生产环境写命令需输入连接名「{connection}」确认后才执行")
 
         rec = self._base_record(project, connection, cfg, "admin_execute", command, caller)
         rec.fingerprint = command_fingerprint(command)

@@ -47,12 +47,18 @@ def service(tmp_path):
 
 
 class TestBrowse:
-    def test_databases_only_lists_with_data(self, service):
+    def test_databases_list_all_with_counts(self, service):
         dbs = service.redis_databases("local", "r", CALLER)
-        idxs = [d["db"] for d in dbs]
-        assert TEST_DB in idxs
-        # 每个列出的库都必须有键（keys > 0）——空库不出现
-        assert all(d["keys"] > 0 for d in dbs)
+        by_db = {d["db"]: d for d in dbs}
+        # 列出全部逻辑库（含 db0），而非只有有数据的
+        assert 0 in by_db
+        # 测试库有键，键数 > 0
+        assert by_db[TEST_DB]["keys"] > 0
+        # 至少覆盖到测试库编号（默认 16 库，TEST_DB=14 应在范围内）
+        assert max(by_db) >= TEST_DB
+        # 与测试库不同的某个空库应 keys=0（除非它恰好有数据；取一个大概率空的）
+        empty_candidates = [d for k, d in by_db.items() if k != TEST_DB and d["keys"] == 0]
+        assert empty_candidates  # 全部库里应有空库出现
 
     def test_keys_and_value(self, service):
         out = service.redis_keys("local", "r", CALLER, db=TEST_DB, pattern="*")

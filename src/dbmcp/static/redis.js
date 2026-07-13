@@ -55,7 +55,7 @@
         filter: "",                   // 键匹配（SCAN match，默认 *）
         sel: null,                    // 当前选中键名
         keyView: null, keyLoading: false,
-        cmdResult: null, cmdErr: null, cmdConfirm: null, running: false,
+        cmdResult: null, cmdErr: null, cmdConfirm: null, confirmText: "", running: false,
         doc: null, docCmd: "",        // 当前命令文档 + 命令名
         view: "result",               // result | key —— 主区展示命令结果还是键详情
         editorReady: false, toast: "",
@@ -221,8 +221,10 @@
           if (!d.ok) { self.flash(d.error); self.dbs = []; return; }
           self.dbs = d.databases || [];
           var valid = self.dbs.some(function (x) { return x.db === self.db; });
+          // 默认选第一个有数据的库；全空则退回 db0
+          var target = self.dbs.filter(function (x) { return x.keys > 0; })[0] || self.dbs[0];
           if (self.db != null && valid) self.loadKeys();       // 恢复的库：直接加载键
-          else if (self.dbs.length) self.selectDb(self.dbs[0].db);  // 默认选第一个有数据的库
+          else if (target) self.selectDb(target.db);
         });
       },
       selectDb: function (db) {
@@ -244,8 +246,37 @@
         }).catch(function () { self.keysLoading = false; });
       },
       refreshAll: function () { this.loadDbs(); this.loadKeys(); },
+      // {父文件夹路径: [子文件夹名(已排序)]} —— 供深度优先「只展第一个」用
+      buildFolderTree: function () {
+        var map = {};
+        this.keys.forEach(function (k) {
+          var parts = k.key.split(":");
+          for (var i = 0; i < parts.length - 2; i++) {   // i+1 仍是文件夹（末段是叶子键）
+            var parent = parts.slice(0, i + 1).join(":");
+            (map[parent] = map[parent] || {})[parts[i + 1]] = true;
+          }
+        });
+        var out = {};
+        for (var p in map) out[p] = Object.keys(map[p]).sort();
+        return out;
+      },
+      // 点击文件夹：深度优先只展开「第一个」子文件夹这一条链，一直钻到底。
+      // 不做广度展开（同层其他文件夹保持折叠），避免子项很多时刷屏。
       toggleFolder: function (path) {
-        this.openFolder[path] = !this.openFolder[path];
+        var self = this;
+        if (this.openFolder[path]) {   // 已展开 → 收起该路径及其下全部
+          var prefix = path + ":";
+          Object.keys(this.openFolder).forEach(function (p) {
+            if (p === path || p.indexOf(prefix) === 0) self.openFolder[p] = false;
+          });
+          return;
+        }
+        var tree = this.buildFolderTree(), cur = path;
+        this.openFolder[cur] = true;
+        while (tree[cur] && tree[cur].length) {   // 每层只取排序后的第一个子文件夹
+          cur = cur + ":" + tree[cur][0];
+          this.openFolder[cur] = true;
+        }
       },
 
       // ---------- 键详情 ----------
@@ -315,16 +346,20 @@
         if (!cmd) { this.flash("光标所在行没有命令"); return; }
         this.execCommand(cmd, false);
       },
-      execCommand: function (cmd, confirm) {
+      execCommand: function (cmd, confirm, confirmText) {
         var self = this;
         this.running = true; this.cmdErr = null; this.cmdPage = 0;
         if (!confirm) { this.cmdResult = null; this.cmdConfirm = null; }
         this.view = "result";
-        apiPost("/admin/redis/run", { conn: this.conn, db: this.db, command: cmd, confirm: confirm ? "1" : "" })
+        apiPost("/admin/redis/run", { conn: this.conn, db: this.db, command: cmd,
+                                      confirm: confirm ? "1" : "", confirm_text: confirmText || "" })
           .then(function (d) {
             self.running = false;
-            if (!d.ok) { self.cmdErr = d.error; return; }
-            if (d.kind === "confirm") { self.cmdConfirm = { cmd: cmd, risk: d.risk }; return; }
+            if (!d.ok) { self.cmdErr = d.error; self.cmdConfirm = null; return; }
+            if (d.kind === "confirm") {
+              self.cmdConfirm = { cmd: cmd, risk: d.risk, prod: !!d.prod, expect: d.expect_text || "" };
+              self.confirmText = ""; return;
+            }
             self.cmdConfirm = null;
             self.cmdResult = { kind: d.kind, command: d.command, value: d.value,
                                duration_ms: d.duration_ms };
@@ -333,9 +368,13 @@
           }).catch(function (e) { self.running = false; self.cmdErr = String(e); });
       },
       confirmWrite: function () {
-        if (this.cmdConfirm) this.execCommand(this.cmdConfirm.cmd, true);
+        if (!this.cmdConfirm) return;
+        if (this.cmdConfirm.prod && this.confirmText.trim() !== this.cmdConfirm.expect) {
+          this.flash("生产环境：请输入连接名「" + this.cmdConfirm.expect + "」确认"); return;
+        }
+        this.execCommand(this.cmdConfirm.cmd, true, this.confirmText);
       },
-      cancelConfirm: function () { this.cmdConfirm = null; },
+      cancelConfirm: function () { this.cmdConfirm = null; this.confirmText = ""; },
       // 结果值渲染成可读结构：数组/对象/标量
       resultRows: function (v) {
         if (Array.isArray(v)) return v.map(function (x, i) { return { k: i, v: x }; });
@@ -446,7 +485,7 @@
     <div class="rd-dbbar" v-if="db!=null">
       <span>数据库</span>
       <select :value="db" @change="selectDb(Number($event.target.value))">
-        <option v-for="d in dbs" :key="d.db" :value="d.db">db{{ d.db }}（{{ d.keys }}）</option>
+        <option v-for="d in dbs" :key="d.db" :value="d.db">db{{ d.db }}{{ d.keys>0 ? '（'+d.keys+'）' : '' }}</option>
       </select>
     </div>
   </aside>
@@ -479,8 +518,14 @@
             <span class="lv">{{ cmdConfirm.risk.level }}</span>
             <code>{{ cmdConfirm.cmd }}</code></div>
           <div class="rs" v-for="r in (cmdConfirm.risk.reasons||[])" :key="r">• {{ r }}</div>
+          <div v-if="cmdConfirm.prod" class="rs prod-gate">
+            ⚠ 生产环境：请输入连接名 <code>{{ cmdConfirm.expect }}</code> 以确认
+            <input v-model="confirmText" @keydown.enter="confirmWrite"
+                   :placeholder="cmdConfirm.expect" spellcheck="false">
+          </div>
           <div class="acts">
-            <button class="dg-btn ok" @click="confirmWrite">确认执行（writer 直接执行并审计）</button>
+            <button class="dg-btn ok" :disabled="cmdConfirm.prod && confirmText.trim()!==cmdConfirm.expect"
+                    @click="confirmWrite">确认执行（writer 直接执行并审计）</button>
             <button class="dg-btn" @click="cancelConfirm">取消</button>
           </div>
         </div>

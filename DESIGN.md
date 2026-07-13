@@ -222,3 +222,24 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 
 
 详细设计见 **[ANALYSIS.md](ANALYSIS.md) 分析工作台** 和 **[USER_GUIDE.md](USER_GUIDE.md) 用户手册**。
+
+## 十四、待办 / 未做（有意推迟）
+
+### Redis Cluster（集群）支持 — 待有真实集群环境再做
+
+当前 Redis 实现只覆盖**单机 / 主从 / 哨兵**（`redis.Redis(host, port, db=...)`）。集群模式与现有实现有**结构性冲突**，不是改连接串就行，故推迟到有真实集群 e2e 环境后再做（红线：不写无法验证的集成代码）。
+
+集群 vs 单机的关键差异与适配点：
+
+| 差异 | 影响的现有代码 | 适配方向 |
+|---|---|---|
+| **无多逻辑库**（只有 db0，`SELECT` 报错） | `keyspace_dbs`（库树第一层）、池 key 的 `db` 维度、前端库切换器 | 集群模式隐藏「库」层；池 key 去掉 db 维度 |
+| **数据分 16384 slot 到多 master** | `scan_keys` 单连接 SCAN 只扫到本节点、漏分片 | 改用 `RedisCluster.scan_iter`（内部 fan-out 各 master） |
+| **客户端不同** | `_build_client` 用 `redis.Redis` | 探测 `INFO` 的 `cluster_enabled:1` 或配置 `cluster:true`，分叉走 `redis.cluster.RedisCluster` |
+| **多 key 须同 slot**（否则 `CROSSSLOT`） | 右键「删除目录下所有键」拼一条 `DEL k1 k2 …` | 集群模式逐 key 发 DEL，不拼批量 |
+| **INFO keyspace / DBSIZE 每节点各报各的** | `keyspace_dbs` 键数统计 | 汇总各 master |
+| **MOVED/ASK 重定向给内网 IP** | SSH 隧道只开一个端口够不着其他节点 | 每节点一条隧道，或用 `RedisCluster` 的 `address_remap` 映射到本地隧道端口（SSH+集群是最麻烦组合） |
+
+**最小可行闭环**（真做时的第一步）：只支持集群的**键浏览 + 单 key 读写 + 命令窗口**（`RedisCluster` 对单 key 操作几乎透明），**明确不支持**跨 slot 批量与多库切换；前端对集群连接隐藏库切换器。配套用容器起 3 主 3 从 e2e 脚本（参照 `scripts/e2e_ssh_multihop.sh`）验证后再合入。
+
+### goInception 深度审核集成 — 需跑起实例才能联调（接入点预留在 `audit/risk.py`）

@@ -7,6 +7,7 @@ Redis 无 reader/writer 双账号概念（通常单 AUTH），写命令的防线
 from __future__ import annotations
 
 import datetime as dt
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -137,22 +138,84 @@ def _build_client(cfg: ConnectionConfig, role: Role, db: int | None = None) -> _
 def run_command(
     client: redis.Redis, parts: list[str], max_cell_chars: int = 4096
 ) -> RedisResult:
-    """执行已通过分类/审批的命令。调用方负责传入 parse_command 的结果。"""
+    """执行已通过分类/审批的命令。调用方负责传入 parse_command 的结果。
+
+    结果先脱敏（CONFIG GET 密码项 / ACL 口令哈希），再截断——密钥不落返回值（安全红线）。
+    """
     start = dt.datetime.now()
     value = client.execute_command(*parts)
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
-    return RedisResult(value=_truncate(_jsonable(value), max_cell_chars), duration_ms=duration_ms)
+    redacted = redact_command_result(parts, _jsonable(value))
+    return RedisResult(value=_truncate(redacted, max_cell_chars), duration_ms=duration_ms)
+
+
+# 密钥不落返回值：会回显凭证的命令，结果脱敏后再返回/展示 --------------------
+_SECRET_CFG_HINT = ("pass", "auth", "secret", "token", "credential")
+# ACL 输出里的凭证：#<sha256 哈希>、>明文口令、<待删口令、裸 64 位 hex 哈希
+_ACL_SECRET_RE = re.compile(
+    r"(#[0-9a-fA-F]{40,})|(>\S+)|(<\S+)|(\b[0-9a-fA-F]{64}\b)")
+_MASK = "***已隐藏***"
+
+
+def redact_command_result(parts: list[str], value: Any) -> Any:
+    """对可能回显凭证的命令结果脱敏。value 须已是 _jsonable 后的结构。"""
+    if not parts:
+        return value
+    cmd = parts[0].upper()
+    sub = parts[1].upper() if len(parts) > 1 else ""
+    if cmd == "CONFIG" and sub == "GET":
+        return _redact_config_pairs(value)
+    if cmd == "ACL" and sub in ("LIST", "GETUSER", "GENPASS", "WHOAMI"):
+        return _redact_acl(value)
+    return value
+
+
+def _redact_config_pairs(value: Any) -> Any:
+    """CONFIG GET 结果是 [key, val, key, val, ...]；键名含 pass/auth 等则遮蔽其值。"""
+    if not isinstance(value, list):
+        return value
+    out = list(value)
+    for i in range(0, len(out) - 1, 2):
+        if any(h in str(out[i]).lower() for h in _SECRET_CFG_HINT):
+            out[i + 1] = _MASK
+    return out
+
+
+def _redact_acl(value: Any) -> Any:
+    """ACL LIST/GETUSER/GENPASS 里的口令哈希/明文一律遮蔽。"""
+    if isinstance(value, str):
+        return _ACL_SECRET_RE.sub(_MASK, value)
+    if isinstance(value, list):
+        return [_redact_acl(x) for x in value]
+    return value
 
 
 # ---------- Medis 式浏览（只读探测，不经审批）----------
 
-def keyspace_dbs(client: redis.Redis) -> list[dict]:
-    """`INFO keyspace` 解析出有数据的库（redis 只在有键时才列 dbN）。
+def _database_count(client: redis.Redis, default: int = 16) -> int:
+    """`CONFIG GET databases` 拿逻辑库数量；被禁用/不支持（云托管常禁 CONFIG）时回退 default。"""
+    try:
+        cfg = client.config_get("databases")
+        n = int(cfg.get("databases", default))
+        return n if n > 0 else default
+    except Exception:  # noqa: BLE001  CONFIG 被禁 → 用默认库数
+        return default
 
-    返回 [{"db": 0, "keys": 12, "expires": 3}, ...]，按库号升序。空库不出现。
+
+MIN_DBS_SHOWN = 16  # 至少展示这么多库（覆盖常见 0..15），即便实例配置更多且都为空
+
+
+def keyspace_dbs(client: redis.Redis) -> list[dict]:
+    """列出逻辑库（含空库）；有数据的带键数（`INFO keyspace` 只报有键的库）。
+
+    返回 [{"db": 0, "keys": 12, "expires": 3}, {"db": 1, "keys": 0, "expires": 0}, ...]，
+    按库号升序。空库 keys=0 也出现（前端据此显隐键数）。
+
+    **上限**：有些实例配置很大的 databases（如 256），全列会刷屏。故只展示到
+    max(MIN_DBS_SHOWN, 最大非空库号+1)，但**永远包含所有有数据的库**（即便库号很大）。
     """
     info = client.info("keyspace")  # {'db0': {'keys': 12, 'expires': 3, 'avg_ttl': 0}, ...}
-    out = []
+    stats_by_db: dict[int, dict] = {}
     for name, stats in info.items():
         if not name.startswith("db"):
             continue
@@ -161,11 +224,15 @@ def keyspace_dbs(client: redis.Redis) -> list[dict]:
         except ValueError:
             continue
         keys = int(stats.get("keys", 0)) if isinstance(stats, dict) else 0
-        if keys <= 0:
-            continue
-        out.append({"db": idx, "keys": keys,
-                    "expires": int(stats.get("expires", 0)) if isinstance(stats, dict) else 0})
-    return sorted(out, key=lambda d: d["db"])
+        expires = int(stats.get("expires", 0)) if isinstance(stats, dict) else 0
+        stats_by_db[idx] = {"keys": keys, "expires": expires}
+    total = _database_count(client)
+    max_nonempty = max(stats_by_db) if stats_by_db else -1
+    shown = min(total, max(MIN_DBS_SHOWN, max_nonempty + 1))
+    # range(shown) 覆盖连续前缀；并集 stats_by_db 保证任何有数据的库（哪怕号很大）都在
+    idxs = set(range(shown)) | set(stats_by_db)
+    out = [{"db": i, **stats_by_db.get(i, {"keys": 0, "expires": 0})} for i in sorted(idxs)]
+    return out
 
 
 def scan_keys(
