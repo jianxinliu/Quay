@@ -1343,11 +1343,16 @@
       },
       // 结果 tab（查询 tab 每次执行新增一个）
       selectResult: function (i) {
-        var t = this.activeTab; if (!t || !t.results[i]) return;
-        t.resultIdx = i; t.result = t.results[i].result; t.readSql = t.results[i].sql;
-        t.err = null; t.ok = null;
-        this.persist();
-        if (t.view === "chart" && t.result) this.$nextTick(this.renderChart);
+        var t = this.activeTab, entry = t && t.results[i]; if (!entry) return;
+        t.resultIdx = i; t.readSql = entry.sql; t.err = null; t.ok = null;
+        if (entry.result) {
+          t.result = entry.result; this.persist();
+          if (t.view === "chart") this.$nextTick(this.renderChart);
+        } else {
+          // 刷新后被释放的历史结果 → 重跑该 SQL 恢复（isPaging=true 更新本结果 tab）
+          t.result = null;
+          this.run(false, 0, entry.sql, true);
+        }
       },
       closeResult: function (i) {
         var t = this.activeTab; if (!t || !t.results[i]) return;
@@ -2177,20 +2182,30 @@
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      colDisplay: t.colDisplay || {},
-                     results: t.results || [], resultIdx: t.resultIdx || 0,
+                     // 只持久化「当前」结果 tab 的行数据，其余只留 SQL 骨架（点击时重跑）
+                     results: (t.results || []).map(function (rt, i) {
+                       return { rid: rt.rid, sql: rt.sql, result: i === t.resultIdx ? rt.result : null };
+                     }),
+                     resultIdx: t.resultIdx || 0,
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null };
           }, this);
-          var data = { v: 2, tabs: tabs, activeId: this.activeId, treeCache: this.treeCache,
+          var activeId = this.activeId;
+          var data = { v: 2, tabs: tabs, activeId: activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH, dataLogH: this.dataLogH,
                        schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
-          var s = JSON.stringify(data);
-          if (s.length > 3800000) {  // localStorage 上限兜底：丢结果集（保 SQL/结果 tab 骨架与树）
+          function dropResults(pred) {
             tabs.forEach(function (t) {
+              if (!pred(t)) return;
               t.result = null;
               (t.results || []).forEach(function (rt) { rt.result = null; });
             });
+          }
+          var s = JSON.stringify(data);
+          if (s.length > 3000000) {  // 逐级降级：先丢非当前 tab 的结果集（保 SQL/树），再丢全部
+            dropResults(function (t) { return t.id !== activeId; });
             s = JSON.stringify(data);
+            if (s.length > 3800000) { dropResults(function () { return true; }); s = JSON.stringify(data); }
           }
           localStorage.setItem(STORE_KEY, s);
         } catch (e) { /* 存储失败不影响使用 */ }
@@ -2270,6 +2285,9 @@
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
           readOnly: !!this.activeTab && this.activeTab.type === "ddl",
+          // hover/补全等浮层渲染到 body 层的固定容器：不再被编辑器容器裁切，
+          // Monaco 会按真实可视空间决定弹在光标上方还是下方（顶部空间不够就弹下面）
+          fixedOverflowWidgets: true,
         });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { self.run(false); });
         editor.onDidBlurEditorText(function () { self.persist(); });
