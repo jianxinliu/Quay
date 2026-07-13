@@ -41,6 +41,10 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   --dg-accent: #2563eb; --dg-accent-soft: #d6e2fb; --dg-hover: #eef1f6;
   --dg-green: #1f7a30; --dg-red: #c02a26; --dg-amber: #a9750f;
 }
+/* 浅色主题修正：选中态原本用近白字（配深色的 accent-soft），浅色下 accent-soft
+   变浅蓝，浅字就看不见了 → 选中态文字改用深色文本，靠浅蓝底表达选中。 */
+.dg-root.theme-light .dg-item.sel .nm,
+.dg-root.theme-light .dg-res-meta .vswitch button.on { color: var(--dg-text); }
 
 #dbm-console { height: 100vh; }
 .dg-root {

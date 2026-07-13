@@ -62,6 +62,17 @@ def test_search_tables_and_lint(client):
     assert tok["errors"] and tok["errors"][0]["message"]
 
 
+def test_settings_info_tab(client):
+    """系统信息 tab：展示路径/运行时/token 指引；token 明文绝不出现在页面。"""
+    tc, svc = client
+    r = tc.get("/admin/settings?tab=info")
+    assert r.status_code == 200
+    body = r.text
+    for s in ("系统信息", "SQLite 库", "keyring 服务名", "登录 Token", "DBM_ADMIN_TOKEN"):
+        assert s in body
+    assert TOKEN not in body  # 安全：不泄露登录 token 明文
+
+
 def test_sql_import_rows(client):
     """数据导入：参数化批量 INSERT + 列校验 + 审计留痕。"""
     tc, svc = client
