@@ -1551,11 +1551,17 @@
         if (!t || t.type !== "query" || (sel && !sel.isEmpty())) { stmtBoxCol.clear(); return; }
         var info = this.stmtRangeAtCursor();
         if (!info) { stmtBoxCol.clear(); return; }
-        var decos = [{ range: new window.monaco.Range(info.start.lineNumber, info.start.column,
-          info.end.lineNumber, info.end.column), options: { className: "dg-stmt-box", isWholeLine: false } }];
+        // 整条语句用**一个外框**（整行装饰：首行画上边+两侧、末行画下边+两侧、中间只画两侧），
+        // 而非每行各一个框（inline 装饰会把多行框成锯齿状）。
+        var R = window.monaco.Range, s = info.start.lineNumber, e = info.end.lineNumber, decos = [];
+        for (var ln = s; ln <= e; ln++) {
+          var cls = s === e ? "dg-stmt-box-one"
+            : ln === s ? "dg-stmt-box-top" : ln === e ? "dg-stmt-box-bot" : "dg-stmt-box-mid";
+          decos.push({ range: new R(ln, 1, ln, 1), options: { isWholeLine: true, className: cls } });
+        }
         if (info.noSemi && info.end.column > 1) {   // 末字符加波浪线，提示缺分号（非报错，仅提示）
-          decos.push({ range: new window.monaco.Range(info.end.lineNumber, info.end.column - 1,
-            info.end.lineNumber, info.end.column), options: { className: "dg-stmt-nosemi", isWholeLine: false } });
+          decos.push({ range: new R(info.end.lineNumber, info.end.column - 1, info.end.lineNumber, info.end.column),
+            options: { className: "dg-stmt-nosemi", isWholeLine: false } });
         }
         stmtBoxCol.set(decos);
       },

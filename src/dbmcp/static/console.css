@@ -196,9 +196,18 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-exec-err::before { content: "✗"; color: var(--dg-red); }
 /* ⌘/Ctrl+hover 表名下划线（提示可点击跳 DDL） */
 .dg-table-link { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
-/* 当前语句边框高亮：框住 ⌘↵ 将执行的那条 SQL（多行时每行段各描一次，视觉上连成框） */
-.dg-stmt-box { background: rgba(76,175,110,.07); box-shadow: inset 0 0 0 1px rgba(76,175,110,.55); border-radius: 3px; }
-.theme-light .dg-stmt-box { background: rgba(45,140,85,.06); box-shadow: inset 0 0 0 1px rgba(45,140,85,.45); }
+/* 当前语句边框高亮：整条语句一个外框（整行装饰，首行上边/末行下边/全程两侧）。
+   用 box-shadow inset 画边不占布局、不移动文字。*/
+.dg-stmt-box-one, .dg-stmt-box-top, .dg-stmt-box-mid, .dg-stmt-box-bot { background: rgba(76,175,110,.07); }
+.dg-stmt-box-one { box-shadow: inset 0 0 0 1px rgba(76,175,110,.55); }
+.dg-stmt-box-top { box-shadow: inset 1px 0 0 rgba(76,175,110,.55), inset -1px 0 0 rgba(76,175,110,.55), inset 0 1px 0 rgba(76,175,110,.55); }
+.dg-stmt-box-mid { box-shadow: inset 1px 0 0 rgba(76,175,110,.55), inset -1px 0 0 rgba(76,175,110,.55); }
+.dg-stmt-box-bot { box-shadow: inset 1px 0 0 rgba(76,175,110,.55), inset -1px 0 0 rgba(76,175,110,.55), inset 0 -1px 0 rgba(76,175,110,.55); }
+.theme-light .dg-stmt-box-one, .theme-light .dg-stmt-box-top, .theme-light .dg-stmt-box-mid, .theme-light .dg-stmt-box-bot { background: rgba(45,140,85,.06); }
+.theme-light .dg-stmt-box-one { box-shadow: inset 0 0 0 1px rgba(45,140,85,.5); }
+.theme-light .dg-stmt-box-top { box-shadow: inset 1px 0 0 rgba(45,140,85,.5), inset -1px 0 0 rgba(45,140,85,.5), inset 0 1px 0 rgba(45,140,85,.5); }
+.theme-light .dg-stmt-box-mid { box-shadow: inset 1px 0 0 rgba(45,140,85,.5), inset -1px 0 0 rgba(45,140,85,.5); }
+.theme-light .dg-stmt-box-bot { box-shadow: inset 1px 0 0 rgba(45,140,85,.5), inset -1px 0 0 rgba(45,140,85,.5), inset 0 -1px 0 rgba(45,140,85,.5); }
 /* 缺尾分号提示：末字符加轻微波浪线（非报错，仅提示） */
 .dg-stmt-nosemi { text-decoration: underline wavy var(--dg-amber); text-underline-offset: 3px; text-decoration-thickness: 1px; }
 /* 左栏「书签」区行 */
