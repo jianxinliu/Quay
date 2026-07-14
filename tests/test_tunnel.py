@@ -5,7 +5,16 @@
 
 import pytest
 
-from dbmcp.tunnel import SSHTunnel, TunnelError, _find_free_port, build_ssh_command
+from dbmcp.config import JumpHost, SshIdentity
+from dbmcp.tunnel import (
+    ResolvedHop,
+    SSHTunnel,
+    TunnelError,
+    _find_free_port,
+    build_ssh_command,
+    build_ssh_config,
+    resolve_jump_hosts,
+)
 
 
 class TestBuildCommand:
@@ -48,3 +57,48 @@ class TestFailFast:
         with pytest.raises(TunnelError):
             tunnel.start()
         assert not tunnel.is_alive()
+
+
+class TestResolveJumpHosts:
+    def test_identity_expanded(self):
+        jhs = [JumpHost(host="b1", user="alice", identity="id1"),
+               JumpHost(host="b2", key_path="/inline/k2")]
+        idents = {"id1": SshIdentity(key_path="/k1", known_hosts_path="/kh1")}
+        hops = resolve_jump_hosts(jhs, idents)
+        assert hops[0].key_path == "/k1" and hops[0].known_hosts_path == "/kh1"
+        assert hops[1].key_path == "/inline/k2"  # 内联直接用
+
+    def test_unknown_identity_rejected(self):
+        with pytest.raises(TunnelError, match="不存在"):
+            resolve_jump_hosts([JumpHost(host="b", identity="ghost")], {})
+
+    def test_legacy_string_no_key(self):
+        hops = resolve_jump_hosts(["alice@b1:22", "b2"], {})
+        assert [h.hostspec() for h in hops] == ["alice@b1:22", "b2"]
+        assert not any(h.has_key_material() for h in hops)
+
+
+class TestBuildSshConfig:
+    def test_per_hop_identity_and_proxyjump(self):
+        hops = [ResolvedHop(host="b1", user="alice", key_path="/k1"),
+                ResolvedHop(host="b2", port=2222, key_path="/k2", known_hosts_path="/kh2")]
+        text = build_ssh_config(hops)
+        assert "Host dbmhop0" in text and "Host dbmhop1" in text
+        assert 'IdentityFile "/k1"' in text and 'IdentityFile "/k2"' in text
+        assert 'UserKnownHostsFile "/kh2"' in text
+        assert "ProxyJump dbmhop0" in text  # 第二跳经第一跳
+        assert "BatchMode yes" in text  # 全局块对每跳生效
+
+    def test_legacy_path_uses_dash_j_not_config(self):
+        # 无任一跳带 key → SSHTunnel 走遗留 -J，不生成配置文件
+        t = SSHTunnel("db", 3306, [ResolvedHop(host="b1"), ResolvedHop(host="b2")])
+        cmd = t._build_command()
+        assert "-F" not in cmd and "-J" in cmd
+        assert t._config_path is None
+
+    def test_key_path_uses_config_file(self):
+        t = SSHTunnel("db", 3306, [ResolvedHop(host="b1", key_path="/k1")])
+        cmd = t._build_command()
+        assert "-F" in cmd and t._config_path is not None
+        import os
+        os.unlink(t._config_path)  # 清理临时文件

@@ -250,7 +250,65 @@ def _field(label: str, name: str, value: object = "", *, ph: str = "", typ: str 
             f"style='width:{width}'>")
 
 
-def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
+def _ident_select(selected: str, identities: list[str]) -> str:
+    """跳板行里的证书下拉：空值＝内联路径，其余为证书库名字。"""
+    opts = [f"<option value=''{'' if selected else ' selected'}>（内联路径）</option>"]
+    for n in identities:
+        opts.append(f"<option value='{_esc(n)}'{' selected' if n == selected else ''}>{_esc(n)}</option>")
+    return f"<select name='hop_identity' class='hop-ident' style='padding:5px'>{''.join(opts)}</select>"
+
+
+def _hop_row(hop, identities: list[str]) -> str:  # noqa: ANN001
+    """一行跳板配置：host / user / port / 证书 / 内联 key。hop=None 为空行模板。"""
+    host = _esc(hop.host) if hop else ""
+    user = _esc(hop.user or "") if hop else ""
+    port = _esc(hop.port or "") if hop else ""
+    identity = (hop.identity or "") if hop else ""
+    keyp = _esc(hop.key_path or "") if hop else ""
+    return (
+        "<div class='hop-row' style='display:flex;gap:6px;align-items:center;"
+        "margin-bottom:6px;flex-wrap:wrap'>"
+        f"<input name='hop_host' value='{host}' placeholder='跳板 host' style='width:150px'>"
+        f"<input name='hop_user' value='{user}' placeholder='user' style='width:88px'>"
+        f"<input name='hop_port' value='{port}' placeholder='22' style='width:60px'>"
+        f"{_ident_select(identity, identities)}"
+        f"<input name='hop_key_path' class='hop-key' value='{keyp}' "
+        "placeholder='/path/key（内联）' style='width:180px'>"
+        "<button type='button' class='btn btn-ghost hop-del' "
+        "style='padding:2px 9px'>✕</button></div>"
+    )
+
+
+def _parse_hop_rows(f) -> list[dict]:  # noqa: ANN001
+    """从表单的平行数组字段还原跳板列表；host 为空的行跳过。"""
+    hosts = f.getlist("hop_host")
+    users = f.getlist("hop_user")
+    ports = f.getlist("hop_port")
+    idents = f.getlist("hop_identity")
+    keys = f.getlist("hop_key_path")
+
+    def _at(seq, i):  # noqa: ANN001
+        return str(seq[i]).strip() if i < len(seq) else ""
+
+    out: list[dict] = []
+    for i, host in enumerate(hosts):
+        host = str(host).strip()
+        if not host:
+            continue
+        hop: dict = {"host": host}
+        if _at(users, i):
+            hop["user"] = _at(users, i)
+        if _at(ports, i):
+            hop["port"] = int(_at(ports, i))
+        if _at(idents, i):
+            hop["identity"] = _at(idents, i)
+        elif _at(keys, i):
+            hop["key_path"] = _at(keys, i)
+        out.append(hop)
+    return out
+
+
+def _connection_form(project: str, connection: str, cfg, identities: list[str]) -> str:  # noqa: ANN001
     """连接增删改表单。编辑时锁定 project/connection，密码留空表示不改。"""
     is_edit = cfg is not None
     ro = "readonly" if is_edit else ""
@@ -262,17 +320,10 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
         f"<option value='{e}'{' selected' if cfg and cfg.environment == e else ''}>{e}</option>"
         for e in ("local", "dev", "staging", "prod")
     )
-    key_path = ""
-    ssh_extra = ""
-    if cfg and cfg.ssh_options:
-        opts = list(cfg.ssh_options)
-        if "-i" in opts:
-            i = opts.index("-i")
-            if i + 1 < len(opts):
-                key_path = opts[i + 1]
-                opts = opts[:i] + opts[i + 2:]
-        ssh_extra = " ".join(opts)
-    jump = ", ".join(cfg.jump_hosts) if cfg else ""
+    ssh_extra = " ".join(cfg.ssh_options) if cfg and cfg.ssh_options else ""
+    existing_hops = list(cfg.jump_hosts) if cfg else []
+    hop_rows = "".join(_hop_row(h, identities) for h in existing_hops)
+    empty_hop = _hop_row(None, identities)
     masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
     pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
     writer_user = cfg.writer.user if cfg and cfg.writer else ""
@@ -303,12 +354,14 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
   <div>{_field("writer password", "writer_password", "", ph=pw_ph, typ="password")}</div>
  </div>
  <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
+ <label>SSH 跳板链（按序，最后一跳落地转发到数据库）</label>
+ <div class="muted" style="margin:2px 0 8px">每跳可选一条已保存的 SSH 证书，或填内联私钥路径；不同跳板可用不同证书。无跳板＝直连。
+ 证书在<a href="/admin/settings?tab=ssh">SSH 证书</a>页维护。</div>
+ <div id="hops">{hop_rows}</div>
+ <template id="hop-tpl">{empty_hop}</template>
+ <button type="button" id="add-hop" class="btn btn-ghost" style="margin:2px 0 10px">＋ 加一跳</button>
  <div class="row">
-  <div>{_field("SSH 跳板（逗号分隔，按序）", "jump_hosts", jump, ph="bastion1, bastion2", width="340px")}</div>
- </div>
- <div class="row">
-  <div>{_field("SSH key 文件路径", "ssh_key_path", key_path, ph="/Users/you/.ssh/prod_key", width="340px")}</div>
-  <div>{_field("其它 ssh 选项（空格分隔）", "ssh_options_extra", ssh_extra, ph="-o ConnectTimeout=5", width="280px")}</div>
+  <div>{_field("其它 ssh 选项（空格分隔，作用于最终目标）", "ssh_options_extra", ssh_extra, ph="-o ConnectTimeout=5", width="360px")}</div>
  </div>
  <div class="row">
   <div>{_field("max_rows", "max_rows", cfg.policy.max_rows if cfg else 500, typ="number", width="120px")}</div>
@@ -333,6 +386,23 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
   var form = document.getElementById('conn-form');
   var err = document.getElementById('conn-err');
   if (!form) return;
+
+  // SSH 跳板行：选证书时隐藏内联 key 输入；可增删
+  var hops = document.getElementById('hops');
+  var hopTpl = document.getElementById('hop-tpl');
+  function wireHop(row){{
+    var sel = row.querySelector('.hop-ident');
+    var key = row.querySelector('.hop-key');
+    function toggle(){{ key.style.display = sel.value ? 'none' : ''; }}
+    sel.addEventListener('change', toggle); toggle();
+    row.querySelector('.hop-del').addEventListener('click', function(){{ row.remove(); }});
+  }}
+  if (hops) Array.prototype.forEach.call(hops.querySelectorAll('.hop-row'), wireHop);
+  var addHop = document.getElementById('add-hop');
+  if (addHop) addHop.addEventListener('click', function(){{
+    var row = hopTpl.content.firstElementChild.cloneNode(true);
+    hops.appendChild(row); wireHop(row);
+  }});
 
   // 新增模式：引擎决定默认端口，local 环境默认 host 127.0.0.1（不覆盖用户手改的值）
   if (!{is_edit_js}) {{
@@ -468,7 +538,7 @@ def _redis_body() -> str:
 
 
 _SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
-                  ("connections", "连接管理"), ("info", "系统信息")]
+                  ("connections", "连接管理"), ("ssh", "SSH 证书"), ("info", "系统信息")]
 
 _SETTINGS_SUBMIT_JS = """<script>
 document.querySelectorAll('form.settings-form').forEach(function(f){
@@ -642,7 +712,7 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
     rows = []
     for pname, proj in sorted(service.config.projects.items()):
         for cname, c in sorted(proj.connections.items()):
-            jump = " → ".join(c.jump_hosts) if c.jump_hosts else "—"
+            jump = " → ".join(h.label() for h in c.jump_hosts) if c.jump_hosts else "—"
             stripe = _ENV_COLOR.get(c.environment, "#64748b")
             db = f"<code>{_esc(c.database)}</code>" if c.database else "<span class='muted'>—</span>"
             rows.append(
@@ -663,7 +733,7 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
         "<p style='color:#b00020'>⚠️ 未安装 keyring，无法安全存储密码。"
         "请 <code>pip install 'db-manage-mcp[keyring]'</code> 后重启。</p>"
     )
-    form = _connection_form(e_project, e_conn, edit_cfg)
+    form = _connection_form(e_project, e_conn, edit_cfg, sorted(service.config.ssh_identities))
     back = "/admin/settings?tab=connections"
     auto_open = "document.getElementById('conn-modal').classList.add('open');" if edit_cfg else ""
     return (
@@ -681,6 +751,55 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
         "document.getElementById('conn-modal').addEventListener('click',function(e){"
         "if(e.target===this){this.classList.remove('open');"
         f"if(location.search.indexOf('edit=')>=0)location.href='{back}';}}}});</script>"
+    )
+
+
+def _ssh_identities_body(service: "DbmService") -> str:
+    """SSH 证书库（系统设置『SSH 证书』tab）：列表 + 新增表单。只存路径引用。"""
+    from .connections import identity_referers
+
+    idents = service.config.ssh_identities
+    rows = []
+    for name in sorted(idents):
+        ident = idents[name]
+        refs = identity_referers(service.config, name)
+        ref_txt = "、".join(refs) if refs else "<span class='muted'>—</span>"
+        kh = f"<code>{_esc(ident.known_hosts_path)}</code>" if ident.known_hosts_path \
+            else "<span class='muted'>—</span>"
+        if refs:
+            del_btn = ("<button class='btn btn-ghost' disabled "
+                       "style='padding:3px 11px;font-size:12.5px' "
+                       "title='被连接引用，不能删除'>删除</button>")
+        else:
+            del_btn = (
+                "<form method='post' action='/admin/ssh-identities/delete' style='display:inline' "
+                "onsubmit='return dbmConfirm(this)'>"
+                f"<input type='hidden' name='name' value='{_esc(name)}'>"
+                "<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form>")
+        rows.append(
+            f"<tr><td><code>{_esc(name)}</code></td>"
+            f"<td class='mono'><code>{_esc(ident.key_path)}</code></td>"
+            f"<td class='mono'>{kh}</td><td class='muted mono'>{ref_txt}</td>"
+            f"<td style='white-space:nowrap'>{del_btn}</td></tr>"
+        )
+    table = "".join(rows) or '<tr><td colspan="5" class="muted">（无证书）</td></tr>'
+    return (
+        "<div class='card'><h2 style='margin-top:0'>SSH 证书库</h2>"
+        "<p class='muted' style='margin-top:-4px'>可复用的 SSH 证书，新建连接的跳板可直接引用。"
+        "只保存<b>路径引用</b>，绝不读取或存储密钥文件内容。</p>"
+        "<div class='tablewrap'><table><tr><th>名字</th><th>私钥路径</th>"
+        "<th>known_hosts</th><th>被引用</th><th>操作</th></tr>"
+        f"{table}</table></div></div>"
+        "<div class='card' style='max-width:620px'><h2 style='margin-top:0'>新增 / 覆盖证书</h2>"
+        "<form method='post' action='/admin/ssh-identities/save'>"
+        "<div class='row'>"
+        f"<div>{_field('名字', 'name', ph='prod-bastion', width='200px')}</div>"
+        f"<div>{_field('私钥路径', 'key_path', ph='~/.ssh/prod_key', width='320px')}</div>"
+        "</div><div class='row'>"
+        f"<div>{_field('known_hosts 路径（可选）', 'known_hosts_path', ph='~/.ssh/known_hosts_prod', width='320px')}</div>"
+        "</div>"
+        "<div class='muted' style='margin:4px 0 10px'>同名覆盖即更新。私钥需权限≤600，否则 ssh 会拒绝。</div>"
+        "<button class='btn btn-primary' type='submit'>保存证书</button></form></div>"
     )
 
 
@@ -1019,8 +1138,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 password=str(f.get("password") or "") or None,
                 writer_user=str(f.get("writer_user") or "").strip() or None,
                 writer_password=str(f.get("writer_password") or "") or None,
-                jump_hosts=_list("jump_hosts", ","),
-                ssh_key_path=str(f.get("ssh_key_path") or "").strip() or None,
+                jump_hosts=_parse_hop_rows(f),
                 ssh_options_extra=_list("ssh_options_extra", " "),
                 max_rows=int(str(f.get("max_rows") or "500")),
                 mask_columns=_list("mask_columns", ","),
@@ -1051,6 +1169,37 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return HTMLResponse(_page("删除失败", f"<div class='card'>{_esc(e)}</div>"), status_code=400)
         return RedirectResponse(url="/admin/settings?tab=connections", status_code=303)
 
+    @mcp.custom_route("/admin/ssh-identities/save", methods=["POST"])
+    @guard
+    async def _ssh_identity_save(req: Request) -> Response:
+        from .connections import ConnectionAdminError
+        f = await req.form()
+        try:
+            service.upsert_ssh_identity(
+                str(f.get("name") or "").strip(),
+                str(f.get("key_path") or "").strip(),
+                str(f.get("known_hosts_path") or "").strip() or None,
+                _caller(req),
+            )
+        except ConnectionAdminError as e:
+            body = (f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>"
+                    "<a href='/admin/settings?tab=ssh'>← 返回</a></div>")
+            return HTMLResponse(_page("保存失败", body), status_code=400)
+        return RedirectResponse(url="/admin/settings?tab=ssh", status_code=303)
+
+    @mcp.custom_route("/admin/ssh-identities/delete", methods=["POST"])
+    @guard
+    async def _ssh_identity_delete(req: Request) -> Response:
+        from .connections import ConnectionAdminError
+        f = await req.form()
+        try:
+            service.delete_ssh_identity(str(f.get("name") or "").strip(), _caller(req))
+        except ConnectionAdminError as e:
+            body = (f"<div class='card'><h2>删除失败</h2><p style='color:#b00020'>{_esc(e)}</p>"
+                    "<a href='/admin/settings?tab=ssh'>← 返回</a></div>")
+            return HTMLResponse(_page("删除失败", body), status_code=400)
+        return RedirectResponse(url="/admin/settings?tab=ssh", status_code=303)
+
     def _form_fields(f) -> dict:  # noqa: ANN001
         port_raw = str(f.get("port") or "").strip()
         return {
@@ -1061,11 +1210,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             "database": str(f.get("database") or "").strip() or None,
             "user": str(f.get("user") or "").strip() or None,
             "password": str(f.get("password") or "") or None,
-            "jump_hosts": [x.strip() for x in str(f.get("jump_hosts") or "").split(",") if x.strip()],
-            "ssh_options": (
-                (["-i", str(f.get("ssh_key_path")).strip()] if str(f.get("ssh_key_path") or "").strip() else [])
-                + [x for x in str(f.get("ssh_options_extra") or "").split(" ") if x]
-            ),
+            "jump_hosts": _parse_hop_rows(f),
+            "ssh_options": [x for x in str(f.get("ssh_options_extra") or "").split(" ") if x],
             "max_rows": int(str(f.get("max_rows") or "500")),
         }
 
@@ -1343,6 +1489,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         s = service.get_settings()
         if tab == "connections":
             content = _connections_body(service, req.query_params.get("edit"))
+        elif tab == "ssh":
+            content = _ssh_identities_body(service)
         elif tab == "db":
             content = _settings_db_body(s)
         elif tab == "redis":

@@ -15,7 +15,7 @@ from typing import Any
 
 import redis
 
-from .config import ConnectionConfig
+from .config import ConnectionConfig, SshIdentity
 from .engines import DEFAULT_IDLE_RECLAIM_S, Role
 from .secrets import resolve_secret
 from .tunnel import SSHTunnel, open_tunnel
@@ -48,6 +48,8 @@ class RedisPool:
         self._entries: dict[tuple[str, str, Role, int], _PooledRedis] = {}
         self._lock = threading.Lock()
         self._idle_reclaim_s = idle_reclaim_s
+        # SSH 证书库活引用；service 构造时指向 AppConfig.ssh_identities
+        self.identities: dict[str, SshIdentity] | None = None
 
     def get(
         self, project: str, connection: str, cfg: ConnectionConfig,
@@ -63,7 +65,7 @@ class RedisPool:
             if entry is not None:
                 entry.dispose()
                 del self._entries[key]
-            entry = _build_client(cfg, role, db=eff_db)
+            entry = _build_client(cfg, role, db=eff_db, identities=self.identities)
             self._entries[key] = entry
             return entry.client
 
@@ -91,16 +93,22 @@ class RedisPool:
             self._entries.clear()
 
 
-def build_probe_client(cfg: ConnectionConfig, role: Role = "reader") -> _PooledRedis:
+def build_probe_client(
+    cfg: ConnectionConfig, role: Role = "reader",
+    identities: dict[str, SshIdentity] | None = None,
+) -> _PooledRedis:
     """临时建 Redis 客户端（含隧道），已 PING。调用方用完必须 .dispose()。"""
-    return _build_client(cfg, role)
+    return _build_client(cfg, role, identities=identities)
 
 
-def _build_client(cfg: ConnectionConfig, role: Role, db: int | None = None) -> _PooledRedis:
+def _build_client(
+    cfg: ConnectionConfig, role: Role, db: int | None = None,
+    identities: dict[str, SshIdentity] | None = None,
+) -> _PooledRedis:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host or "127.0.0.1", cfg.port or 6379
     if cfg.jump_hosts:
-        tunnel = open_tunnel(host, port, cfg.jump_hosts, cfg.ssh_options)
+        tunnel = open_tunnel(host, port, cfg.jump_hosts, cfg.ssh_options, identities)
         host, port = "127.0.0.1", tunnel.local_port
 
     user, password = None, None

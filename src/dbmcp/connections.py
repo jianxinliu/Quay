@@ -8,7 +8,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .config import AppConfig, ConnectionConfig, Policy, ProjectConfig, WriterAccount, save_config
+from .config import (
+    AppConfig,
+    ConnectionConfig,
+    JumpHost,
+    Policy,
+    ProjectConfig,
+    SshIdentity,
+    WriterAccount,
+    save_config,
+)
 from .secrets import SecretResolveError, delete_keyring_secret, store_keyring_secret
 
 
@@ -55,6 +64,59 @@ def validate_ssh_key_path(path: str) -> None:
         )
 
 
+def identity_referers(config: AppConfig, name: str) -> list[str]:
+    """列出引用了该证书的连接（"project/connection" 形式）。"""
+    out: list[str] = []
+    for pname, proj in config.projects.items():
+        for cname, conn in proj.connections.items():
+            if any(h.identity == name for h in conn.jump_hosts):
+                out.append(f"{pname}/{cname}")
+    return sorted(out)
+
+
+def validate_known_hosts_path(path: str) -> None:
+    """校验 known_hosts 文件存在且可读（无权限严格要求，仅是公钥指纹）。"""
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise ConnectionAdminError(f"known_hosts 文件不存在: {path}")
+    if not p.is_file():
+        raise ConnectionAdminError(f"known_hosts 路径不是文件: {path}")
+    try:
+        p.read_bytes()
+    except OSError as e:
+        raise ConnectionAdminError(f"known_hosts 文件不可读: {path}（{e}）") from e
+
+
+def _build_jump_hosts(
+    jump_hosts: list, identities: dict[str, SshIdentity]
+) -> list[JumpHost]:
+    """把表单/调用方传入的跳板（dict 或裸字符串）构造成 JumpHost 并校验证书引用。
+
+    - identity 引用：必须在证书库里存在。
+    - 内联 key_path / known_hosts_path：校验文件存在、权限（key 走 600 检查）。
+    """
+    built: list[JumpHost] = []
+    for i, raw in enumerate(jump_hosts, start=1):
+        try:
+            jh = JumpHost.model_validate(raw)
+        except ValueError as e:
+            raise ConnectionAdminError(f"第 {i} 跳配置非法：{_friendly_validation_error(e)}") from e
+        if jh.identity:
+            if jh.identity not in identities:
+                available = ", ".join(sorted(identities)) or "（空）"
+                raise ConnectionAdminError(
+                    f"第 {i} 跳（{jh.label()}）引用的 SSH 证书 {jh.identity!r} 不存在，"
+                    f"可用证书: {available}"
+                )
+        else:
+            if jh.key_path:
+                validate_ssh_key_path(jh.key_path)
+            if jh.known_hosts_path:
+                validate_known_hosts_path(jh.known_hosts_path)
+        built.append(jh)
+    return built
+
+
 class ConnectionManager:
     """对 AppConfig 做增删改并持久化，负责密钥落 keyring。"""
 
@@ -76,8 +138,7 @@ class ConnectionManager:
         password: str | None,           # 明文，None 表示不改（编辑时留空）
         writer_user: str | None,
         writer_password: str | None,
-        jump_hosts: list[str],
-        ssh_key_path: str | None,
+        jump_hosts: list,               # 每项 dict{host,user?,port?,identity?,key_path?} 或裸字符串
         ssh_options_extra: list[str],
         max_rows: int,
         mask_columns: list[str],
@@ -90,18 +151,16 @@ class ConnectionManager:
 
         existing = self.config.projects.get(project, ProjectConfig()).connections.get(connection)
 
-        # SSH 参数
+        # SSH 跳板：构造 JumpHost（每跳可带自己的证书引用/内联 key）并校验
+        hops = _build_jump_hosts(jump_hosts, self.config.ssh_identities)
         ssh_options = list(ssh_options_extra)
-        if ssh_key_path:
-            validate_ssh_key_path(ssh_key_path)
-            ssh_options = ["-i", ssh_key_path, *ssh_options]
 
         # 保存前自动权限校验（mysql/pg，未勾选强制时）：连库探测账号权限，
         # 超级用户 / 有写权限 / 连不上 → 阻止保存。在写 keyring 前用明文探测。
         if engine in ("mysql", "postgres") and not force_privileged:
             self._check_account_privilege(
                 engine, environment, host, port, database, user,
-                password, existing, jump_hosts, ssh_options, max_rows,
+                password, existing, hops, ssh_options, max_rows,
             )
 
         # 密码：留空表示沿用旧引用；新连接必须给（sqlite/无 auth redis 除外）
@@ -133,7 +192,7 @@ class ConnectionManager:
                 user=user or None,
                 password=password_ref,
                 writer=writer_account,
-                jump_hosts=jump_hosts,
+                jump_hosts=hops,
                 ssh_options=ssh_options,
                 policy=policy,
             )
@@ -156,6 +215,44 @@ class ConnectionManager:
             delete_keyring_secret(removed.writer.password)
         save_config(self.config, self.config_path)
 
+    # ---------- SSH 证书库（只存路径引用，绝不存密钥内容）----------
+
+    def upsert_identity(
+        self, name: str, key_path: str, known_hosts_path: str | None = None
+    ) -> None:
+        """新增/修改一条可复用的 SSH 证书。校验路径可用后原地写入并持久化。"""
+        name = (name or "").strip()
+        if not name:
+            raise ConnectionAdminError("证书名不能为空")
+        key_path = (key_path or "").strip()
+        if not key_path:
+            raise ConnectionAdminError("私钥路径不能为空")
+        validate_ssh_key_path(key_path)
+        known_hosts_path = (known_hosts_path or "").strip() or None
+        if known_hosts_path:
+            validate_known_hosts_path(known_hosts_path)
+        # 原地改 dict（引擎池持有同一引用，即时可见）
+        self.config.ssh_identities[name] = SshIdentity(
+            key_path=key_path, known_hosts_path=known_hosts_path
+        )
+        save_config(self.config, self.config_path)
+
+    def delete_identity(self, name: str) -> None:
+        """删除证书。被任何连接的跳板引用时拒删（列出引用者）。"""
+        if name not in self.config.ssh_identities:
+            raise ConnectionAdminError(f"SSH 证书 {name!r} 不存在")
+        referers = self.identity_referers(name)
+        if referers:
+            raise ConnectionAdminError(
+                f"SSH 证书 {name!r} 正被以下连接引用，不能删除：{'、'.join(referers)}"
+            )
+        self.config.ssh_identities.pop(name)
+        save_config(self.config, self.config_path)
+
+    def identity_referers(self, name: str) -> list[str]:
+        """列出引用了该证书的连接（"project/connection" 形式）。"""
+        return identity_referers(self.config, name)
+
     def _check_account_privilege(
         self, engine, environment, host, port, database, user,  # noqa: ANN001
         password, existing, jump_hosts, ssh_options, max_rows,  # noqa: ANN001
@@ -175,7 +272,7 @@ class ConnectionManager:
         except ValueError as e:
             raise ConnectionAdminError(_friendly_validation_error(e)) from e
 
-        res = probe_connection(probe_cfg, None)
+        res = probe_connection(probe_cfg, None, self.config.ssh_identities)
         if not res.ok:
             raise ConnectionAdminError(
                 f"无法连接以校验账号权限：{res.message}。"

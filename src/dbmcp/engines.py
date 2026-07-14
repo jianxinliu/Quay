@@ -20,7 +20,7 @@ from typing import Any, Literal
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine as SAEngine
 
-from .config import ConnectionConfig
+from .config import ConnectionConfig, SshIdentity
 from .secrets import resolve_secret
 from .tunnel import SSHTunnel, open_tunnel
 
@@ -66,6 +66,9 @@ class EnginePool:
         self._entries: dict[tuple[str, str, Role, str], _PooledEngine] = {}
         self._lock = threading.Lock()
         self._idle_reclaim_s = idle_reclaim_s
+        # SSH 证书库（名字→证书）的活引用，建隧道时解析每跳的 identity。
+        # service 构造时指向 AppConfig.ssh_identities（同一 dict，原地增删即时可见）。
+        self.identities: dict[str, SshIdentity] | None = None
 
     def get(
         self,
@@ -74,6 +77,7 @@ class EnginePool:
         cfg: ConnectionConfig,
         role: Role = "reader",
         schema: str | None = None,
+        identities: dict[str, "SshIdentity"] | None = None,
     ) -> SAEngine:
         key = (project, connection, role, schema or "")
         with self._lock:
@@ -85,7 +89,7 @@ class EnginePool:
                 # 隧道已死，连引擎一起回收后重建
                 entry.dispose()
                 del self._entries[key]
-            entry = _build_pooled_engine(cfg, role, schema)
+            entry = _build_pooled_engine(cfg, role, schema, identities or self.identities)
             self._entries[key] = entry
             return entry.engine
 
@@ -115,16 +119,20 @@ class EnginePool:
             self._entries.clear()
 
 
-def build_probe_engine(cfg: ConnectionConfig, role: Role = "reader") -> _PooledEngine:
+def build_probe_engine(
+    cfg: ConnectionConfig, role: Role = "reader",
+    identities: dict[str, "SshIdentity"] | None = None,
+) -> _PooledEngine:
     """用给定配置临时建连（含隧道），不入池。调用方用完必须 .dispose()。
 
     用于"测试连接/权限探测"——针对表单里尚未保存的配置，不影响 EnginePool。
     """
-    return _build_pooled_engine(cfg, role)
+    return _build_pooled_engine(cfg, role, identities=identities)
 
 
 def _build_pooled_engine(
-    cfg: ConnectionConfig, role: Role, schema: str | None = None
+    cfg: ConnectionConfig, role: Role, schema: str | None = None,
+    identities: dict[str, "SshIdentity"] | None = None,
 ) -> _PooledEngine:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host, cfg.port
@@ -132,7 +140,8 @@ def _build_pooled_engine(
     # SQLite 无网络，跳板不适用
     if cfg.engine != "sqlite" and cfg.jump_hosts:
         default_port = 3306 if cfg.engine == "mysql" else 5432
-        tunnel = open_tunnel(cfg.host, cfg.port or default_port, cfg.jump_hosts, cfg.ssh_options)
+        tunnel = open_tunnel(cfg.host, cfg.port or default_port,
+                             cfg.jump_hosts, cfg.ssh_options, identities)
         host, port = "127.0.0.1", tunnel.local_port
 
     try:

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import text
 
 from . import engines
-from .config import ConnectionConfig, Policy
+from .config import ConnectionConfig, Policy, SshIdentity
 from .tunnel import SSHTunnel, TunnelError, open_tunnel
 
 # 各引擎的超级用户常见默认名
@@ -38,7 +38,10 @@ class ProbeResult:
         return bool(self.is_superuser) or bool(self.has_write)
 
 
-def probe_connection(cfg: ConnectionConfig, password_plain: str | None) -> ProbeResult:
+def probe_connection(
+    cfg: ConnectionConfig, password_plain: str | None,
+    identities: dict[str, SshIdentity] | None = None,
+) -> ProbeResult:
     """临时建 reader 连接，测连通 + 判定权限。password_plain 为明文（表单未保存）。"""
     probe_cfg = cfg.model_copy(update={
         "password": f"plain://{password_plain}" if password_plain is not None else cfg.password,
@@ -54,7 +57,7 @@ def probe_connection(cfg: ConnectionConfig, password_plain: str | None) -> Probe
         return ProbeResult(ok=True, message="连接成功（Redis 无账号权限模型）")
 
     try:
-        pooled = engines.build_probe_engine(probe_cfg, role="reader")
+        pooled = engines.build_probe_engine(probe_cfg, role="reader", identities=identities)
     except Exception as e:
         return ProbeResult(ok=False, message=f"连接失败：{_clean(e)}")
 
@@ -110,16 +113,19 @@ def _probe_postgres(conn, user: str) -> ProbeResult:  # noqa: ANN001
                        has_write=has_write, is_superuser=is_super)
 
 
-def probe_ssh(cfg: ConnectionConfig) -> ProbeResult:
+def probe_ssh(
+    cfg: ConnectionConfig, identities: dict[str, SshIdentity] | None = None
+) -> ProbeResult:
     """只建 SSH 隧道验证跳板链（不连数据库）。"""
     if not cfg.jump_hosts:
         return ProbeResult(ok=False, message="该连接未配置 SSH 跳板")
     default_port = {"mysql": 3306, "postgres": 5432, "redis": 6379}.get(cfg.engine, 0)
+    chain = " → ".join(h.label() for h in cfg.jump_hosts)
     tunnel: SSHTunnel | None = None
     try:
         tunnel = open_tunnel(cfg.host or "", cfg.port or default_port,
-                             cfg.jump_hosts, cfg.ssh_options)
-        return ProbeResult(ok=True, message=f"SSH 隧道建立成功（跳板链 {' → '.join(cfg.jump_hosts)}）")
+                             cfg.jump_hosts, cfg.ssh_options, identities)
+        return ProbeResult(ok=True, message=f"SSH 隧道建立成功（跳板链 {chain}）")
     except TunnelError as e:
         return ProbeResult(ok=False, message=_clean(e))
     finally:

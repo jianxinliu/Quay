@@ -200,6 +200,71 @@ def test_index_redirects(client):
     assert "/admin/approvals" in resp.headers["location"]
 
 
+class TestSshIdentitiesAndHops:
+    """SSH 证书库 + 结构化跳板：后台渲染与 HTTP 增删改闭环（用带 config_path 的实例）。"""
+
+    @pytest.fixture
+    def ssh_client(self, tmp_path):
+        key = tmp_path / "prod_key"
+        key.write_text("KEY")
+        key.chmod(0o600)
+        cfg_path = tmp_path / "conn.yaml"
+        cfg_path.write_text("projects: {}\n", encoding="utf-8")
+        from dbmcp.config import load_config
+        svc = DbmService(load_config(cfg_path), AuditStore(tmp_path / "a.sqlite3"),
+                         ApprovalStore(tmp_path / "a.sqlite3"), config_path=str(cfg_path))
+        mcp = build_mcp(svc)
+        mount_admin(mcp, svc, admin_token=TOKEN)
+        with TestClient(mcp.http_app()) as tc:
+            tc.post("/admin/login", data={"token": TOKEN})
+            yield tc, svc, str(key), cfg_path
+        svc.close()
+
+    def test_identity_crud_and_reference(self, ssh_client):
+        tc, svc, key, cfg_path = ssh_client
+        # 建证书
+        r = tc.post("/admin/ssh-identities/save",
+                    data={"name": "prod-bastion", "key_path": key}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "prod-bastion" in svc.config.ssh_identities
+        # SSH 证书 tab 展示它
+        page = tc.get("/admin/settings?tab=ssh")
+        assert "prod-bastion" in page.text and "SSH 证书库" in page.text
+        # 建一个多跳连接：第一跳引用证书，第二跳内联 key
+        # httpx 用「列表值」表示重复表单键 → 平行数组按行对齐
+        r = tc.post("/admin/connections/save", data={
+            "project": "local", "connection": "db1", "engine": "mysql",
+            "environment": "dev", "host": "h", "port": "3306", "database": "d",
+            "user": "u", "password": "p", "force_privileged": "1",
+            "hop_host": ["b1", "b2"], "hop_user": ["alice", ""], "hop_port": ["", "2222"],
+            "hop_identity": ["prod-bastion", ""], "hop_key_path": ["", key],
+            "ssh_options_extra": "", "max_rows": "500", "mask_columns": "",
+        }, follow_redirects=False)
+        assert r.status_code == 303, r.text
+        hops = svc.config.get_connection("local", "db1").jump_hosts
+        assert [h.label() for h in hops] == ["alice@b1", "b2:2222"]
+        assert hops[0].identity == "prod-bastion" and hops[1].key_path == key
+        # 编辑表单回填跳板行（host 值出现在表单）
+        form = tc.get("/admin/settings?tab=connections&edit=local/db1")
+        assert "value='b1'" in form.text and "value='b2'" in form.text
+        # 被引用的证书拒删
+        r = tc.post("/admin/ssh-identities/delete",
+                    data={"name": "prod-bastion"}, follow_redirects=False)
+        assert r.status_code == 400 and "引用" in r.text
+
+    def test_identity_delete_when_unreferenced(self, ssh_client):
+        tc, svc, key, cfg_path = ssh_client
+        tc.post("/admin/ssh-identities/save", data={"name": "id1", "key_path": key})
+        r = tc.post("/admin/ssh-identities/delete", data={"name": "id1"}, follow_redirects=False)
+        assert r.status_code == 303 and "id1" not in svc.config.ssh_identities
+
+    def test_bad_key_path_shows_error(self, ssh_client):
+        tc, svc, key, cfg_path = ssh_client
+        r = tc.post("/admin/ssh-identities/save",
+                    data={"name": "x", "key_path": "/no/such/key"}, follow_redirects=False)
+        assert r.status_code == 400 and "不存在" in r.text
+
+
 class TestSqlConsole:
     """查询台：页面渲染 + 静态资源 + 元信息 + 读/写执行 + 导出。"""
 

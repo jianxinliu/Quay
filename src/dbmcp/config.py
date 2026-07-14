@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -21,6 +21,71 @@ DEFAULT_STATEMENT_TIMEOUT_S = 30
 # 会触发 pymysql 2013「Lost connection ... read operation timed out」。writer 独立放大，
 # 配合手动取消（KILL QUERY）兜住跑飞的写。
 DEFAULT_WRITE_TIMEOUT_S = 600
+
+
+class SshIdentity(BaseModel):
+    """一条可复用的 SSH 证书：只存路径引用，绝不存密钥文件内容。"""
+
+    key_path: str
+    known_hosts_path: str | None = None
+
+
+def parse_hostspec(spec: str) -> dict[str, Any]:
+    """把 "user@host:port" 拆成 {host, user?, port?}。纯函数，便于单测。
+
+    只解析 user/host/port 三段；host 为空视为非法。用于兼容旧的 jump_hosts 字符串形式，
+    以及界面里用户直接粘贴一个 hostspec 的情况。
+    """
+    rest = spec.strip()
+    if not rest:
+        raise ValueError("跳板 host 不能为空")
+    user: str | None = None
+    port: int | None = None
+    if "@" in rest:
+        user, rest = rest.split("@", 1)
+        user = user.strip() or None
+    # 用 rsplit 兼容 IPv6 不在此支持（保持与 ssh -J 的简单 host:port 语义一致）
+    if ":" in rest:
+        host_part, port_part = rest.rsplit(":", 1)
+        if port_part.strip().isdigit():
+            rest, port = host_part, int(port_part)
+    host = rest.strip()
+    if not host:
+        raise ValueError(f"跳板地址非法: {spec!r}")
+    out: dict[str, Any] = {"host": host}
+    if user:
+        out["user"] = user
+    if port is not None:
+        out["port"] = port
+    return out
+
+
+class JumpHost(BaseModel):
+    """一跳跳板。证书两种来源：identity（引用 ssh_identities 的名字）或内联 key_path。
+
+    兼容旧配置：裸字符串 "user@host:port" 会被 before-validator 解析成本模型。
+    """
+
+    host: str
+    user: str | None = None
+    port: int | None = None
+    identity: str | None = None      # 引用 AppConfig.ssh_identities 的键名
+    key_path: str | None = None      # 或内联私钥路径（不引用证书库时）
+    known_hosts_path: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return parse_hostspec(v)
+        return v
+
+    def label(self) -> str:
+        """用于列表/日志展示的一行文本，如 "alice@bastion:22"。不含任何密钥内容。"""
+        s = f"{self.user}@{self.host}" if self.user else self.host
+        if self.port:
+            s += f":{self.port}"
+        return s
 
 
 class Policy(BaseModel):
@@ -53,7 +118,7 @@ class ConnectionConfig(BaseModel):
     user: str | None = None
     password: str | None = None  # 密钥引用
     writer: WriterAccount | None = None
-    jump_hosts: list[str] = Field(default_factory=list)
+    jump_hosts: list[JumpHost] = Field(default_factory=list)
     # 额外 ssh 参数（如 -i /path/key、-o UserKnownHostsFile=...），原样插入 ssh 命令
     ssh_options: list[str] = Field(default_factory=list)
     policy: Policy = Field(default_factory=Policy)
@@ -87,6 +152,8 @@ class ProjectConfig(BaseModel):
 
 class AppConfig(BaseModel):
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
+    # 可复用的 SSH 证书库（名字 → 证书）；只存路径引用。连接的 jump_hosts 用名字引用。
+    ssh_identities: dict[str, SshIdentity] = Field(default_factory=dict)
 
     def get_connection(self, project: str, connection: str) -> ConnectionConfig:
         proj = self.projects.get(project)

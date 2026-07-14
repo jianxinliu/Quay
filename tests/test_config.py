@@ -1,6 +1,6 @@
 import pytest
 
-from dbmcp.config import AppConfig, load_config
+from dbmcp.config import AppConfig, JumpHost, load_config, parse_hostspec, save_config
 
 VALID_YAML = """
 projects:
@@ -56,3 +56,38 @@ def test_unknown_project_and_connection():
         cfg.get_connection("nope", "c")
     with pytest.raises(KeyError, match="不存在"):
         cfg.get_connection("p", "nope")
+
+
+class TestJumpHost:
+    def test_parse_hostspec(self):
+        assert parse_hostspec("bob@host:2222") == {"host": "host", "user": "bob", "port": 2222}
+        assert parse_hostspec("host") == {"host": "host"}
+        assert parse_hostspec("host:22") == {"host": "host", "port": 22}
+        with pytest.raises(ValueError):
+            parse_hostspec("  ")
+
+    def test_bare_string_coerced(self):
+        jh = JumpHost.model_validate("alice@bastion:22")
+        assert jh.host == "bastion" and jh.user == "alice" and jh.port == 22
+        assert jh.label() == "alice@bastion:22"
+
+    def test_legacy_jump_hosts_strings_load(self):
+        cfg = AppConfig.model_validate({"projects": {"p": {"connections": {"c": {
+            "engine": "mysql", "host": "h", "user": "u", "password": "env://X",
+            "jump_hosts": ["b1", "alice@b2:2222"]}}}}})
+        hops = cfg.get_connection("p", "c").jump_hosts
+        assert [h.label() for h in hops] == ["b1", "alice@b2:2222"]
+
+    def test_ssh_identities_roundtrip(self, tmp_path):
+        cfg = AppConfig.model_validate({
+            "ssh_identities": {"id1": {"key_path": "/k1", "known_hosts_path": "/kh1"}},
+            "projects": {"p": {"connections": {"c": {
+                "engine": "mysql", "host": "h", "user": "u", "password": "env://X",
+                "jump_hosts": [{"host": "b1", "user": "a", "identity": "id1"}]}}}}})
+        path = tmp_path / "c.yaml"
+        save_config(cfg, path)
+        reloaded = load_config(path)
+        assert reloaded.ssh_identities["id1"].key_path == "/k1"
+        assert reloaded.ssh_identities["id1"].known_hosts_path == "/kh1"
+        hop = reloaded.get_connection("p", "c").jump_hosts[0]
+        assert hop.host == "b1" and hop.user == "a" and hop.identity == "id1"

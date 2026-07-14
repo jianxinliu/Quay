@@ -61,6 +61,9 @@ class DbmService:
         self.store = store
         self.pool = engines.EnginePool()
         self.redis_pool = redis_engine.RedisPool()
+        # 让引擎池能解析每跳的 SSH 证书引用（同一 dict，连接管理原地增删即时可见）
+        self.pool.identities = self.config.ssh_identities
+        self.redis_pool.identities = self.config.ssh_identities
         self.approvals = approvals
         self.metadata = metadata
         self.config_path = config_path
@@ -1014,6 +1017,37 @@ class DbmService:
         self._after_connection_change(project, connection, caller, "upsert_connection",
                                       f"引擎 {fields.get('engine')}")
 
+    # ---------- SSH 证书库 ----------
+
+    def list_ssh_identities(self) -> dict:
+        return dict(self.config.ssh_identities)
+
+    def upsert_ssh_identity(
+        self, name: str, key_path: str, known_hosts_path: str | None, caller: CallerInfo
+    ) -> None:
+        from .connections import ConnectionManager
+
+        mgr = ConnectionManager(self.config, self._require_config_path())
+        referers = mgr.identity_referers(name)
+        mgr.upsert_identity(name, key_path, known_hosts_path)
+        # 证书变更影响引用它的连接的隧道：回收让下次用新证书重建
+        for ref in referers:
+            proj, conn = ref.split("/", 1)
+            self.pool.dispose_connection(proj, conn)
+            self.redis_pool.dispose_connection(proj, conn)
+        self.store.record(AuditRecord(
+            project="admin", connection=name, tool="upsert_ssh_identity", status="ok",
+            agent=caller.agent, session_id=caller.session_id, detail="已保存 SSH 证书"))
+
+    def delete_ssh_identity(self, name: str, caller: CallerInfo) -> None:
+        from .connections import ConnectionManager
+
+        mgr = ConnectionManager(self.config, self._require_config_path())
+        mgr.delete_identity(name)
+        self.store.record(AuditRecord(
+            project="admin", connection=name, tool="delete_ssh_identity", status="ok",
+            agent=caller.agent, session_id=caller.session_id, detail="已删除 SSH 证书"))
+
     def probe_connection_fields(self, fields: dict, existing_password: str | None = None):
         """用表单值临时探测连通性与账号权限（测试按钮）。不保存、不入池。"""
         from .config import ConnectionConfig, Policy
@@ -1033,7 +1067,7 @@ class DbmService:
             ssh_options=fields.get("ssh_options", []),
             policy=Policy(max_rows=fields.get("max_rows", 500)),
         )
-        return probe_connection(cfg, None)
+        return probe_connection(cfg, None, self.config.ssh_identities)
 
     def probe_ssh_fields(self, fields: dict):
         """用表单值只测 SSH 跳板链是否可建隧道。"""
@@ -1048,7 +1082,7 @@ class DbmService:
             password="plain://_", jump_hosts=fields.get("jump_hosts", []),
             ssh_options=fields.get("ssh_options", []),
         )
-        return probe_ssh(cfg)
+        return probe_ssh(cfg, self.config.ssh_identities)
 
     def delete_connection(self, project: str, connection: str, caller: CallerInfo) -> None:
         from .connections import ConnectionManager
