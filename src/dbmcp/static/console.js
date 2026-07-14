@@ -80,10 +80,19 @@
 
   // 按分号切分多条语句（跳过引号/反引号/行注释/块注释），返回 [{s,e}] 偏移区间。
   // 供「光标处执行」：编辑器放多条 SQL，只跑光标所在那条（DataGrip 行为）。
-  // 把编辑器文本拆成语句区间。分隔符：分号 `;`，以及**空行**（不刻板依赖分号——
-  // 一段被空行隔开的 SQL 就是一条语句）。引号/注释内的分号、空行不算分隔。
+  // 语句起始关键字（换行后遇到它、且不在括号内 → 可能是新语句）
+  var STMT_KW = { SELECT: 1, WITH: 1, INSERT: 1, UPDATE: 1, DELETE: 1, CREATE: 1, ALTER: 1,
+    DROP: 1, TRUNCATE: 1, REPLACE: 1, SHOW: 1, EXPLAIN: 1, USE: 1, CALL: 1, GRANT: 1,
+    REVOKE: 1, RENAME: 1, ANALYZE: 1, OPTIMIZE: 1, MERGE: 1 };
+  // 若当前累计语句已含这些词，则后面新行的 SELECT/WITH 多半是**续接**（CTE / INSERT…SELECT /
+  // CREATE…AS SELECT / UNION 等），不切分。
+  var CONT_KW = /\b(WITH|INSERT|REPLACE|CREATE|UNION|INTERSECT|EXCEPT|MERGE)\b/i;
+
+  // 把编辑器文本拆成语句区间。分隔符：分号 `;`；以及**换行/空行**——下一行以语句关键字开头、
+  // 且不在括号内时视为新语句（「不刻板依赖分号」）。多行语句（SELECT…\nFROM…）、CTE、
+  // INSERT…SELECT、子查询、UNION 都能正确保持为一条（靠括号深度 + 续接词判断）。
   function stmtRanges(text) {
-    var ranges = [], start = 0, i = 0, n = text.length;
+    var ranges = [], start = 0, i = 0, n = text.length, depth = 0;
     function push(end) { if (text.slice(start, end).trim()) ranges.push({ s: start, e: end }); }
     while (i < n) {
       var c = text[i], c2 = text.substr(i, 2);
@@ -98,13 +107,24 @@
         while (i < n && text[i] !== "\n") i++;
       } else if (c2 === "/*") {
         i += 2; while (i < n && text.substr(i, 2) !== "*/") i++; i += 2;
-      } else if (c === ";") {
+      } else if (c === "(") { depth++; i++; }
+      else if (c === ")") { if (depth > 0) depth--; i++; }
+      else if (c === ";") {
         push(i + 1); i++; start = i;
       } else if (c === "\n") {
-        // 空行分隔：\n 后仅有空白再遇 \n（即中间夹着一整行空白）→ 视为语句边界
+        // 跳过后续空白/空行，看下一非空行的首个关键字
         var j = i + 1;
-        while (j < n && (text[j] === " " || text[j] === "\t" || text[j] === "\r")) j++;
-        if (j < n && text[j] === "\n") { push(i); i = j; start = j; } else i++;
+        while (j < n && (text[j] === " " || text[j] === "\t" || text[j] === "\r" || text[j] === "\n")) j++;
+        var boundary = false;
+        if (j < n && depth === 0) {
+          var mk = text.slice(j, j + 20).match(/^([A-Za-z_]+)/);
+          var kw = mk ? mk[1].toUpperCase() : "";
+          if (STMT_KW[kw]) {
+            // SELECT/WITH 有歧义（可能是续接）：当前语句已含续接词就不切；其它关键字直接切
+            boundary = (kw === "SELECT" || kw === "WITH") ? !CONT_KW.test(text.slice(start, i)) : true;
+          }
+        }
+        if (boundary) { push(i); start = j; i = j; } else i++;
       } else i++;
     }
     if (start < n && text.slice(start).trim()) ranges.push({ s: start, e: n });
@@ -2157,12 +2177,18 @@
         if (!t || t.type !== "query" && t.type !== "flow") { clear(); return; }
         var dialect = this.isAnalysis ? "duckdb" : (this.connMeta ? this.connMeta.engine : "");
         if (["mysql", "postgres", "sqlite", "duckdb"].indexOf(dialect) < 0) { clear(); return; }
-        var sql = model.getValue();
+        // 只 lint **光标所在的那条语句**（按 stmtRanges 拆分，与执行/边框同一套），
+        // 避免把「无分号/换行分隔的多条」当成一条、误报到下一条上（红波浪线标错位置）。
+        var info = this.stmtRangeAtCursor();
+        if (!info) { clear(); return; }
+        var startLine = info.start.lineNumber, endLine = info.end.lineNumber, lines = [];
+        for (var ln = startLine; ln <= endLine; ln++) lines.push(model.getLineContent(ln));
+        var sql = lines.join("\n");
         if (!sql.trim()) { clear(); return; }
         apiPost("/admin/sql/lint", { sql: sql, dialect: dialect }).then(function (d) {
           if (!d.ok || editor.getModel() !== model) return;
           var markers = (d.errors || []).map(function (e) {
-            var line = Math.min(e.line || 1, model.getLineCount());
+            var line = Math.min((e.line || 1) + startLine - 1, model.getLineCount());   // 回填到原文行号
             var col = Math.max(1, e.col || 1);
             return { startLineNumber: line, startColumn: col, endLineNumber: line,
                      endColumn: Math.max(col + 1, model.getLineMaxColumn(line)),
@@ -2783,8 +2809,8 @@
         bmCollection = editor.createDecorationsCollection();
         execCollection = editor.createDecorationsCollection();  // 执行状态字形（语句行左侧 ⟳/✓/✗）
         stmtBoxCol = editor.createDecorationsCollection();       // 当前语句边框高亮
-        // 光标移动/选区变化 → 更新当前语句边框（框住 ⌘↵ 将执行的那条 SQL）
-        editor.onDidChangeCursorPosition(function () { self.applyStmtBox(); });
+        // 光标移动/选区变化 → 更新当前语句边框（框住 ⌘↵ 将执行的那条 SQL）+ 重 lint 当前语句
+        editor.onDidChangeCursorPosition(function () { self.applyStmtBox(); self.scheduleLint(); });
         editor.onDidChangeCursorSelection(function () { self.applyStmtBox(); });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, function () { self.toggleBookmark(); });
         editor.addCommand(monaco.KeyCode.F2, function () { self.gotoBookmark(1); });
