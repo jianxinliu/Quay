@@ -121,7 +121,7 @@ def test_sql_run_async_job_fields_and_cancel(client):
     payload = None
     for _ in range(200):
         payload = tc.get(f"/admin/sql/job?id={job_id}").json()
-        assert {"queue_position", "wait_ms", "elapsed_ms"} <= set(payload)
+        assert "elapsed_ms" in payload
         if payload["status"] in ("done", "error", "canceled"):
             break
         _t.sleep(0.01)

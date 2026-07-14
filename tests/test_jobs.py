@@ -1,11 +1,11 @@
-"""JobManager 单测：按 key 串行、排队位置、计时、取消（排队中/运行中/竞态）、gc。"""
+"""JobManager 单测：按 key 忙时拒绝（Busy）、异 key 并行、计时、取消（含竞态）、gc。"""
 
 import threading
 import time
 
 import pytest
 
-from dbmcp.jobs import JobManager
+from dbmcp.jobs import Busy, JobManager
 
 
 def _wait_until(pred, timeout=3.0, interval=0.005):
@@ -17,38 +17,37 @@ def _wait_until(pred, timeout=3.0, interval=0.005):
     return False
 
 
-def test_same_key_runs_serially():
-    """同一 key：第二条必须等第一条结束才开始。"""
+def test_same_key_busy_rejects_second():
+    """同一 key：有任务在跑时，再提交直接 raise Busy（不排队）。"""
     mgr = JobManager()
     gate = threading.Event()
-    started = []
+    ran = []
 
     def first(_register):
-        started.append("a")
+        ran.append("a")
         gate.wait(2)
         return {"v": "a"}
 
     def second(_register):
-        started.append("b")
+        ran.append("b")
         return {"v": "b"}
 
     ja = mgr.submit("conn1", first)
-    jb = mgr.submit("conn1", second)
-
     assert _wait_until(lambda: mgr.get(ja)["status"] == "running")
-    # 第一条在跑、第二条应仍排队，且未开始执行
-    assert mgr.get(jb)["status"] == "queued"
-    assert mgr.get(jb)["queue_position"] == 1
-    assert started == ["a"]
+    with pytest.raises(Busy):
+        mgr.submit("conn1", second)      # 忙 → 拒绝
+    assert ran == ["a"]                    # 第二条根本没跑
 
     gate.set()
+    assert _wait_until(lambda: mgr.get(ja)["status"] == "done")
+    # 前一条结束后，同 key 可以再提交
+    jb = mgr.submit("conn1", second)
     assert _wait_until(lambda: mgr.get(jb)["status"] == "done")
-    assert started == ["a", "b"]
-    assert mgr.get(ja)["result"] == {"v": "a"}
+    assert ran == ["a", "b"]
 
 
 def test_different_keys_run_in_parallel():
-    """不同 key：并行执行，互不阻塞。"""
+    """不同 key：并行执行，互不阻塞、互不拒绝。"""
     mgr = JobManager()
     both_running = threading.Barrier(2, timeout=3)
 
@@ -60,50 +59,6 @@ def test_different_keys_run_in_parallel():
     jb = mgr.submit("connB", work)
     assert _wait_until(lambda: mgr.get(ja)["status"] == "done")
     assert _wait_until(lambda: mgr.get(jb)["status"] == "done")
-
-
-def test_queue_position_counts_ahead():
-    """排队位置 = 前面仍会执行的任务数（含正在跑的）。"""
-    mgr = JobManager()
-    gate = threading.Event()
-
-    def blocking(_register):
-        gate.wait(2)
-
-    def quick(_register):
-        return 1
-
-    running = mgr.submit("c", blocking)
-    q1 = mgr.submit("c", quick)
-    q2 = mgr.submit("c", quick)
-    assert _wait_until(lambda: mgr.get(running)["status"] == "running")
-    assert mgr.get(q1)["queue_position"] == 1  # 前面 1 条在跑
-    assert mgr.get(q2)["queue_position"] == 2  # 前面 1 跑 + 1 排队
-    gate.set()
-    assert _wait_until(lambda: mgr.get(q2)["status"] == "done")
-
-
-def test_cancel_queued_never_runs():
-    """取消排队中的任务：状态 canceled，且永不执行。"""
-    mgr = JobManager()
-    gate = threading.Event()
-    ran = []
-
-    def blocking(_register):
-        gate.wait(2)
-
-    def should_not_run(_register):
-        ran.append(1)
-
-    r = mgr.submit("c", blocking)
-    q = mgr.submit("c", should_not_run)
-    assert _wait_until(lambda: mgr.get(r)["status"] == "running")
-    assert mgr.cancel(q) is True
-    assert mgr.get(q)["status"] == "canceled"
-    gate.set()
-    assert _wait_until(lambda: mgr.get(r)["status"] == "done")
-    time.sleep(0.05)
-    assert ran == []  # 被取消的排队任务没跑
 
 
 def test_cancel_running_invokes_canceller():
@@ -129,6 +84,24 @@ def test_cancel_running_invokes_canceller():
     assert _wait_until(lambda: mgr.get(j)["status"] == "canceled")
 
 
+def test_cancel_frees_key_for_next_submit():
+    """取消/结束后 key 释放，可再次提交（不会一直 Busy）。"""
+    mgr = JobManager()
+    proceed = threading.Event()
+
+    def work(register):
+        register(lambda: proceed.set())
+        proceed.wait(2)
+
+    j1 = mgr.submit("c", work)
+    assert _wait_until(lambda: mgr.get(j1)["status"] == "running")
+    mgr.cancel(j1)
+    assert _wait_until(lambda: mgr.get(j1)["status"] in ("canceled", "done"))
+    # key 已释放
+    j2 = mgr.submit("c", lambda _r: "ok")
+    assert _wait_until(lambda: mgr.get(j2)["status"] == "done")
+
+
 def test_cancel_before_register_still_fires():
     """竞态：取消先于 register 到达时，register 时补发取消函数。"""
     mgr = JobManager()
@@ -152,8 +125,8 @@ def test_cancel_before_register_still_fires():
     assert fired.wait(2)
 
 
-def test_timing_fields():
-    """计时字段：等待耗时与执行耗时非负、可读。"""
+def test_timing_field():
+    """执行耗时非负、大致合理。"""
     mgr = JobManager()
 
     def work(_register):
@@ -162,37 +135,16 @@ def test_timing_fields():
 
     j = mgr.submit("c", work)
     assert _wait_until(lambda: mgr.get(j)["status"] == "done")
-    snap = mgr.get(j)
-    assert snap["elapsed_ms"] >= 40
-    assert snap["wait_ms"] >= 0
-
-
-def test_worker_recreated_after_drain():
-    """队列排空后 worker 退出；再次 submit 能重建 worker 正常执行。"""
-    mgr = JobManager()
-
-    def work(_register):
-        return "ok"
-
-    j1 = mgr.submit("c", work)
-    assert _wait_until(lambda: mgr.get(j1)["status"] == "done")
-    # 等 worker 注销
-    assert _wait_until(lambda: "c" not in mgr._workers)
-    j2 = mgr.submit("c", work)
-    assert _wait_until(lambda: mgr.get(j2)["status"] == "done")
+    assert mgr.get(j)["elapsed_ms"] >= 40
 
 
 def test_gc_removes_expired():
     """gc 清理超过 TTL 的已结束任务。"""
     mgr = JobManager(ttl_s=0)
-
-    def work(_register):
-        return "ok"
-
-    j = mgr.submit("c", work)
+    j = mgr.submit("c", lambda _r: "ok")
     assert _wait_until(lambda: mgr.get(j)["status"] == "done")
     time.sleep(0.02)
-    mgr.submit("c2", work)  # 触发 gc
+    mgr.submit("c2", lambda _r: "ok")  # 触发 gc
     assert _wait_until(lambda: mgr.get(j) is None)
 
 
@@ -211,10 +163,6 @@ def test_error_job_reports_error():
 def test_cancel_unknown_or_finished_returns_false():
     mgr = JobManager()
     assert mgr.cancel("nope") is False
-
-    def work(_register):
-        return "ok"
-
-    j = mgr.submit("c", work)
+    j = mgr.submit("c", lambda _r: "ok")
     assert _wait_until(lambda: mgr.get(j)["status"] == "done")
     assert mgr.cancel(j) is False

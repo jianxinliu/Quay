@@ -16,6 +16,7 @@
   var editor = null;          // 单个 Monaco 编辑器，切 tab 换 model
   var models = new Map();     // tabId -> ITextModel
   var bmCollection = null;    // 书签装饰集合（切 tab 时重设为该 tab 的书签）
+  var execCollection = null;  // 执行状态字形装饰（在被执行语句行左侧显示 ⟳/✓/✗）
   var monacoReady = false;
   var currentTables = [];     // 补全用：当前连接可见表（未绑库为 库.表）
   var currentConn = "";
@@ -328,6 +329,7 @@
     data: function () {
       return {
         connections: [], workspaces: [], wfs: [], tabs: [], activeId: null,
+        clockTick: 0,      // 每 200ms +1，驱动执行计时秒表刷新
         importPlan: null,  // {t, db, workspace, dataset, limit} 导入到分析工作区的内联表单
         importRows: null,  // {t, db, text, header, parsed} 数据导入（CSV/粘贴 → INSERT）
         tblSearch: null,   // {q, results, sel, loading} 全局表名搜索浮层（⌘P）
@@ -394,24 +396,12 @@
         return q ? list.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }) : list;
       },
       selCount: function () { return Object.keys(this.selected).length; },
-      execState: function () {
+      // 执行计时（客户端秒表，随 clockTick 每 200ms 刷新，平滑准确）——从本 tab 开跑那一刻算起
+      runElapsed: function () {
+        this.clockTick;  // 依赖：让本 computed 随定时器重算
         var t = this.activeTab;
-        if (!t) return { cls: "idle", icon: "▷", tip: "未执行" };
-        if (t.running) {
-          if (t.jobStatus === "queued") {
-            var pos = t.jobQueuePos;
-            var wait = t.jobWaitMs ? " · 已等 " + (t.jobWaitMs / 1000).toFixed(0) + "s" : "";
-            return { cls: "running", icon: "⋯", cancelable: true,
-                     tip: "排队中" + (pos ? "（前面还有 " + pos + " 条）" : "") + wait };
-          }
-          return { cls: "running", icon: "⟳", cancelable: true,
-                   tip: "执行中 " + ((t.jobElapsedMs || 0) / 1000).toFixed(1) + "s" };
-        }
-        if (t.err) return { cls: "err", icon: "✗", tip: t.err };
-        if (t.ok) return { cls: "ok", icon: "✓", tip: "成功 · 影响 " + t.ok.affected_rows + " 行 · " + t.ok.duration_ms + " ms" };
-        if (t.result) return { cls: "ok", icon: "✓",
-          tip: "成功 · " + t.result.rows.length + " 行 · " + (t.result.duration_ms || 0) + " ms" };
-        return { cls: "idle", icon: "▷", tip: "未执行" };
+        if (!t || !t.running || !t.jobRunAt) return "0.0s";
+        return ((Date.now() - t.jobRunAt) / 1000).toFixed(1) + "s";
       },
       editorRowStyle: function () {
         var t = this.activeTab;
@@ -533,8 +523,8 @@
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
-                    // 异步任务态：串行队列排队位置 + 执行计时 + 取消
-                    jobStatus: "", jobQueuePos: null, jobElapsedMs: 0, jobWaitMs: 0,
+                    // 异步任务态：开跑时刻（客户端秒表用）+ 被执行语句起始行（字形图标定位）+ 上次结果状态
+                    jobRunAt: 0, execLine: 0, execGlyph: "",
                     results: [], resultIdx: 0, isPaging: false };  // 结果 tab（每次执行新增一个）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
@@ -682,7 +672,7 @@
         this.activeId = id;
         var t = this.activeTab;
         var m = models.get(id);
-        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); this.applyBookmarks(); }
+        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); this.applyBookmarks(); this.applyExecGlyph(); }
         if (t && t.conn !== this.lastLoadedConn) this.loadTree();
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
@@ -1381,12 +1371,47 @@
         }
         return text.slice(ranges[ranges.length - 1].s);
       },
+      // 被执行语句的起始行号（字形边栏放执行状态图标）：选区取选区首行；单语句取首个非空字符行；
+      // 多语句取光标所在语句的起始行。
+      execLineFor: function () {
+        if (!editor) return 1;
+        var sel = editor.getSelection();
+        if (sel && !sel.isEmpty()) return sel.startLineNumber;
+        var model = editor.getModel(), text = model.getValue();
+        var ranges = stmtRanges(text);
+        var off;
+        if (ranges.length <= 1) { var m = text.match(/\S/); off = m ? m.index : 0; }
+        else {
+          var cur = model.getOffsetAt(editor.getPosition()), k = ranges.length - 1;
+          for (var i = 0; i < ranges.length; i++) { if (cur <= ranges[i].e) { k = i; break; } }
+          off = ranges[k].s;
+        }
+        // 语句区间起点可能落在前一句结尾的换行/空白上 → 前进到首个非空白字符，图标才对准语句行
+        while (off < text.length && /\s/.test(text[off])) off++;
+        return model.getPositionAt(off).lineNumber;
+      },
+      // 执行状态字形："run"（转圈）/"ok"（✓）/"err"（✗）/""（清除），画在 t.execLine 行左侧字形边栏
+      setExecGlyph: function (t, state) {
+        t.execGlyph = state;
+        if (t.id === this.activeId) this.applyExecGlyph();
+      },
+      applyExecGlyph: function () {
+        if (!execCollection || !window.monaco) return;
+        var t = this.activeTab;
+        var cls = t && t.execGlyph && t.type === "query"
+          ? ({ run: "dg-exec-run", ok: "dg-exec-ok", err: "dg-exec-err" }[t.execGlyph]) : null;
+        if (!cls || !t.execLine) { execCollection.clear(); return; }
+        execCollection.set([{ range: new window.monaco.Range(t.execLine, 1, t.execLine, 1),
+          options: { glyphMarginClassName: cls, isWholeLine: false } }]);
+      },
       run: function (confirm, page, sqlOverride, isPage) {
         var self = this, t = this.activeTab;
         if (!t) return;
         if (t.type === "ddl") { this.flash("DDL 为只读视图"); return; }
         if (t.type === "flow" && sqlOverride == null) { this.runFlow(); return; }
         if (!t.conn) { this.flash("请先选择连接"); return; }
+        // 同一 tab 已有查询在执行 → 直接拒绝（不排队、不并发），提示先取消
+        if (t.running) { this.flash("当前查询仍在执行，请先取消或等待完成"); return; }
         t.isPaging = !!isPage;  // 翻页更新当前结果 tab；否则新执行=新结果 tab
         var sql;
         if (sqlOverride != null) sql = sqlOverride;
@@ -1397,18 +1422,22 @@
         page = page || 0;
         t.pendingSql = sql;
         t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null; t.wfSteps = null;
-        t.jobStatus = ""; t.jobQueuePos = null; t.jobElapsedMs = 0; t.jobWaitMs = 0;
+        t.jobRunAt = Date.now();  // 客户端秒表起点
+        // 被执行语句起始行 → 执行状态图标定位；新光标执行时更新，翻页/重载沿用上次行
+        if (sqlOverride == null && t.type === "query") t.execLine = this.execLineFor();
+        this.setExecGlyph(t, "run");
         t.rowSel = {}; t.lastSelRi = -1; t.resQ = null;  // 重查后行号会变，行选择/搜索作废
         if (page === 0) t.result = null;
-        // 异步任务：查询在服务端线程池执行，切页/刷新不中断；job_id 持久化，回来续接轮询
+        // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询
         apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
                                           page: page, schema: t.schema || null })
           .then(function (d) {
-            if (!d.ok) { t.running = false; t.err = d.error; self.persist(); return; }
+            // 连接忙被拒绝 / 其它提交错误 → 作为一个「出错结果页」呈现（不是顶部横幅）
+            if (!d.ok) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: d.error }); self.persist(); return; }
             t.jobId = d.job_id; t.jobPage = page;
             self.persist();
             self.pollJob(t.id, d.job_id, page);
-          }).catch(function (e) { t.running = false; t.err = "" + e; });
+          }).catch(function (e) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: "" + e }); });
       },
       pollJob: function (tabId, jobId, page) {
         var self = this;
@@ -1417,23 +1446,22 @@
         apiGet("/admin/sql/job?id=" + jobId).then(function (d) {
           var t2 = self.tabs.find(function (x) { return x.id === tabId; });
           if (!t2 || t2.jobId !== jobId) return;
-          if (!d.ok) { t2.running = false; t2.jobId = null; t2.jobStatus = ""; t2.err = d.error || "任务丢失"; self.persist(); return; }
-          if (d.status === "queued" || d.status === "running") {
+          if (!d.ok) { t2.running = false; t2.jobId = null; self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "任务丢失" }); self.persist(); return; }
+          if (d.status === "running") {
             t2.running = true;
-            t2.jobStatus = d.status;
-            t2.jobQueuePos = d.queue_position;
-            t2.jobElapsedMs = d.elapsed_ms || 0;
-            t2.jobWaitMs = d.wait_ms || 0;
-            // 排队中轮询更勤（排队位置变化及时反映），执行中稍缓
-            setTimeout(function () { self.pollJob(tabId, jobId, page); }, d.status === "queued" ? 300 : 450);
+            // 客户端秒表锚定到服务端真实耗时（刷新后续接、以及首轮校准都准确，避免走得偏快/偏慢）
+            if (!t2.jobRunAt) t2.jobRunAt = Date.now() - (d.elapsed_ms || 0);
+            setTimeout(function () { self.pollJob(tabId, jobId, page); }, 400);
             return;
           }
-          t2.running = false; t2.jobId = null; t2.jobStatus = "";
-          if (d.status === "canceled") { t2.err = d.error || "已取消"; self.persist(); return; }
-          if (d.status === "error") { t2.err = d.error; self.persist(); return; }
+          t2.running = false; t2.jobId = null;
+          // 出错 / 取消 → 也进一个结果页（而非顶部横幅），与成功结果统一在结果 tab 里
+          if (d.status === "canceled") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "已取消" }); self.persist(); return; }
+          if (d.status === "error") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error }); self.persist(); return; }
           var r = d.result || {};
           if (r.kind === "workflow") {
             // workflow 运行结果：步骤清单 + 输出预览（输出复用结果表格）
+            self.setExecGlyph(t2, r.ok ? "ok" : "err");
             t2.wfSteps = r.steps || [];
             if (r.output) t2.result = Object.assign({ paginated: false }, r.output);
             else if (!r.ok) t2.err = (r.steps.filter(function (x) { return !x.ok; })[0] || {}).error || "运行失败";
@@ -1446,22 +1474,17 @@
             self.flash(r.ok ? "workflow 运行完成" : "workflow 运行失败（见步骤）");
           }
           else if (r.kind === "read") {
-            t2.result = r; t2.readSql = t2.pendingSql; t2.lastPage = page;
-            // 数据 tab 预取表结构，保证时间列编辑能用日期选择器（依赖列类型）
+            t2.readSql = t2.pendingSql; t2.lastPage = page;
+            self.setExecGlyph(t2, "ok");
             if (t2.type === "data" && t2.table) {
+              t2.result = r;
+              // 数据 tab 预取表结构，保证时间列编辑能用日期选择器（依赖列类型）
               var mk = self.mk(t2.table, t2.schema);
               if (!self.tableMeta[mk]) self.fetchMeta(t2.table, t2.schema);
               if (t2.id === self.activeId) self.loadHistory();  // 底部执行记录及时反映刚才的过滤/排序 SQL
-            } else if (t2.type === "query") {
+            } else {
               // 查询 tab：每次新执行新增一个结果 tab；翻页只更新当前结果 tab
-              if (t2.isPaging && t2.results[t2.resultIdx]) {
-                t2.results[t2.resultIdx].result = r;
-              } else {
-                var nid = t2.results.length ? t2.results[t2.results.length - 1].rid + 1 : 1;
-                t2.results.push({ rid: nid, sql: t2.pendingSql, result: r });
-                if (t2.results.length > 10) t2.results.shift();  // 上限，防 localStorage 膨胀
-                t2.resultIdx = t2.results.length - 1;
-              }
+              self.pushOutcome(t2, t2.pendingSql, { result: r });
             }
           }
           else if (r.kind === "confirm") {
@@ -1469,14 +1492,17 @@
             // 直接报语法错，别弹「确认写操作」误导。
             var ps = (t2.pendingSql || "").trim().toUpperCase();
             if (t2.type === "data" || /^(SELECT|WITH|SHOW|DESC|DESCRIBE|EXPLAIN)\b/.test(ps)) {
-              t2.err = "SQL 无法解析，无法作为查询执行 —— 请检查语法" +
-                       (t2.type === "data" ? "（WHERE / ORDER BY 表达式，如 desc 别写成 des）" : "") + "。";
+              self.setExecGlyph(t2, "err");
+              self.pushOutcome(t2, t2.pendingSql, { err: "SQL 无法解析，无法作为查询执行 —— 请检查语法" +
+                       (t2.type === "data" ? "（WHERE / ORDER BY 表达式，如 desc 别写成 des）" : "") + "。" });
               t2.confirm = null;
             } else {
+              self.setExecGlyph(t2, "");  // 待人工确认，非终态
               t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
             }
           }
           else if (r.kind === "write") {
+            self.setExecGlyph(t2, "ok");
             t2.ok = r;
             if (t2.type === "data") setTimeout(function () { self.run(false, t2.lastPage); }, 60);
             else self.refreshTree();
@@ -1502,24 +1528,48 @@
         // 翻页沿用上次执行的读语句（光标可能已移动到别的语句上），isPage=true → 更新当前结果 tab
         this.run(false, p, t.type === "data" ? null : t.readSql, true);
       },
-      // 结果 tab（查询 tab 每次执行新增一个）
+      // 把一次执行结果（成功/出错/取消）落成结果页：查询 tab 进结果 tab 条；其它类型 tab 用横幅
+      pushOutcome: function (t, sql, o) {
+        var err = o.err != null ? o.err : null, result = o.result || null;
+        if (t.type !== "query") { t.err = err; t.result = err ? null : result; return; }
+        t.err = err; t.result = result;
+        if (t.isPaging && t.results[t.resultIdx]) {
+          var e = t.results[t.resultIdx]; e.sql = sql; e.result = result; e.err = err;  // 翻页/重载更新当前结果页
+        } else {
+          var nid = t.results.length ? t.results[t.results.length - 1].rid + 1 : 1;
+          t.results.push({ rid: nid, sql: sql, result: result, err: err });
+          if (t.results.length > 10) t.results.shift();  // 上限，防 localStorage 膨胀
+          t.resultIdx = t.results.length - 1;
+        }
+      },
+      // 结果 tab（查询 tab 每次执行新增一个）——点击结果页切换展示
       selectResult: function (i) {
         var t = this.activeTab, entry = t && t.results[i]; if (!entry) return;
-        t.resultIdx = i; t.readSql = entry.sql; t.err = null; t.ok = null;
+        t.resultIdx = i; t.readSql = entry.sql; t.ok = null;
+        if (entry.err) { t.err = entry.err; t.result = null; this.persist(); return; }
+        t.err = null;
         if (entry.result) {
           t.result = entry.result; this.persist();
           if (t.view === "chart") this.$nextTick(this.renderChart);
         } else {
-          // 刷新后被释放的历史结果 → 重跑该 SQL 恢复（isPaging=true 更新本结果 tab）
+          // 刷新后被释放的历史结果 → 用户点击时才重跑该 SQL 恢复（isPaging=true 更新本结果 tab）
           t.result = null;
           this.run(false, 0, entry.sql, true);
         }
       },
+      // 关闭结果页：只切换到相邻页展示，**绝不触发重查**（历史 bug：关一个页会把邻页重跑一遍）
       closeResult: function (i) {
         var t = this.activeTab; if (!t || !t.results[i]) return;
+        var beforeActive = i < t.resultIdx;
         t.results.splice(i, 1);
-        if (!t.results.length) { t.result = null; t.resultIdx = 0; this.persist(); return; }
-        this.selectResult(Math.min(t.resultIdx, t.results.length - 1));
+        if (!t.results.length) { t.result = null; t.err = null; t.ok = null; t.resultIdx = 0; this.persist(); return; }
+        var ni = beforeActive ? t.resultIdx - 1 : Math.min(t.resultIdx, t.results.length - 1);
+        var entry = t.results[ni];
+        t.resultIdx = ni; t.readSql = entry.sql; t.ok = null;
+        t.err = entry.err || null;
+        t.result = entry.err ? null : (entry.result || null);  // 被释放的历史结果显示占位，可点该页手动重跑
+        this.persist();
+        if (t.result && t.view === "chart") this.$nextTick(this.renderChart);
       },
       confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
@@ -2388,7 +2438,8 @@
                      colDisplay: t.colDisplay || {},
                      // 只持久化「当前」结果 tab 的行数据，其余只留 SQL 骨架（点击时重跑）
                      results: (t.results || []).map(function (rt, i) {
-                       return { rid: rt.rid, sql: rt.sql, result: i === t.resultIdx ? rt.result : null };
+                       return { rid: rt.rid, sql: rt.sql, err: rt.err || null,
+                                result: i === t.resultIdx ? rt.result : null };
                      }),
                      resultIdx: t.resultIdx || 0,
                      view: t.view || "table", chart: t.chart || null,
@@ -2505,6 +2556,7 @@
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, function () { self.saveCurrent(); });
         // 书签：⌘/Ctrl+B 切换、F2/⇧F2 跳下一个/上一个、点字形边栏切换
         bmCollection = editor.createDecorationsCollection();
+        execCollection = editor.createDecorationsCollection();  // 执行状态字形（语句行左侧 ⟳/✓/✗）
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, function () { self.toggleBookmark(); });
         editor.addCommand(monaco.KeyCode.F2, function () { self.gotoBookmark(1); });
         editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.F2, function () { self.gotoBookmark(-1); });
@@ -2515,7 +2567,10 @@
         });
         this.applyBookmarks();
         editor.onDidBlurEditorText(function () { self.persist(); });
-        editor.onDidChangeModelContent(function () { self.scheduleLint(); self.markDirty(); if (self.bmOpen || self.acc.bm) self.bmTick++; });  // 实时语法检查 + 改动标记 + 书签预览刷新
+        editor.onDidChangeModelContent(function () { self.scheduleLint(); self.markDirty(); if (self.bmOpen || self.acc.bm) self.bmTick++;
+          // 编辑内容后清掉旧的执行状态图标（行号已变，图标会错位/误导）
+          var at = self.activeTab; if (at && !at.running && at.execGlyph) { at.execGlyph = ""; if (execCollection) execCollection.clear(); }
+        });  // 实时语法检查 + 改动标记 + 书签预览刷新
         this.scheduleLint();
         // 右键菜单：格式化（选中/全部）/ EXPLAIN / EXPLAIN ANALYZE
         editor.addAction({ id: "dbm-format", label: "格式化 SQL（有选中则格式化选中，否则全部）",
@@ -2665,6 +2720,10 @@
     mounted: function () {
       var self = this;
       this.restore();
+      // 执行计时秒表：任一 tab 在跑时每 200ms 触发一次重算（clockTick 驱动 runElapsed）
+      setInterval(function () {
+        if (self.tabs.some(function (t) { return t.running; })) self.clockTick++;
+      }, 200);
       try { var a = JSON.parse(localStorage.getItem("dbm-console-acc") || "null"); if (a) Object.assign(this.acc, a); } catch (e) {}
       // 切页/刷新前发起的查询在服务端继续跑：凭持久化的 job_id 续接轮询
       this.tabs.forEach(function (t) {
@@ -2892,15 +2951,14 @@
       </div>
     </div>
     <div class="dg-editor-row" v-show="activeTab && activeTab.type!=='data' && activeTab.type!=='flow'" :style="editorRowStyle">
-      <div class="dg-estatus" :class="execState.cls" :title="execState.tip"><span>{{ execState.icon }}</span></div>
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
         <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>
-        <!-- 执行中/排队中浮条：计时 + 取消（取消运行中的查询会向 DB 发 KILL） -->
-        <div v-if="activeTab && activeTab.running" class="dg-run-pill" :class="{queued: activeTab.jobStatus==='queued'}">
-          <span class="dg-run-ico">{{ execState.icon }}</span>
-          <span class="dg-run-txt">{{ execState.tip }}</span>
+        <!-- 执行中浮条：计时 + 取消（取消运行中的查询会向 DB 发 KILL）。执行状态图标在语句行左侧字形边栏 -->
+        <div v-if="activeTab && activeTab.running" class="dg-run-pill">
+          <span class="dg-run-ico">⟳</span>
+          <span class="dg-run-txt">执行中 {{ runElapsed }}</span>
           <button class="dg-run-cancel" @click="cancelJob"
-                  title="取消执行：排队中直接撤销；运行中向数据库发 KILL QUERY 中断">取消</button>
+                  title="取消执行：向数据库发 KILL QUERY 中断正在跑的查询">取消</button>
         </div>
         <!-- 执行 schema 选择器浮在编辑器右上角（原顶部栏整条已去掉） -->
         <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres') && activeTab && activeTab.type==='query'"
@@ -3073,16 +3131,17 @@
           <div class="acts"><button class="dg-btn ok" @click="doSubmit()">确认提交（writer 执行）</button>
             <button class="dg-btn" @click="cancelSubmit">取消</button></div>
         </div>
+        <!-- 结果 tab 条：查询 tab 有结果（含出错/取消的结果页）就展示；点结果页只切换展示，关闭不触发重查 -->
+        <div v-if="activeTab.type==='query' && activeTab.results && activeTab.results.length" class="dg-restabs">
+          <div v-for="(rt,i) in activeTab.results" :key="rt.rid" class="rtab" :class="{on: i===activeTab.resultIdx, err: !!rt.err}"
+               :title="rt.sql" @click="selectResult(i)">
+            <span class="rl"><template v-if="rt.err">✗ </template>结果 {{ i+1 }}</span>
+            <span class="rx" @click.stop="closeResult(i)">✕</span>
+          </div>
+        </div>
         <div v-if="activeTab.err" class="dg-res-err">⚠ {{ activeTab.err }}</div>
         <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{ activeTab.ok.affected_rows }} 行 · {{ activeTab.ok.duration_ms }} ms</div>
         <template v-else-if="activeTab.result">
-          <div v-if="activeTab.type==='query' && activeTab.results && activeTab.results.length" class="dg-restabs">
-            <div v-for="(rt,i) in activeTab.results" :key="rt.rid" class="rtab" :class="{on: i===activeTab.resultIdx}"
-                 :title="rt.sql" @click="selectResult(i)">
-              <span class="rl">结果 {{ i+1 }}</span>
-              <span class="rx" @click.stop="closeResult(i)">✕</span>
-            </div>
-          </div>
           <div class="dg-res-meta">
             <span>{{ activeTab.result.paginated ? "本页 " : "" }}{{ activeTab.result.rows.length }} 行</span>
             <span v-if="activeTab.result.duration_ms!=null">{{ activeTab.result.duration_ms }} ms</span>

@@ -1725,15 +1725,20 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             page = 0
         schema = str(f.get("schema") or "").strip() or None
         caller = _caller(req)
+        from .jobs import Busy
         ws = _analysis_ws(str(f.get("conn") or ""))
         if ws:
-            # 分析工作区：沙箱内任意 SQL 自由执行（不需确认流）。按工作区串行（DuckDB
-            # 每次短连接，串行更稳）；不透传取消器（DuckDB 沙箱查询本地、无 KILL 路径）。
+            # 分析工作区：沙箱内任意 SQL 自由执行（不需确认流）。按工作区串行——忙时直接拒绝；
+            # 不透传取消器（DuckDB 沙箱查询本地、无 KILL 路径）。
             def _work_ws(_register) -> dict:  # noqa: ANN001
                 out = service.analysis_sql(ws, sql, caller)
                 return {"kind": "read", "paginated": False, **out}
 
-            job_id = _jobmgr.submit(("analysis", ws), _work_ws)
+            try:
+                job_id = _jobmgr.submit(("analysis", ws), _work_ws)
+            except Busy:
+                return JSONResponse({"ok": False,
+                                     "error": f"工作区 {ws} 有查询正在执行，请等待其完成后再试。"})
             return JSONResponse({"ok": True, "job_id": job_id})
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
@@ -1747,9 +1752,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             except (QueryRejected, KeyError, ValueError) as e:
                 raise RuntimeError(str(e)) from e
 
-        # 按连接串行：同一连接同时只跑一条，其余排队。取消器经 on_start 注册，
-        # 运行中取消会对 DB 发 KILL QUERY / pg_cancel。
-        job_id = _jobmgr.submit((project, connection), _work)
+        # 按连接：同一连接同时只跑一条；忙时直接拒绝（不排队），由前端明确提示。
+        # 取消器经 on_start 注册，运行中取消会对 DB 发 KILL QUERY / pg_cancel。
+        try:
+            job_id = _jobmgr.submit((project, connection), _work)
+        except Busy:
+            return JSONResponse({"ok": False,
+                                 "error": f"连接 {project}/{connection} 有查询正在执行，"
+                                          "请等待其完成，或点击「取消」中断后再试。"})
         return JSONResponse({"ok": True, "job_id": job_id})
 
     @mcp.custom_route("/admin/sql/job", methods=["GET"])
@@ -1759,9 +1769,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         snap = _jobmgr.get(job_id)
         if snap is None:
             return JSONResponse({"ok": False, "error": "任务不存在或已过期（结果保留 10 分钟）"})
-        out = {"ok": True, "status": snap["status"],
-               "queue_position": snap["queue_position"],
-               "wait_ms": snap["wait_ms"], "elapsed_ms": snap["elapsed_ms"]}
+        out = {"ok": True, "status": snap["status"], "elapsed_ms": snap["elapsed_ms"]}
         if snap["status"] == "done":
             out["result"] = snap["result"]
         elif snap["status"] in ("error", "canceled"):
@@ -1771,7 +1779,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @mcp.custom_route("/admin/sql/cancel", methods=["POST"])
     @guard
     async def _sql_cancel(req: Request) -> JSONResponse:
-        """取消任务：排队中直接撤销；运行中对 DB 发 KILL QUERY / pg_cancel。"""
+        """取消正在执行的任务：对 DB 发 KILL QUERY / pg_cancel_backend / interrupt。"""
         f = await req.form()
         job_id = str(f.get("id") or "")
         return JSONResponse({"ok": _jobmgr.cancel(job_id)})

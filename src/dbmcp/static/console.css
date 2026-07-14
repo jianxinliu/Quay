@@ -188,6 +188,12 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-bm-glyph { cursor: pointer; background: var(--dg-amber); width: 8px !important; height: 8px !important;
   border-radius: 50%; margin: 5px 0 0 5px; box-shadow: 0 0 3px rgba(224,168,62,.6); }
 .dg-bm-linebg { background: rgba(224,168,62,.10); }
+/* 执行状态字形：画在被执行语句行左侧的字形边栏（⟳ 执行中 / ✓ 成功 / ✗ 出错），取代原来固定在第一行的图标 */
+.dg-exec-run::before, .dg-exec-ok::before, .dg-exec-err::before {
+  display: block; text-align: center; line-height: 19px; font-size: 12px; }
+.dg-exec-run::before { content: "⟳"; color: var(--dg-accent); animation: dgspin 1s linear infinite; }
+.dg-exec-ok::before  { content: "✓"; color: var(--dg-green); }
+.dg-exec-err::before { content: "✗"; color: var(--dg-red); }
 /* 左栏「书签」区行 */
 .dg-bm-row { display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer; font-size: 12px; }
 .dg-bm-row:hover { background: var(--dg-hover); }
@@ -293,9 +299,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   box-shadow: 0 4px 14px rgba(0,0,0,.28); font-size: 12px; color: var(--dg-text);
   max-width: 90%;
 }
-.dg-run-pill.queued { border-color: var(--dg-border); }
 .dg-run-pill .dg-run-ico { color: var(--dg-accent); display: inline-block; animation: dgspin 1s linear infinite; }
-.dg-run-pill.queued .dg-run-ico { animation: none; color: var(--dg-faint); }
 .dg-run-pill .dg-run-txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dg-run-cancel {
   flex: none; background: var(--dg-red, #db5c5c); color: #fff; border: none; border-radius: 12px;
@@ -327,6 +331,9 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-restabs .rtab.on { background: var(--dg-panel); color: var(--dg-text); border-color: var(--dg-border); }
 .dg-restabs .rtab .rx { color: var(--dg-faint); font-size: 10px; }
 .dg-restabs .rtab .rx:hover { color: var(--dg-red); }
+/* 出错/取消的结果页：标红，与成功结果页区分 */
+.dg-restabs .rtab.err { color: var(--dg-red); }
+.dg-restabs .rtab.err.on { background: rgba(219,92,92,.12); border-color: var(--dg-red); }
 .dg-res-meta {
   display: flex; align-items: center; gap: 8px; padding: 3px 12px; border-bottom: 1px solid var(--dg-border);
   font-size: 12px; line-height: 20px; color: var(--dg-muted); flex: none;
