@@ -351,9 +351,13 @@ class DbmService:
         if prefix is None:
             raise QueryRejected(f"引擎 {cfg.engine} 不支持 EXPLAIN")
         fmt = "rows" if cfg.engine == "sqlite" else "json"
+        # 写语句（DELETE/UPDATE/INSERT/DDL）的 EXPLAIN 需要对应表的写权限：reader（只读账号）
+        # 会被 DB 以权限不足拒绝（MySQL 1142）。EXPLAIN 不带 ANALYZE 不真正执行，改用 writer
+        # 账号取计划是安全的；无独立 writer 时退回 reader（sqlite 等无账号概念场景）。
+        role = "writer" if (not verdict.readonly and cfg.writer is not None) else "reader"
 
         def _run() -> dict:
-            engine = self.pool.get(project, connection, cfg, schema=schema)
+            engine = self.pool.get(project, connection, cfg, role=role, schema=schema)
             # JSON 计划可能很长，放开单元格截断
             res = engines.run_query(engine, prefix + stmt, max_rows=500, max_cell_chars=1_000_000)
             return {"format": fmt, "columns": res.columns, "rows": res.rows}

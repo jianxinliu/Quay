@@ -38,3 +38,13 @@ def test_theme_invalid_falls_back_to_dark():
 def test_bad_int_falls_back_to_default():
     s = SettingsStore(":memory:")
     assert s.save({"redis_page_size": "abc"})["redis_page_size"] == DEFAULTS["redis_page_size"]
+
+
+def test_sql_minimap_bool_roundtrip():
+    s = SettingsStore(":memory:")
+    assert s.get_all()["sql_minimap"] is True  # 默认开启
+    # 表单/前端可能传 "false"/"true"/"on"/"1" 等 → 归一化为 bool
+    assert s.save({"sql_minimap": "false"})["sql_minimap"] is False
+    assert s.save({"sql_minimap": "true"})["sql_minimap"] is True
+    assert s.save({"sql_minimap": "on"})["sql_minimap"] is True
+    assert s.save({"sql_minimap": "0"})["sql_minimap"] is False

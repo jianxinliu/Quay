@@ -282,6 +282,32 @@
 </div>`
   };
 
+  // 递归把 EXPLAIN JSON 计划里的「表访问」摘出来做直观概览，兼容三种格式：
+  // ① MySQL 旧 FORMAT=JSON（access_type ALL/ref…、cost_info、rows_examined_per_scan）
+  // ② MySQL 新 JSON（schema v2.0，operation/estimated_rows/estimated_total_cost，access_type "table"=全表扫描）
+  // ③ PG FORMAT JSON（Relation Name / Node Type / Plan Rows / Total Cost）
+  function walkPlan(node, acc) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(function (x) { walkPlan(x, acc); }); return; }
+    if (node.table_name) {                       // MySQL 表节点（新旧格式都有 table_name）
+      var ci = node.cost_info || {};
+      var at = (node.access_type || "").toLowerCase();
+      acc.push({ table: node.table_name, access: node.access_type || "", operation: node.operation || "",
+        rows: node.estimated_rows != null ? node.estimated_rows
+              : (node.rows_examined_per_scan != null ? node.rows_examined_per_scan : node.rows_produced_per_join),
+        key: node.key || "", filtered: node.filtered != null ? node.filtered : null,
+        cost: node.estimated_total_cost != null ? node.estimated_total_cost
+              : (ci.read_cost != null ? ci.read_cost : (ci.prefix_cost != null ? ci.prefix_cost : null)),
+        warn: at === "all" || at === "table" });   // 旧格式 ALL / 新格式 table = 全表扫描
+    } else if (node["Relation Name"] || (node["Node Type"] && /scan/i.test(node["Node Type"]))) {  // PG 扫描节点
+      acc.push({ table: node["Relation Name"] || node["Node Type"], access: node["Node Type"] || "",
+        operation: "", rows: node["Plan Rows"], key: node["Index Name"] || "", filtered: null,
+        cost: node["Total Cost"] != null ? node["Total Cost"] : null,
+        warn: /seq scan/i.test(node["Node Type"] || "") });
+    }
+    Object.keys(node).forEach(function (k) { walkPlan(node[k], acc); });
+  }
+
   // EXPLAIN JSON 计划 → 可折叠树。table/access/rows/cost 等关键字段徽章高亮，其余通用渲染。
   var PlanNode = {
     name: "plan-node",
@@ -356,6 +382,8 @@
         vpOpen: false, vpTab: "value", vpVal: "", vpNull: false,
         leftW: 264, editorH: 300, dataLogH: 150,
         theme: "dark",          // 系统设置：dark | light（浅色主题）
+        minimapOn: true,        // 系统设置：编辑器 minimap 是否显示（DB 配置，默认开）
+        schemaFloatRight: 16,   // schema 浮层距编辑器右缘距离（动态避开 minimap）
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
       };
     },
@@ -433,6 +461,18 @@
         if (!m || !m.environment) return null;
         return { env: m.environment, color: ENV_COLORS[m.environment] || "#64748b" };
       },
+      // EXPLAIN 概览：从 JSON 计划摘出表访问列表 + 总成本 + 全表扫描数（直观呈现，替代只读原始树）
+      explainInfo: function () {
+        var t = this.activeTab;
+        if (!t || !t.explain || !t.explain.tree) return null;
+        var tree = t.explain.tree, scans = [];
+        walkPlan(tree, scans);
+        var cost = null;
+        if (tree.query_block && tree.query_block.cost_info) cost = tree.query_block.cost_info.query_cost;  // 旧 MySQL
+        else if (tree.query_plan && tree.query_plan.estimated_total_cost != null) cost = tree.query_plan.estimated_total_cost;  // 新 MySQL
+        else if (Array.isArray(tree) && tree[0] && tree[0].Plan) cost = tree[0].Plan["Total Cost"];  // PG
+        return { cost: cost, scans: scans, warnCount: scans.filter(function (s) { return s.warn; }).length };
+      },
       chartTypeOptions: function () {
         return [{ value: "bar", label: "柱状" }, { value: "line", label: "折线" },
                 { value: "pie", label: "饼图" }, { value: "scatter", label: "散点" }];
@@ -467,6 +507,24 @@
         this._tt = setTimeout(function () { self.toast = ""; }, 2600); },
       lvColor: function (l) { return LVL[l] || "#666"; },
       numOr: function (v) { return v == null ? "未知" : "约 " + v; },
+      // EXPLAIN 概览：数字千分位；访问类型着色（全表扫描红/范围·全索引扫描琥珀/命中索引绿）
+      fmtN: function (v) { var n = Number(v); return isFinite(n) ? n.toLocaleString("en-US") : v; },
+      accessClass: function (a) {
+        var s = (a || "").toLowerCase();
+        if (s === "all" || s === "table" || s.indexOf("seq scan") >= 0) return "bad";   // 全表扫描
+        if (s === "index" || s.indexOf("range") >= 0) return "warn";        // 全索引扫描 / 范围
+        if (s.indexOf("scan") >= 0 || s.indexOf("ref") >= 0 || s === "const"
+            || s === "system" || s.indexOf("lookup") >= 0) return "good";   // 命中索引/主键
+        return "mut";
+      },
+      // 访问类型归一化标签（全表扫描等以中文醒目呈现，其余保留原值）
+      accessLabel: function (a) {
+        var s = (a || "").toLowerCase();
+        if (s === "all" || s === "table") return "全表扫描";
+        if (s.indexOf("seq scan") >= 0) return "全表扫描";
+        if (s === "index") return "全索引扫描";
+        return a || "—";
+      },
       boolText: function (v) { return v === true ? "是" : v === false ? "否" : "未知"; },
       fmtTs: function (iso) {
         if (!iso) return "";
@@ -523,8 +581,9 @@
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
-                    // 异步任务态：开跑时刻（客户端秒表用）+ 被执行语句起始行（字形图标定位）+ 上次结果状态
-                    jobRunAt: 0, execLine: 0, execGlyph: "",
+                    // 异步任务态：开跑时刻（客户端秒表用）+ 被执行语句的字形状态标记 + 上次结果状态
+                    jobRunAt: 0, execMarks: [], execIdx: 0,   // execMarks: [{line,state}]，多语句时每条一个
+                    seq: null,   // 多语句顺序执行状态 {list, i}（瞬时，不持久化）
                     results: [], resultIdx: 0, isPaging: false };  // 结果 tab（每次执行新增一个）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
@@ -710,6 +769,25 @@
           if (m) m.setValue(d.ok ? (d.ddl || "-- （空）") : "-- 获取 DDL 失败：" + d.error);
           self.persist();
         });
+      },
+      // 一个词是不是当前连接里已知的表？是则返回 {table, schema}（供 ⌘+点击跳 DDL）
+      tableForWord: function (word) {
+        if (!word) return null;
+        if (Object.prototype.hasOwnProperty.call(tableSchema, word))
+          return { table: word, schema: tableSchema[word] };
+        if (currentTables.indexOf(word) >= 0) return { table: word, schema: "" };
+        return null;
+      },
+      // schema 浮层右缘定位：停在 minimap 左侧，避免遮挡缩略图（minimap 关时贴编辑器右缘）
+      syncSchemaFloat: function () {
+        if (!editor) return;
+        try {
+          var info = editor.getLayoutInfo();
+          var mm = info.minimap;
+          // minimapLeft 是 minimap 区域左起点；width 为编辑器总宽 → 右缘偏移 = 总宽 - minimapLeft
+          var off = (mm && mm.minimapWidth > 0) ? (info.width - mm.minimapLeft + 8) : 16;
+          this.schemaFloatRight = Math.max(16, Math.round(off));
+        } catch (e) { this.schemaFloatRight = 16; }
       },
 
       // ---------- 连接 / 树（带每连接快照缓存，保活） ----------
@@ -1390,19 +1468,48 @@
         while (off < text.length && /\s/.test(text[off])) off++;
         return model.getPositionAt(off).lineNumber;
       },
-      // 执行状态字形："run"（转圈）/"ok"（✓）/"err"（✗）/""（清除），画在 t.execLine 行左侧字形边栏
+      // 选区里跨多条语句 → 返回 [{sql, line}]（line=该语句在编辑器里的起始行，供每条独立字形状态）；
+      // 无选区或只有一条则返回 null（走普通单条执行）。
+      seqItems: function () {
+        if (!editor) return null;
+        var sel = editor.getSelection();
+        if (!sel || sel.isEmpty()) return null;
+        var model = editor.getModel();
+        var selText = model.getValueInRange(sel);
+        var ranges = stmtRanges(selText);
+        if (ranges.length <= 1) return null;
+        var base = model.getOffsetAt(sel.getStartPosition());
+        var out = [];
+        ranges.forEach(function (r) {
+          var raw = selText.slice(r.s, r.e);
+          var stmt = raw.replace(/;\s*$/, "").trim();
+          if (!stmt) return;
+          var lead = raw.match(/^\s*/)[0].length;   // 跳过前导空白，行号对准语句首行
+          out.push({ sql: stmt, line: model.getPositionAt(base + r.s + lead).lineNumber });
+        });
+        return out;
+      },
+      // 执行状态字形："run"（转圈）/"ok"（✓）/"err"（✗）/""（清除），画在被执行语句行左侧字形边栏。
+      // 更新「当前条」（execIdx）的状态；多语句顺序执行时每条各有一个 mark、各自保留 run→✓/✗。
       setExecGlyph: function (t, state) {
-        t.execGlyph = state;
+        if (t.type === "query") {
+          if (!state) t.execMarks = [];
+          else if (t.execMarks && t.execMarks[t.execIdx]) t.execMarks[t.execIdx].state = state;
+        }
         if (t.id === this.activeId) this.applyExecGlyph();
       },
       applyExecGlyph: function () {
         if (!execCollection || !window.monaco) return;
         var t = this.activeTab;
-        var cls = t && t.execGlyph && t.type === "query"
-          ? ({ run: "dg-exec-run", ok: "dg-exec-ok", err: "dg-exec-err" }[t.execGlyph]) : null;
-        if (!cls || !t.execLine) { execCollection.clear(); return; }
-        execCollection.set([{ range: new window.monaco.Range(t.execLine, 1, t.execLine, 1),
-          options: { glyphMarginClassName: cls, isWholeLine: false } }]);
+        if (!t || t.type !== "query" || !t.execMarks || !t.execMarks.length) { execCollection.clear(); return; }
+        var cmap = { run: "dg-exec-run", ok: "dg-exec-ok", err: "dg-exec-err" };
+        var decos = [];
+        t.execMarks.forEach(function (m) {
+          var cls = cmap[m.state];
+          if (cls && m.line) decos.push({ range: new window.monaco.Range(m.line, 1, m.line, 1),
+            options: { glyphMarginClassName: cls, isWholeLine: false } });
+        });
+        execCollection.set(decos);
       },
       run: function (confirm, page, sqlOverride, isPage) {
         var self = this, t = this.activeTab;
@@ -1420,17 +1527,36 @@
         else sql = this.stmtAtCursor();
         if (!sql.trim()) { this.flash("请输入 SQL"); return; }
         page = page || 0;
+        // 编辑器里选中多条语句 → 拆开按顺序逐条执行（每条一个结果页 + 各自独立的执行状态图标），
+        // 不整体当成写操作被拒。递归调用时带 sqlOverride，已是单条、不再进这个分支。
+        if (sqlOverride == null && t.type === "query" && !isPage) {
+          var items = this.seqItems();
+          if (items && items.length > 1) {
+            t.seq = { list: items.map(function (x) { return x.sql; }), i: 0 };
+            t.execMarks = items.map(function (x) { return { line: x.line, state: "" }; });
+            t.execIdx = 0;
+            this.run(false, 0, items[0].sql);
+            return;
+          }
+          t.seq = null;
+        }
         t.pendingSql = sql;
         t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null; t.wfSteps = null;
         t.jobRunAt = Date.now();  // 客户端秒表起点
-        // 被执行语句起始行 → 执行状态图标定位；新光标执行时更新，翻页/重载沿用上次行
-        if (sqlOverride == null && t.type === "query") t.execLine = this.execLineFor();
+        // 执行状态字形定位：序列中沿用建立时算好的每条 marks（只切当前条）；
+        // 普通单条执行在光标语句行放一个 mark；翻页/重载沿用上次 marks。
+        if (t.type === "query") {
+          if (t.seq) t.execIdx = t.seq.i;
+          else if (sqlOverride == null && !isPage) { t.execMarks = [{ line: this.execLineFor(), state: "" }]; t.execIdx = 0; }
+        }
         this.setExecGlyph(t, "run");
         t.rowSel = {}; t.lastSelRi = -1; t.resQ = null;  // 重查后行号会变，行选择/搜索作废
         if (page === 0) t.result = null;
-        // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询
+        // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询。
+        // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
         apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
-                                          page: page, schema: t.schema || null })
+                                          page: page, schema: t.schema || null,
+                                          parallel: t.type === "data" ? "1" : null })
           .then(function (d) {
             // 连接忙被拒绝 / 其它提交错误 → 作为一个「出错结果页」呈现（不是顶部横幅）
             if (!d.ok) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: d.error }); self.persist(); return; }
@@ -1446,7 +1572,7 @@
         apiGet("/admin/sql/job?id=" + jobId).then(function (d) {
           var t2 = self.tabs.find(function (x) { return x.id === tabId; });
           if (!t2 || t2.jobId !== jobId) return;
-          if (!d.ok) { t2.running = false; t2.jobId = null; self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "任务丢失" }); self.persist(); return; }
+          if (!d.ok) { t2.running = false; t2.jobId = null; self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "任务丢失" }); self._seqAdvance(t2, false); self.persist(); return; }
           if (d.status === "running") {
             t2.running = true;
             // 客户端秒表锚定到服务端真实耗时（刷新后续接、以及首轮校准都准确，避免走得偏快/偏慢）
@@ -1456,8 +1582,8 @@
           }
           t2.running = false; t2.jobId = null;
           // 出错 / 取消 → 也进一个结果页（而非顶部横幅），与成功结果统一在结果 tab 里
-          if (d.status === "canceled") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "已取消" }); self.persist(); return; }
-          if (d.status === "error") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error }); self.persist(); return; }
+          if (d.status === "canceled") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "已取消" }); self._seqAdvance(t2, false); self.persist(); return; }
+          if (d.status === "error") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error }); self._seqAdvance(t2, false); self.persist(); return; }
           var r = d.result || {};
           if (r.kind === "workflow") {
             // workflow 运行结果：步骤清单 + 输出预览（输出复用结果表格）
@@ -1507,6 +1633,8 @@
             if (t2.type === "data") setTimeout(function () { self.run(false, t2.lastPage); }, 60);
             else self.refreshTree();
           }
+          // 多语句顺序执行：本条读/写成功即跑下一条；confirm（写需人工确认）在此停住等确认
+          self._seqAdvance(t2, r.kind === "read" || r.kind === "write");
           self.persist();
           if (t2.id === self.activeId && t2.view === "chart" && t2.result) self.renderChart();
         }).catch(function () {  // 网络抖动：稍后重试
@@ -1521,6 +1649,15 @@
           // 排队中会立刻变 canceled；运行中发出 KILL 后由下一次轮询收敛为 canceled
           self.flash(d.ok ? "已请求取消" : "任务已结束，无需取消");
         }).catch(function (e) { self.flash("取消失败：" + e); });
+      },
+      // 多语句顺序执行的推进：上一条成功(ok=true)则跑下一条；失败/取消/需确认则中止整个序列。
+      _seqAdvance: function (t, ok) {
+        if (!t || !t.seq) return;
+        if (!ok) { t.seq = null; return; }
+        t.seq.i++;
+        if (t.seq.i >= t.seq.list.length) { t.seq = null; return; }
+        var self = this, next = t.seq.list[t.seq.i];
+        setTimeout(function () { self.run(false, 0, next); }, 30);
       },
       goPage: function (p) {
         var t = this.activeTab;
@@ -2491,6 +2628,7 @@
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      submit: null, submitting: false, refreshWarn: false,
                      colDisplay: t.colDisplay || {},
+                     execMarks: [], execIdx: 0, seq: null,
                      results: t.results || [], resultIdx: t.resultIdx || 0, isPaging: false,
                      running: !!t.jobId };  // 有未完成任务 → 恢复后续接轮询
           });
@@ -2539,7 +2677,7 @@
         editor = monaco.editor.create(this.$refs.editorEl, {
           model: active, language: "sql",
           theme: this.theme === "light" ? "vs" : "vs-dark", automaticLayout: true,
-          fontSize: 13, minimap: { enabled: true }, scrollBeyondLastLine: false, tabSize: 2,
+          fontSize: 13, minimap: { enabled: this.minimapOn }, scrollBeyondLastLine: false, tabSize: 2,
           glyphMargin: true,   // 书签图标显示在行号左侧的字形边栏
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
@@ -2548,6 +2686,43 @@
           // Monaco 会按真实可视空间决定弹在光标上方还是下方（顶部空间不够就弹下面）
           fixedOverflowWidgets: true,
         });
+        // schema 浮层动态避开 minimap：让浮层右缘停在 minimap 左侧（minimap 关闭时贴右缘）
+        editor.onDidLayoutChange(function () { self.syncSchemaFloat(); });
+        this.syncSchemaFloat();
+        // 编辑器里 ⌘/Ctrl+点击已知表名 → 打开该表 DDL（无独立 provider，直接拦截鼠标）
+        editor.onMouseDown(function (e) {
+          if (!e.event || !(e.event.metaKey || e.event.ctrlKey) || !e.event.leftButton) return;
+          var at = self.activeTab;
+          if (!at || at.type !== "query" || !e.target || !e.target.position) return;
+          var model = editor.getModel(); if (!model) return;
+          var w = model.getWordAtPosition(e.target.position); if (!w) return;
+          var info = self.tableForWord(w.word); if (!info) return;
+          // 检查前面是否有 `库.` 限定，优先用它作为 schema
+          var line = model.getLineContent(e.target.position.lineNumber);
+          var mm = line.slice(0, w.startColumn - 1).match(/([A-Za-z_][\w$]*)\s*\.\s*$/);
+          var schema = mm ? mm[1] : (info.schema || at.schema || "");
+          e.event.preventDefault(); e.event.stopPropagation();
+          self.openDdlTab(info.table, schema);
+        });
+        // ⌘/Ctrl+hover 表名 → 加下划线提示「可点击跳 DDL」（配合上面的 ⌘/Ctrl+点击）
+        var linkCol = editor.createDecorationsCollection();
+        var linkAt = null;
+        function clearLink() { if (linkAt) { linkCol.clear(); linkAt = null; } }
+        editor.onMouseMove(function (e) {
+          var at = self.activeTab;
+          if (!e.event || !(e.event.metaKey || e.event.ctrlKey) || !at || at.type !== "query"
+              || !e.target || !e.target.position) { clearLink(); return; }
+          var model = editor.getModel(); if (!model) { clearLink(); return; }
+          var w = model.getWordAtPosition(e.target.position);
+          if (!w || !self.tableForWord(w.word)) { clearLink(); return; }
+          var ln = e.target.position.lineNumber;
+          if (linkAt && linkAt.ln === ln && linkAt.sc === w.startColumn) return;  // 同一处，免重设
+          linkAt = { ln: ln, sc: w.startColumn };
+          linkCol.set([{ range: new monaco.Range(ln, w.startColumn, ln, w.endColumn),
+            options: { inlineClassName: "dg-table-link" } }]);
+        });
+        editor.onMouseLeave(function () { clearLink(); });
+        editor.onKeyUp(function () { clearLink(); });   // 松开 ⌘/Ctrl → 去下划线
         // 执行：右键菜单置顶 + 快捷键显示在右侧（keybindings 让 Monaco 自动渲染 ⌘↵）
         editor.addAction({ id: "dbm-run", label: "执行（选中则跑选中，否则光标处语句）",
           keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
@@ -2569,7 +2744,7 @@
         editor.onDidBlurEditorText(function () { self.persist(); });
         editor.onDidChangeModelContent(function () { self.scheduleLint(); self.markDirty(); if (self.bmOpen || self.acc.bm) self.bmTick++;
           // 编辑内容后清掉旧的执行状态图标（行号已变，图标会错位/误导）
-          var at = self.activeTab; if (at && !at.running && at.execGlyph) { at.execGlyph = ""; if (execCollection) execCollection.clear(); }
+          var at = self.activeTab; if (at && !at.running && at.execMarks && at.execMarks.length) { at.execMarks = []; if (execCollection) execCollection.clear(); }
         });  // 实时语法检查 + 改动标记 + 书签预览刷新
         this.scheduleLint();
         // 右键菜单：格式化（选中/全部）/ EXPLAIN / EXPLAIN ANALYZE
@@ -2730,7 +2905,11 @@
         if (t.jobId) self.pollJob(t.id, t.jobId, t.jobPage || 0);
       });
       apiGet("/admin/settings/get").then(function (d) {
-        if (d && d.ok && d.settings) self.theme = d.settings.theme || "dark";
+        if (d && d.ok && d.settings) {
+          self.theme = d.settings.theme || "dark";
+          self.minimapOn = d.settings.sql_minimap !== false;  // 缺省视为开启
+          if (editor) { editor.updateOptions({ minimap: { enabled: self.minimapOn } }); self.syncSchemaFloat(); }
+        }
       }).catch(function () {});
       this.loadConnections().then(function () { self.loadSnippets(); });
       loadMonaco(function () { self.initEditor(); });
@@ -2962,7 +3141,7 @@
         </div>
         <!-- 执行 schema 选择器浮在编辑器右上角（原顶部栏整条已去掉） -->
         <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres') && activeTab && activeTab.type==='query'"
-               class="dg-schema-float" title="选择语句执行所在的库 / schema">
+               class="dg-schema-float" :style="{right: schemaFloatRight + 'px'}" title="选择语句执行所在的库 / schema">
           <span class="lb">schema</span>
           <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
                      placeholder="未指定" @update:model-value="setSchema"/>
@@ -3100,7 +3279,29 @@
         <div v-if="activeTab.explain" class="dg-explain">
           <div class="hd"><b>执行计划</b><span class="act" @click="closeExplain">✕ 关闭</span></div>
           <div v-if="activeTab.explain.loading" class="dg-empty">获取中…</div>
-          <plan-node v-else-if="activeTab.explain.tree" :label="'plan'" :node="activeTab.explain.tree" :depth="0"/>
+          <template v-else-if="activeTab.explain.tree">
+            <!-- 直观概览：全表扫描告警 + 总成本 + 逐表访问方式/预估行/索引 -->
+            <div class="ex-sum">
+              <span v-if="explainInfo.warnCount" class="ex-warn">⚠ {{ explainInfo.warnCount }} 处全表扫描</span>
+              <span v-else class="ex-ok">✓ 无全表扫描</span>
+              <span v-if="explainInfo.cost!=null" class="ex-cost">总成本 {{ explainInfo.cost }}</span>
+            </div>
+            <table v-if="explainInfo.scans.length" class="ex-tbl">
+              <thead><tr><th>访问方式</th><th>表 / 操作</th><th>预估行</th><th>索引</th><th>filtered</th><th>成本</th></tr></thead>
+              <tbody>
+                <tr v-for="(s,i) in explainInfo.scans" :key="i" :class="{warn:s.warn}">
+                  <td><span class="ex-acc" :class="accessClass(s.access)">{{ accessLabel(s.access) }}</span></td>
+                  <td class="ex-tb">{{ s.table }}<span v-if="s.operation" class="ex-op">{{ s.operation }}</span></td>
+                  <td>{{ s.rows!=null ? fmtN(s.rows) : '—' }}</td>
+                  <td>{{ s.key || '（无索引）' }}</td>
+                  <td>{{ s.filtered!=null ? s.filtered+'%' : '—' }}</td>
+                  <td>{{ s.cost!=null ? s.cost : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <details class="ex-raw"><summary>完整计划树</summary>
+              <plan-node :label="'plan'" :node="activeTab.explain.tree" :depth="0"/></details>
+          </template>
           <table v-else-if="activeTab.explain.rows" class="dg-rt" style="margin:8px">
             <thead><tr><th v-for="c in activeTab.explain.columns" :key="c">{{ c }}</th></tr></thead>
             <tbody><tr v-for="(r,i) in activeTab.explain.rows" :key="i"><td v-for="(v,j) in r" :key="j">{{ cellText(v) }}</td></tr></tbody>

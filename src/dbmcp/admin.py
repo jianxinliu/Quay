@@ -582,11 +582,17 @@ def _settings_general_body(s: dict) -> str:
 
 
 def _settings_db_body(s: dict) -> str:
+    on = bool(s.get("sql_minimap", True))
+    mm_opts = (f"<option value='true'{' selected' if on else ''}>显示（默认）</option>"
+               f"<option value='false'{'' if on else ' selected'}>隐藏</option>")
     return _settings_form(
         "<div style='margin-bottom:16px'>"
         + _field("查询台结果每页行数", "sql_page_size", s.get("sql_page_size", 100),
                  ph="100", typ="number", width="200px")
-        + "<div class='muted' style='margin-top:4px'>查询台（DB）结果分页大小。</div></div>")
+        + "<div class='muted' style='margin-top:4px'>查询台（DB）结果分页大小。</div></div>"
+        "<div style='margin-bottom:16px'><label>编辑器 minimap（代码缩略图）</label>"
+        f"<select name='sql_minimap' style='width:200px'>{mm_opts}</select>"
+        "<div class='muted' style='margin-top:4px'>查询台 SQL 编辑器右侧的代码缩略图，隐藏可让出更多编辑宽度。</div></div>")
 
 
 def _settings_redis_body(s: dict) -> str:
@@ -1473,7 +1479,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     async def _settings_save(req: Request) -> JSONResponse:
         f = await req.form()
         updates = {}
-        for key in ("theme", "sql_page_size", "redis_page_size", "redis_key_limit"):
+        for key in ("theme", "sql_page_size", "sql_minimap", "redis_page_size", "redis_key_limit"):
             if key in f:
                 updates[key] = str(f.get(key))
         try:
@@ -1752,10 +1758,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             except (QueryRejected, KeyError, ValueError) as e:
                 raise RuntimeError(str(e)) from e
 
-        # 按连接：同一连接同时只跑一条；忙时直接拒绝（不排队），由前端明确提示。
+        # 按连接串行只约束编辑器里手写的 SQL（同一连接同时只跑一条，忙时直接拒绝、前端明确提示）；
+        # 双击表名打开的数据 tab（parallel=1）用独立 key 立即并行、不占用连接串行名额、也不互拒。
         # 取消器经 on_start 注册，运行中取消会对 DB 发 KILL QUERY / pg_cancel。
+        parallel = str(f.get("parallel") or "") in ("1", "on", "true")
+        queue_key = _solo_key() if parallel else (project, connection)
         try:
-            job_id = _jobmgr.submit((project, connection), _work)
+            job_id = _jobmgr.submit(queue_key, _work)
         except Busy:
             return JSONResponse({"ok": False,
                                  "error": f"连接 {project}/{connection} 有查询正在执行，"

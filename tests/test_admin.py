@@ -344,6 +344,62 @@ class TestSqlConsole:
         assert d2["ok"] and d2["kind"] == "write" and d2["affected_rows"] == 1
         assert svc.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)["rows"][0][0] == 1
 
+    def test_parallel_flag_bypasses_connection_serial(self, client):
+        """连接串行只约束编辑器 query（同连接忙时拒绝）；数据 tab（parallel=1）用独立 key 不受限。"""
+        import threading
+        tc, svc = client
+        gate = threading.Event()
+        orig = svc.admin_run_sql
+
+        def slow(project, connection, sql, *a, **k):
+            if "SLEEPMARK" in sql:
+                gate.wait(3)  # 占住连接串行名额，直到测试放行
+            return orig(project, connection, sql, *a, **k)
+
+        svc.admin_run_sql = slow
+        try:
+            r1 = tc.post("/admin/sql/run_async",
+                         data={"conn": "demo/main", "sql": "SELECT 1 -- SLEEPMARK"}).json()
+            assert r1["ok"] and r1["job_id"]  # 编辑器查询占住连接
+            # 同连接再来一条编辑器查询 → 忙时拒绝
+            r2 = tc.post("/admin/sql/run_async",
+                         data={"conn": "demo/main", "sql": "SELECT 2"}).json()
+            assert r2["ok"] is False and "正在执行" in r2["error"]
+            # 同连接的数据 tab（parallel=1）→ 不占串行名额，直接受理
+            r3 = tc.post("/admin/sql/run_async",
+                         data={"conn": "demo/main", "sql": "SELECT * FROM users", "parallel": "1"}).json()
+            assert r3["ok"] and r3["job_id"]
+        finally:
+            gate.set()
+            svc.admin_run_sql = orig
+
+    def test_explain_write_uses_writer_role(self, client):
+        """写语句的 EXPLAIN 必须走 writer 账号（reader 只读账号无 DELETE 权限会被 DB 拒，MySQL 1142）。
+
+        sqlite 下 writer 与 reader 同库，无法复现权限拒绝，故用 spy 断言选到的角色。
+        """
+        tc, svc = client
+        seen = []
+        orig = svc.pool.get
+
+        def spy(project, connection, cfg, role="reader", schema=None):
+            seen.append(role)
+            return orig(project, connection, cfg, role=role, schema=schema)
+
+        svc.pool.get = spy
+        try:
+            dw = tc.post("/admin/sql/explain",
+                         data={"conn": "demo/main", "sql": "DELETE FROM users WHERE id=1"}).json()
+            assert dw["ok"], dw
+            assert seen == ["writer"]
+            seen.clear()
+            dr = tc.post("/admin/sql/explain",
+                         data={"conn": "demo/main", "sql": "SELECT * FROM users"}).json()
+            assert dr["ok"], dr
+            assert seen == ["reader"]
+        finally:
+            svc.pool.get = orig
+
     def test_format_endpoint(self, client):
         tc, _ = client
         d = tc.post("/admin/sql/format",

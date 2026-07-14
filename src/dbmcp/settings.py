@@ -14,6 +14,7 @@ from pathlib import Path
 DEFAULTS: dict[str, object] = {
     "theme": "dark",           # 界面主题：dark（深色）/ light（浅色），作用于查询台与 Redis 控制台
     "sql_page_size": 100,      # 查询台（DB）结果每页行数
+    "sql_minimap": True,       # 查询台编辑器是否显示 minimap（代码缩略图），默认开启
     "redis_page_size": 100,    # Redis 结果每页行数（键详情集合 / 命令结果）
     "redis_key_limit": 1000,   # Redis 键列表默认加载上限（SCAN）
 }
@@ -92,6 +93,8 @@ def _validate(key: str, raw: object) -> str:
     default = DEFAULTS[key]
     if key == "theme":
         return "light" if str(raw) == "light" else "dark"
+    if isinstance(default, bool):  # 注意：bool 必须先于 int 判断（bool 是 int 的子类）
+        return "true" if str(raw).lower() in ("true", "1", "on", "yes") else "false"
     if isinstance(default, int):
         try:
             n = int(raw)
