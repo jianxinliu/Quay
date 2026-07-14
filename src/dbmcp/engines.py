@@ -175,6 +175,23 @@ def role_timeouts(policy, readonly: bool) -> tuple[int, int]:  # noqa: ANN001
     return stmt, (stmt if readonly else policy.write_timeout_s)
 
 
+# reader 的 socket read_timeout 要比服务端 max_execution_time(=stmt_timeout_s) 宽这么多秒。
+_READ_SOCKET_GRACE_S = 15
+
+
+def mysql_read_timeout(stmt_timeout_s: int, op_timeout_s: int, readonly: bool) -> int:
+    """MySQL 连接的 socket read_timeout（秒）。
+
+    - reader：max_execution_time(=stmt_timeout_s) 才是长 SELECT 的真实上限；socket read_timeout
+      必须比它宽 _READ_SOCKET_GRACE_S 秒，否则二者相等时 socket 常抢先超时 → pymysql 报
+      2013「Lost connection ... read operation timed out」，而不是让 max_execution_time 干净地以
+      3024「超过最大执行时间」中断。放宽 socket 后，服务端超时先触发、错误信息也清晰；用户调大
+      连接的读取超时（statement_timeout_s）时长 SELECT 也能真正跑完而不被 socket 误杀。
+    - writer：op(=write_timeout_s) 本身就是真实上限（写操作不受 max_execution_time 约束），直接用。
+    """
+    return stmt_timeout_s + _READ_SOCKET_GRACE_S if readonly else op_timeout_s
+
+
 def mysql_session_statements(timeout_s: int, readonly: bool) -> list[str]:
     """MySQL 建连后要逐条执行的会话设置语句。
 
@@ -230,7 +247,9 @@ def _create_readonly_engine(
             pool_pre_ping=True,
             connect_args={
                 "connect_timeout": 5,
-                "read_timeout": op_timeout_s,
+                # reader 的 read_timeout 加宽限，让服务端 max_execution_time 先于 socket 超时
+                # （否则二者相等时长 SELECT 被打成 2013 Lost connection，而非干净的超时错误）
+                "read_timeout": mysql_read_timeout(stmt_timeout_s, op_timeout_s, readonly),
                 "write_timeout": op_timeout_s,
             },
         )

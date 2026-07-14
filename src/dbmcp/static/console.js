@@ -17,6 +17,7 @@
   var models = new Map();     // tabId -> ITextModel
   var bmCollection = null;    // 书签装饰集合（切 tab 时重设为该 tab 的书签）
   var execCollection = null;  // 执行状态字形装饰（在被执行语句行左侧显示 ⟳/✓/✗）
+  var stmtBoxCol = null;      // 当前语句边框高亮（⌘↵ 将执行的那条 SQL）
   var monacoReady = false;
   var currentTables = [];     // 补全用：当前连接可见表（未绑库为 库.表）
   var currentConn = "";
@@ -79,8 +80,11 @@
 
   // 按分号切分多条语句（跳过引号/反引号/行注释/块注释），返回 [{s,e}] 偏移区间。
   // 供「光标处执行」：编辑器放多条 SQL，只跑光标所在那条（DataGrip 行为）。
+  // 把编辑器文本拆成语句区间。分隔符：分号 `;`，以及**空行**（不刻板依赖分号——
+  // 一段被空行隔开的 SQL 就是一条语句）。引号/注释内的分号、空行不算分隔。
   function stmtRanges(text) {
     var ranges = [], start = 0, i = 0, n = text.length;
+    function push(end) { if (text.slice(start, end).trim()) ranges.push({ s: start, e: end }); }
     while (i < n) {
       var c = text[i], c2 = text.substr(i, 2);
       if (c === "'" || c === '"' || c === "`") {
@@ -95,7 +99,12 @@
       } else if (c2 === "/*") {
         i += 2; while (i < n && text.substr(i, 2) !== "*/") i++; i += 2;
       } else if (c === ";") {
-        ranges.push({ s: start, e: i + 1 }); i++; start = i;
+        push(i + 1); i++; start = i;
+      } else if (c === "\n") {
+        // 空行分隔：\n 后仅有空白再遇 \n（即中间夹着一整行空白）→ 视为语句边界
+        var j = i + 1;
+        while (j < n && (text[j] === " " || text[j] === "\t" || text[j] === "\r")) j++;
+        if (j < n && text[j] === "\n") { push(i); i = j; start = j; } else i++;
       } else i++;
     }
     if (start < n && text.slice(start).trim()) ranges.push({ s: start, e: n });
@@ -461,6 +470,13 @@
         if (!m || !m.environment) return null;
         return { env: m.environment, color: ENV_COLORS[m.environment] || "#64748b" };
       },
+      // 执行中的骨架列：数据 tab 的列由表结构预先知道 → 加载时先渲染列头（查询 tab 未知则空）
+      loadingCols: function () {
+        var t = this.activeTab;
+        if (!t || t.type !== "data" || !t.table) return [];
+        var meta = this.tableMeta[this.mk(t.table, t.schema)];
+        return meta && meta.columns ? meta.columns.map(function (c) { return c.name; }) : [];
+      },
       // EXPLAIN 概览：从 JSON 计划摘出表访问列表 + 总成本 + 全表扫描数（直观呈现，替代只读原始树）
       explainInfo: function () {
         var t = this.activeTab;
@@ -731,7 +747,7 @@
         this.activeId = id;
         var t = this.activeTab;
         var m = models.get(id);
-        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); this.applyBookmarks(); this.applyExecGlyph(); }
+        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); this.applyBookmarks(); this.applyExecGlyph(); this.applyStmtBox(); }
         if (t && t.conn !== this.lastLoadedConn) this.loadTree();
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
@@ -1488,6 +1504,40 @@
           out.push({ sql: stmt, line: model.getPositionAt(base + r.s + lead).lineNumber });
         });
         return out;
+      },
+      // 光标所在语句的内容区间（去前后空白）+ 是否缺尾分号，供「当前语句边框高亮」用。
+      stmtRangeAtCursor: function () {
+        if (!editor) return null;
+        var model = editor.getModel(); if (!model) return null;
+        var text = model.getValue();
+        var ranges = stmtRanges(text);
+        if (!ranges.length) return null;
+        var off = model.getOffsetAt(editor.getPosition());
+        var r = null;
+        for (var i = 0; i < ranges.length; i++) { if (off <= ranges[i].e) { r = ranges[i]; break; } }
+        if (!r) r = ranges[ranges.length - 1];
+        var s = r.s, e = r.e;
+        while (s < e && /\s/.test(text[s])) s++;         // 去前导空白/换行
+        while (e > s && /\s/.test(text[e - 1])) e--;      // 去尾部空白/换行
+        if (s >= e) return null;
+        return { start: model.getPositionAt(s), end: model.getPositionAt(e), noSemi: text[e - 1] !== ";" };
+      },
+      // 当前语句边框高亮：框住 ⌘↵ 将执行的那条 SQL；缺尾分号时末尾加轻微波浪线。
+      // 有选区时不画（选区本身就是执行目标，且和框选视觉冲突）。
+      applyStmtBox: function () {
+        if (!stmtBoxCol || !window.monaco || !editor) return;
+        var t = this.activeTab;
+        var sel = editor.getSelection();
+        if (!t || t.type !== "query" || (sel && !sel.isEmpty())) { stmtBoxCol.clear(); return; }
+        var info = this.stmtRangeAtCursor();
+        if (!info) { stmtBoxCol.clear(); return; }
+        var decos = [{ range: new window.monaco.Range(info.start.lineNumber, info.start.column,
+          info.end.lineNumber, info.end.column), options: { className: "dg-stmt-box", isWholeLine: false } }];
+        if (info.noSemi && info.end.column > 1) {   // 末字符加波浪线，提示缺分号（非报错，仅提示）
+          decos.push({ range: new window.monaco.Range(info.end.lineNumber, info.end.column - 1,
+            info.end.lineNumber, info.end.column), options: { className: "dg-stmt-nosemi", isWholeLine: false } });
+        }
+        stmtBoxCol.set(decos);
       },
       // 执行状态字形："run"（转圈）/"ok"（✓）/"err"（✗）/""（清除），画在被执行语句行左侧字形边栏。
       // 更新「当前条」（execIdx）的状态；多语句顺序执行时每条各有一个 mark、各自保留 run→✓/✗。
@@ -2732,6 +2782,10 @@
         // 书签：⌘/Ctrl+B 切换、F2/⇧F2 跳下一个/上一个、点字形边栏切换
         bmCollection = editor.createDecorationsCollection();
         execCollection = editor.createDecorationsCollection();  // 执行状态字形（语句行左侧 ⟳/✓/✗）
+        stmtBoxCol = editor.createDecorationsCollection();       // 当前语句边框高亮
+        // 光标移动/选区变化 → 更新当前语句边框（框住 ⌘↵ 将执行的那条 SQL）
+        editor.onDidChangeCursorPosition(function () { self.applyStmtBox(); });
+        editor.onDidChangeCursorSelection(function () { self.applyStmtBox(); });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, function () { self.toggleBookmark(); });
         editor.addCommand(monaco.KeyCode.F2, function () { self.gotoBookmark(1); });
         editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.F2, function () { self.gotoBookmark(-1); });
@@ -2745,8 +2799,10 @@
         editor.onDidChangeModelContent(function () { self.scheduleLint(); self.markDirty(); if (self.bmOpen || self.acc.bm) self.bmTick++;
           // 编辑内容后清掉旧的执行状态图标（行号已变，图标会错位/误导）
           var at = self.activeTab; if (at && !at.running && at.execMarks && at.execMarks.length) { at.execMarks = []; if (execCollection) execCollection.clear(); }
+          self.applyStmtBox();   // 内容变化 → 重算当前语句边框
         });  // 实时语法检查 + 改动标记 + 书签预览刷新
         this.scheduleLint();
+        this.applyStmtBox();     // 初始化时先画一次
         // 右键菜单：格式化（选中/全部）/ EXPLAIN / EXPLAIN ANALYZE
         editor.addAction({ id: "dbm-format", label: "格式化 SQL（有选中则格式化选中，否则全部）",
           contextMenuGroupId: "dbm", contextMenuOrder: 1, run: function () { self.formatSql(); } });
@@ -3502,6 +3558,17 @@
             </div>
           </template>
         </template>
+        <!-- 执行中：结果区显示加载态（数据 tab 先渲染已知列头 + 骨架行，查询 tab 转圈提示） -->
+        <div v-else-if="activeTab.running" class="dg-res-loading">
+          <div class="dg-res-loadbar"><span class="dg-run-ico">⟳</span>
+            <span>查询执行中… {{ runElapsed }}</span>
+            <button class="dg-btn" @click="cancelJob" title="取消执行：向数据库发 KILL QUERY">取消</button></div>
+          <div v-if="loadingCols.length" class="dg-res-scroll"><table class="dg-rt">
+            <thead><tr><th class="gut">#</th><th v-for="c in loadingCols" :key="c">{{ c }}</th></tr></thead>
+            <tbody><tr v-for="n in 8" :key="n" class="dg-skel-row"><td class="gut"></td>
+              <td v-for="c in loadingCols" :key="c"><span class="dg-skel"></span></td></tr></tbody>
+          </table></div>
+        </div>
         <div v-else class="dg-res-empty">{{ activeTab.type==='data' ? "加载中…" : "运行查询查看结果（⌘/Ctrl+Enter）。" }}</div>
       </template>
     </div>
