@@ -106,6 +106,36 @@ def test_expired_pending_not_in_badge(client):
     assert "条数据变更待审批" not in tc.get("/admin/audit").text
 
 
+def test_sql_run_async_job_fields_and_cancel(client):
+    """异步查询：run_async 返回 job_id；job 轮询带排队位置/计时字段；cancel 端点可用。
+
+    串行/取消的完整行为由 test_jobs.py 单测覆盖，这里验证 HTTP 层接线正确。
+    """
+    import time as _t
+
+    tc, svc = client
+    r = tc.post("/admin/sql/run_async", data={"conn": "demo/main", "sql": "SELECT * FROM users"})
+    assert r.status_code == 200 and r.json()["ok"]
+    job_id = r.json()["job_id"]
+
+    payload = None
+    for _ in range(200):
+        payload = tc.get(f"/admin/sql/job?id={job_id}").json()
+        assert {"queue_position", "wait_ms", "elapsed_ms"} <= set(payload)
+        if payload["status"] in ("done", "error", "canceled"):
+            break
+        _t.sleep(0.01)
+    assert payload["status"] == "done"
+    assert payload["result"]["rows"]
+
+    # cancel：未知/已结束的任务返回 ok=False（不抛错）
+    assert tc.post("/admin/sql/cancel", data={"id": job_id}).json()["ok"] is False
+    assert tc.post("/admin/sql/cancel", data={"id": "nope"}).json()["ok"] is False
+
+    # 过期/丢失的 job 轮询给出友好提示
+    assert tc.get("/admin/sql/job?id=missing").json()["ok"] is False
+
+
 def test_approvals_list_page(client):
     tc, svc = client
     svc.execute("demo", "main", "DELETE FROM users WHERE id = 1", CALLER)

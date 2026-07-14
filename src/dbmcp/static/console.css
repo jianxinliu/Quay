@@ -285,6 +285,23 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-estatus.err span { color: var(--dg-red); }
 .dg-estatus.running span { color: var(--dg-accent); display: inline-block; animation: dgspin 1s linear infinite; }
 @keyframes dgspin { to { transform: rotate(360deg); } }
+/* 执行中/排队中浮条：计时 + 取消按钮，浮在编辑器顶部居中 */
+.dg-run-pill {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 25;
+  display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 12px;
+  background: var(--dg-panel); border: 1px solid var(--dg-accent); border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.28); font-size: 12px; color: var(--dg-text);
+  max-width: 90%;
+}
+.dg-run-pill.queued { border-color: var(--dg-border); }
+.dg-run-pill .dg-run-ico { color: var(--dg-accent); display: inline-block; animation: dgspin 1s linear infinite; }
+.dg-run-pill.queued .dg-run-ico { animation: none; color: var(--dg-faint); }
+.dg-run-pill .dg-run-txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dg-run-cancel {
+  flex: none; background: var(--dg-red, #db5c5c); color: #fff; border: none; border-radius: 12px;
+  padding: 3px 12px; font-size: 12px; cursor: pointer;
+}
+.dg-run-cancel:hover { filter: brightness(1.1); }
 .dg-editor { position: relative; overflow: hidden; flex: 1; min-width: 0; min-height: 0; }
 .dg-editor-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dg-muted); }
 

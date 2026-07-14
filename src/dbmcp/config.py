@@ -17,11 +17,18 @@ Environment = Literal["local", "dev", "staging", "prod"]
 
 DEFAULT_MAX_ROWS = 1000
 DEFAULT_STATEMENT_TIMEOUT_S = 30
+# writer 账号的读写超时：大 DELETE/UPDATE 会长时间无返回，用 reader 的 30s socket 超时
+# 会触发 pymysql 2013「Lost connection ... read operation timed out」。writer 独立放大，
+# 配合手动取消（KILL QUERY）兜住跑飞的写。
+DEFAULT_WRITE_TIMEOUT_S = 600
 
 
 class Policy(BaseModel):
     max_rows: int = DEFAULT_MAX_ROWS
+    # reader 的语句/socket 读超时（秒）：MySQL max_execution_time + socket read_timeout；PG statement_timeout
     statement_timeout_s: int = DEFAULT_STATEMENT_TIMEOUT_S
+    # writer 的 socket 读写超时（秒）：MySQL read/write_timeout；PG writer 的 statement_timeout
+    write_timeout_s: int = DEFAULT_WRITE_TIMEOUT_S
     auto_approve_low_risk_write: bool = False
     # 单元格最大字符数：超长 TEXT/BLOB 截断，防止撑爆 agent 上下文
     max_cell_chars: int = 4096

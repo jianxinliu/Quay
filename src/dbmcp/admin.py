@@ -312,6 +312,11 @@ def _connection_form(project: str, connection: str, cfg) -> str:  # noqa: ANN001
  </div>
  <div class="row">
   <div>{_field("max_rows", "max_rows", cfg.policy.max_rows if cfg else 500, typ="number", width="120px")}</div>
+  <div>{_field("读超时(秒)", "statement_timeout_s", cfg.policy.statement_timeout_s if cfg else 30, typ="number", width="120px")}</div>
+  <div>{_field("写超时(秒)", "write_timeout_s", cfg.policy.write_timeout_s if cfg else 600, typ="number", width="120px")}</div>
+ </div>
+ <div class="muted" style="margin:-2px 0 6px">读超时限只读查询（SELECT）；写超时给 writer 账号的大 DELETE/UPDATE 留足时间，避免 socket 提前断开报 2013。跑飞的写可在查询台点「取消」KILL。</div>
+ <div class="row">
   <div>{_field("脱敏列（逗号分隔）", "mask_columns", masks, ph="email, phone")}</div>
  </div>
  <label style="margin-top:12px"><input type="checkbox" name="force_privileged" value="1" style="width:auto;margin-right:6px">强制使用高权限账号（该账号是 root/超级用户或拥有写权限，我确认知晓风险）</label>
@@ -1020,6 +1025,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 max_rows=int(str(f.get("max_rows") or "500")),
                 mask_columns=_list("mask_columns", ","),
                 force_privileged=str(f.get("force_privileged") or "") in ("1", "on", "true"),
+                statement_timeout_s=int(str(f.get("statement_timeout_s") or "30")),
+                write_timeout_s=int(str(f.get("write_timeout_s") or "600")),
             )
         except (ConnectionAdminError, QueryRejected, ValueError) as e:
             # 前端用 fetch 提交（Accept: json）→ 返回 JSON，页面 inline 提示、不清空表单
@@ -1394,22 +1401,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         name = str(f.get("name") or "")
         caller = _caller(req)
-        _jobs_gc()
-        job_id = _uuid.uuid4().hex[:12]
-        with _jobs_lock:
-            _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
 
-        def _work_wf() -> None:
-            try:
-                out = service.workflow_run(name, caller)
-                with _jobs_lock:
-                    _jobs[job_id].update(status="done", ts=_time.time(),
-                                         result={"kind": "workflow", **out})
-            except Exception as e:  # noqa: BLE001
-                with _jobs_lock:
-                    _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
+        def _work_wf(_register) -> dict:  # noqa: ANN001
+            return {"kind": "workflow", **service.workflow_run(name, caller)}
 
-        _threading.Thread(target=_work_wf, name="dbm-adminjob", daemon=True).start()
+        job_id = _jobmgr.submit(_solo_key(), _work_wf)
         return JSONResponse({"ok": True, "job_id": job_id})
 
     @mcp.custom_route("/admin/workflows/run_graph", methods=["POST"])
@@ -1424,22 +1420,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except ValueError:
             return JSONResponse({"ok": False, "error": "graph 不是合法 JSON"}, status_code=400)
         caller = _caller(req)
-        _jobs_gc()
-        job_id = _uuid.uuid4().hex[:12]
-        with _jobs_lock:
-            _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
 
-        def _work_graph() -> None:
-            try:
-                out = service.workflow_run_graph(workspace, graph, caller)
-                with _jobs_lock:
-                    _jobs[job_id].update(status="done", ts=_time.time(),
-                                         result={"kind": "workflow", **out})
-            except Exception as e:  # noqa: BLE001
-                with _jobs_lock:
-                    _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
+        def _work_graph(_register) -> dict:  # noqa: ANN001
+            return {"kind": "workflow", **service.workflow_run_graph(workspace, graph, caller)}
 
-        _threading.Thread(target=_work_graph, name="dbm-adminjob", daemon=True).start()
+        job_id = _jobmgr.submit(_solo_key(), _work_graph)
         return JSONResponse({"ok": True, "job_id": job_id})
 
     @mcp.custom_route("/admin/sql/search_tables", methods=["GET"])
@@ -1566,21 +1551,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "ddl": ddl})
 
-    # 异步查询任务：查询在服务端线程池执行，页面切走/刷新不中断；前端凭 job_id
+    # 异步查询任务：查询在服务端串行队列执行，页面切走/刷新不中断；前端凭 job_id
     # 轮询取结果（job_id 持久化在前端状态里，切回来自动续接）。结果保留 10 分钟。
-    import threading as _threading
-    import time as _time
-    import uuid as _uuid
+    # 按连接串行（同一连接同时只跑一条 SQL，其余排队 FIFO；不同连接各自并行）——
+    # queue_key=(project, connection)；workflow/画布这类多连接任务用独立 key（object()）
+    # 各自并行、不参与串行。计时/排队位置/取消都由 JobManager 统一提供。
+    from .jobs import JobManager
 
-    _jobs: dict[str, dict] = {}
-    _jobs_lock = _threading.Lock()
-    _JOB_TTL_S = 600
+    _jobmgr = JobManager(ttl_s=600)
 
-    def _jobs_gc() -> None:
-        now = _time.time()
-        with _jobs_lock:
-            for k in [k for k, v in _jobs.items() if now - v["ts"] > _JOB_TTL_S]:
-                del _jobs[k]
+    def _solo_key() -> object:
+        """给不参与串行的任务（workflow/画布 DAG）一个唯一 key，使其立即并行执行。"""
+        return object()
 
     @mcp.custom_route("/admin/sql/run_async", methods=["POST"])
     @guard
@@ -1597,67 +1579,54 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         caller = _caller(req)
         ws = _analysis_ws(str(f.get("conn") or ""))
         if ws:
-            # 分析工作区：沙箱内任意 SQL 自由执行（不需确认流），同样走异步 job
-            _jobs_gc()
-            job_id = _uuid.uuid4().hex[:12]
-            with _jobs_lock:
-                _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
+            # 分析工作区：沙箱内任意 SQL 自由执行（不需确认流）。按工作区串行（DuckDB
+            # 每次短连接，串行更稳）；不透传取消器（DuckDB 沙箱查询本地、无 KILL 路径）。
+            def _work_ws(_register) -> dict:  # noqa: ANN001
+                out = service.analysis_sql(ws, sql, caller)
+                return {"kind": "read", "paginated": False, **out}
 
-            def _work_ws() -> None:
-                try:
-                    out = service.analysis_sql(ws, sql, caller)
-                    with _jobs_lock:
-                        _jobs[job_id].update(status="done", ts=_time.time(),
-                                             result={"kind": "read", "paginated": False, **out})
-                except Exception as e:  # noqa: BLE001
-                    with _jobs_lock:
-                        _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
-
-            _threading.Thread(target=_work_ws, name="dbm-adminjob", daemon=True).start()
+            job_id = _jobmgr.submit(("analysis", ws), _work_ws)
             return JSONResponse({"ok": True, "job_id": job_id})
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
 
-        _jobs_gc()
-        job_id = _uuid.uuid4().hex[:12]
-        with _jobs_lock:
-            _jobs[job_id] = {"status": "running", "ts": _time.time(), "result": None, "error": None}
-
-        def _work() -> None:
+        def _work(register) -> dict:  # noqa: ANN001
             try:
-                result = service.admin_run_sql(project, connection, sql, caller,
-                                               confirm, page, None, schema)
-                with _jobs_lock:
-                    _jobs[job_id].update(status="done", result=result, ts=_time.time())
+                return service.admin_run_sql(project, connection, sql, caller,
+                                             confirm, page, None, schema, on_start=register)
             except (QueryRejected, KeyError, ValueError) as e:
-                with _jobs_lock:
-                    _jobs[job_id].update(status="error", error=str(e), ts=_time.time())
-            except Exception as e:  # noqa: BLE001
-                with _jobs_lock:
-                    _jobs[job_id].update(status="error", error=f"{type(e).__name__}: {e}",
-                                         ts=_time.time())
+                raise RuntimeError(str(e)) from e
 
-        # daemon 线程：单管理员场景无需池化；非 daemon 线程会让 pytest/进程退出时挂住
-        _threading.Thread(target=_work, name="dbm-adminjob", daemon=True).start()
+        # 按连接串行：同一连接同时只跑一条，其余排队。取消器经 on_start 注册，
+        # 运行中取消会对 DB 发 KILL QUERY / pg_cancel。
+        job_id = _jobmgr.submit((project, connection), _work)
         return JSONResponse({"ok": True, "job_id": job_id})
 
     @mcp.custom_route("/admin/sql/job", methods=["GET"])
     @guard
     async def _sql_job(req: Request) -> JSONResponse:
         job_id = req.query_params.get("id", "")
-        with _jobs_lock:
-            job = _jobs.get(job_id)
-            payload = dict(job) if job else None
-        if payload is None:
+        snap = _jobmgr.get(job_id)
+        if snap is None:
             return JSONResponse({"ok": False, "error": "任务不存在或已过期（结果保留 10 分钟）"})
-        out = {"ok": True, "status": payload["status"]}
-        if payload["status"] == "done":
-            out["result"] = payload["result"]
-        elif payload["status"] == "error":
-            out["error"] = payload["error"]
+        out = {"ok": True, "status": snap["status"],
+               "queue_position": snap["queue_position"],
+               "wait_ms": snap["wait_ms"], "elapsed_ms": snap["elapsed_ms"]}
+        if snap["status"] == "done":
+            out["result"] = snap["result"]
+        elif snap["status"] in ("error", "canceled"):
+            out["error"] = snap["error"]
         return JSONResponse(out)
+
+    @mcp.custom_route("/admin/sql/cancel", methods=["POST"])
+    @guard
+    async def _sql_cancel(req: Request) -> JSONResponse:
+        """取消任务：排队中直接撤销；运行中对 DB 发 KILL QUERY / pg_cancel。"""
+        f = await req.form()
+        job_id = str(f.get("id") or "")
+        return JSONResponse({"ok": _jobmgr.cancel(job_id)})
 
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard

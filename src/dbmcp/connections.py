@@ -82,6 +82,8 @@ class ConnectionManager:
         max_rows: int,
         mask_columns: list[str],
         force_privileged: bool = False,
+        statement_timeout_s: int | None = None,
+        write_timeout_s: int | None = None,
     ) -> None:
         if not project or not connection:
             raise ConnectionAdminError("项目名与连接名不能为空")
@@ -110,6 +112,16 @@ class ConnectionManager:
             project, connection, writer_user, writer_password, existing
         )
 
+        # policy：以旧值为基准增量覆盖，避免编辑连接时把未在表单里的字段（脱敏/审批开关等）
+        # 重置回默认值；读/写超时留空则沿用旧值（新连接用默认）。
+        policy_update: dict = {"max_rows": max_rows, "mask_columns": mask_columns}
+        if statement_timeout_s is not None:
+            policy_update["statement_timeout_s"] = statement_timeout_s
+        if write_timeout_s is not None:
+            policy_update["write_timeout_s"] = write_timeout_s
+        base_policy = existing.policy if existing else Policy()
+        policy = base_policy.model_copy(update=policy_update)
+
         # 构造并校验（ConnectionConfig 的 validator 会检查引擎必填字段）
         try:
             conn_cfg = ConnectionConfig(
@@ -123,7 +135,7 @@ class ConnectionManager:
                 writer=writer_account,
                 jump_hosts=jump_hosts,
                 ssh_options=ssh_options,
-                policy=Policy(max_rows=max_rows, mask_columns=mask_columns),
+                policy=policy,
             )
         except ValueError as e:
             raise ConnectionAdminError(_friendly_validation_error(e)) from e

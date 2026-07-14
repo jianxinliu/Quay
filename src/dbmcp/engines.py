@@ -14,6 +14,7 @@ import decimal
 import threading
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any, Literal
 
 from sqlalchemy import create_engine, event, inspect, text
@@ -152,6 +153,19 @@ def _resolve_account(cfg: ConnectionConfig, role: Role) -> tuple[str, str]:
     return cfg.user or "", cfg.password or ""
 
 
+def role_timeouts(policy, readonly: bool) -> tuple[int, int]:  # noqa: ANN001
+    """按角色算 (语句超时, socket/写操作超时)。
+
+    - 语句超时（stmt）：始终用 policy.statement_timeout_s，喂 MySQL max_execution_time（只约束 SELECT）。
+    - 操作超时（op）：reader 用语句超时；writer 用 policy.write_timeout_s——放大给大
+      DELETE/UPDATE 留足时间，否则 reader 的 30s socket read_timeout 会把长写打成
+      pymysql 2013「Lost connection ... read operation timed out」。MySQL 用作
+      socket read/write_timeout；PG 用作 writer 的 statement_timeout。
+    """
+    stmt = policy.statement_timeout_s
+    return stmt, (stmt if readonly else policy.write_timeout_s)
+
+
 def mysql_session_statements(timeout_s: int, readonly: bool) -> list[str]:
     """MySQL 建连后要逐条执行的会话设置语句。
 
@@ -174,7 +188,8 @@ def _create_readonly_engine(
     schema: str | None = None,
 ) -> SAEngine:
     """schema：查询台执行 schema 上下文。MySQL 覆盖默认库；PG 设 search_path。"""
-    timeout_s = cfg.policy.statement_timeout_s
+    readonly = role == "reader"
+    stmt_timeout_s, op_timeout_s = role_timeouts(cfg.policy, readonly)
 
     if cfg.engine == "sqlite":
         engine = create_engine(f"sqlite:///{cfg.database}", pool_pre_ping=True)
@@ -189,7 +204,6 @@ def _create_readonly_engine(
     user, password_ref = _resolve_account(cfg, role)
     password = resolve_secret(password_ref)
     # writer 引擎不施加数据库层只读约束（写操作已经过审批）
-    readonly = role == "reader"
 
     if cfg.engine == "mysql":
         from sqlalchemy.engine import URL
@@ -207,12 +221,13 @@ def _create_readonly_engine(
             pool_pre_ping=True,
             connect_args={
                 "connect_timeout": 5,
-                "read_timeout": timeout_s,
-                "write_timeout": timeout_s,
+                "read_timeout": op_timeout_s,
+                "write_timeout": op_timeout_s,
             },
         )
 
-        statements = mysql_session_statements(timeout_s, readonly)
+        # max_execution_time 只对 SELECT 生效，用语句超时；socket 层已按角色区分
+        statements = mysql_session_statements(stmt_timeout_s, readonly)
 
         @event.listens_for(engine, "connect")
         def _mysql_session_setup(dbapi_conn, _record):  # noqa: ANN001
@@ -236,7 +251,8 @@ def _create_readonly_engine(
             port=port or 5432,
             database=cfg.database,
         )
-        options = f"-c statement_timeout={timeout_s * 1000}"
+        # PG 的 statement_timeout 对所有语句生效（含写）；writer 用写超时，reader 用语句超时
+        options = f"-c statement_timeout={op_timeout_s * 1000}"
         if readonly:
             options += " -c default_transaction_read_only=on"
         if schema:
@@ -281,16 +297,80 @@ def paginate_sql(sql: str, engine_kind: str, limit: int, offset: int) -> tuple[s
     return expr.sql(dialect=dialect), True, ordered
 
 
+def make_canceller(engine: SAEngine, sa_conn) -> Callable[[], None]:  # noqa: ANN001
+    """为一次正在执行的查询构造「取消函数」：在 DB 层中断它，而不是杀线程。
+
+    - MySQL：新开一条连接执行 `KILL QUERY <连接id>`（同账号可杀自己的查询）
+    - Postgres：`pg_cancel_backend(<pid>)`
+    - SQLite：对同一底层连接调用 interrupt()（文档允许跨线程调用）
+
+    取不到连接标识时返回空操作（cancel 变成对排队任务生效、对运行中无害）。
+    """
+    name = engine.dialect.name
+    try:
+        raw = sa_conn.connection.dbapi_connection
+    except Exception:  # noqa: BLE001
+        raw = None
+    if raw is None:
+        return lambda: None
+
+    if name == "mysql":
+        try:
+            cid = int(raw.thread_id())
+        except Exception:  # noqa: BLE001
+            return lambda: None
+
+        def _cancel_mysql() -> None:
+            with engine.connect() as c:
+                c.exec_driver_sql(f"KILL QUERY {cid}")
+
+        return _cancel_mysql
+
+    if name in ("postgresql", "postgres"):
+        pid = None
+        try:
+            pid = raw.info.backend_pid  # psycopg3
+        except Exception:  # noqa: BLE001
+            try:
+                pid = raw.get_backend_pid()  # psycopg2
+            except Exception:  # noqa: BLE001
+                pid = None
+        if pid is None:
+            return lambda: None
+
+        def _cancel_pg() -> None:
+            with engine.connect() as c:
+                c.exec_driver_sql(f"SELECT pg_cancel_backend({int(pid)})")
+
+        return _cancel_pg
+
+    if name == "sqlite":
+        def _cancel_sqlite() -> None:
+            try:
+                raw.interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+
+        return _cancel_sqlite
+
+    return lambda: None
+
+
 def run_query(
-    engine: SAEngine, sql: str, max_rows: int, max_cell_chars: int = 4096
+    engine: SAEngine, sql: str, max_rows: int, max_cell_chars: int = 4096,
+    on_start: Callable[[Callable[[], None]], None] | None = None,
 ) -> QueryResult:
     """执行只读 SQL（调用方必须先通过 classify 判定），行数截到 max_rows，单元格截到 max_cell_chars。
 
     注：不用流式游标（pymysql SSCursor 提前关闭 + 连接池复用会「commands out of sync」）；
     改由调用方注入 LIMIT 兜底（paginate_sql）限制 DB 返回行数，缓冲游标即可安全。
+
+    on_start：拿到连接后回调一次，传入该查询的取消函数（供上层串行队列的 cancel 使用）。
     """
     start = dt.datetime.now()
     with engine.connect() as conn:
+        if on_start is not None:
+            on_start(make_canceller(engine, conn))
         result = conn.execute(text(sql))
         if result.returns_rows:
             columns = list(result.keys())
@@ -360,10 +440,18 @@ def collect_table_meta(engine: SAEngine, engine_kind: str, table: str) -> dict:
     return info
 
 
-def run_write(engine: SAEngine, sql: str) -> QueryResult:
-    """执行写 SQL（调用方必须确保已通过审批），返回受影响行数。事务自动提交。"""
+def run_write(
+    engine: SAEngine, sql: str,
+    on_start: Callable[[Callable[[], None]], None] | None = None,
+) -> QueryResult:
+    """执行写 SQL（调用方必须确保已通过审批），返回受影响行数。事务自动提交。
+
+    on_start：拿到连接后回调一次，传入取消函数（KILL QUERY），供串行队列 cancel 中断大写操作。
+    """
     start = dt.datetime.now()
     with engine.begin() as conn:
+        if on_start is not None:
+            on_start(make_canceller(engine, conn))
         result = conn.execute(text(sql))
         affected = result.rowcount if result.rowcount is not None else -1
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)

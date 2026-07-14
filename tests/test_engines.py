@@ -4,7 +4,8 @@
 SET 语句导致 1064 语法错误。SQLite 单测跑不到 MySQL 方言，故用纯函数断言语句拆分。
 """
 
-from dbmcp.engines import mysql_session_statements
+from dbmcp.config import Policy
+from dbmcp.engines import make_canceller, mysql_session_statements, role_timeouts
 
 
 def test_reader_statements_are_separate():
@@ -21,3 +22,89 @@ def test_writer_has_no_readonly():
     stmts = mysql_session_statements(timeout_s=10, readonly=False)
     assert stmts == ["SET SESSION max_execution_time = 10000"]
     assert all("READ ONLY" not in s for s in stmts)
+
+
+def test_role_timeouts_reader_uses_statement_timeout():
+    policy = Policy(statement_timeout_s=30, write_timeout_s=600)
+    stmt, op = role_timeouts(policy, readonly=True)
+    assert (stmt, op) == (30, 30)
+
+
+def test_role_timeouts_writer_uses_write_timeout():
+    """writer 的操作超时放大到 write_timeout_s，根治大 DELETE 的 2013 断连。"""
+    policy = Policy(statement_timeout_s=30, write_timeout_s=600)
+    stmt, op = role_timeouts(policy, readonly=False)
+    assert stmt == 30          # 语句超时（喂 max_execution_time，只约束 SELECT）不变
+    assert op == 600           # socket/写超时放大
+
+
+# ---------- make_canceller：按方言生成正确的 DB 层取消 ----------
+
+
+class _FakeConn:
+    """模拟 with engine.connect() 的上下文，记录 exec_driver_sql 调用。"""
+
+    def __init__(self, sink):
+        self._sink = sink
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def exec_driver_sql(self, sql, *args):
+        self._sink.append(sql)
+
+
+class _FakeEngine:
+    def __init__(self, dialect_name, sink):
+        self.dialect = type("D", (), {"name": dialect_name})()
+        self._sink = sink
+
+    def connect(self):
+        return _FakeConn(self._sink)
+
+
+def _sa_conn_with(raw):
+    """构造带 .connection.dbapi_connection = raw 的假 SQLAlchemy 连接。"""
+    inner = type("Inner", (), {"dbapi_connection": raw})()
+    return type("SAConn", (), {"connection": inner})()
+
+
+def test_make_canceller_mysql_kills_query():
+    sink = []
+    engine = _FakeEngine("mysql", sink)
+    raw = type("Raw", (), {"thread_id": lambda self: 4242})()
+    cancel = make_canceller(engine, _sa_conn_with(raw))
+    cancel()
+    assert sink == ["KILL QUERY 4242"]
+
+
+def test_make_canceller_postgres_cancels_backend():
+    sink = []
+    engine = _FakeEngine("postgresql", sink)
+    info = type("Info", (), {"backend_pid": 777})()
+    raw = type("Raw", (), {"info": info})()
+    cancel = make_canceller(engine, _sa_conn_with(raw))
+    cancel()
+    assert sink == ["SELECT pg_cancel_backend(777)"]
+
+
+def test_make_canceller_sqlite_interrupts():
+    interrupted = []
+    raw = type("Raw", (), {"interrupt": lambda self: interrupted.append(True)})()
+    engine = _FakeEngine("sqlite", [])
+    cancel = make_canceller(engine, _sa_conn_with(raw))
+    cancel()
+    assert interrupted == [True]
+
+
+def test_make_canceller_missing_id_is_noop():
+    """取不到连接标识时返回空操作，cancel 不抛错。"""
+    sink = []
+    engine = _FakeEngine("mysql", sink)
+    raw = type("Raw", (), {})()  # 无 thread_id
+    cancel = make_canceller(engine, _sa_conn_with(raw))
+    cancel()  # 不应抛
+    assert sink == []

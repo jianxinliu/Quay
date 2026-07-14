@@ -397,7 +397,16 @@
       execState: function () {
         var t = this.activeTab;
         if (!t) return { cls: "idle", icon: "▷", tip: "未执行" };
-        if (t.running) return { cls: "running", icon: "⟳", tip: "执行中…" };
+        if (t.running) {
+          if (t.jobStatus === "queued") {
+            var pos = t.jobQueuePos;
+            var wait = t.jobWaitMs ? " · 已等 " + (t.jobWaitMs / 1000).toFixed(0) + "s" : "";
+            return { cls: "running", icon: "⋯", cancelable: true,
+                     tip: "排队中" + (pos ? "（前面还有 " + pos + " 条）" : "") + wait };
+          }
+          return { cls: "running", icon: "⟳", cancelable: true,
+                   tip: "执行中 " + ((t.jobElapsedMs || 0) / 1000).toFixed(1) + "s" };
+        }
         if (t.err) return { cls: "err", icon: "✗", tip: t.err };
         if (t.ok) return { cls: "ok", icon: "✓", tip: "成功 · 影响 " + t.ok.affected_rows + " 行 · " + t.ok.duration_ms + " ms" };
         if (t.result) return { cls: "ok", icon: "✓",
@@ -524,6 +533,8 @@
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
+                    // 异步任务态：串行队列排队位置 + 执行计时 + 取消
+                    jobStatus: "", jobQueuePos: null, jobElapsedMs: 0, jobWaitMs: 0,
                     results: [], resultIdx: 0, isPaging: false };  // 结果 tab（每次执行新增一个）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
@@ -1386,6 +1397,7 @@
         page = page || 0;
         t.pendingSql = sql;
         t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null; t.wfSteps = null;
+        t.jobStatus = ""; t.jobQueuePos = null; t.jobElapsedMs = 0; t.jobWaitMs = 0;
         t.rowSel = {}; t.lastSelRi = -1; t.resQ = null;  // 重查后行号会变，行选择/搜索作废
         if (page === 0) t.result = null;
         // 异步任务：查询在服务端线程池执行，切页/刷新不中断；job_id 持久化，回来续接轮询
@@ -1405,13 +1417,19 @@
         apiGet("/admin/sql/job?id=" + jobId).then(function (d) {
           var t2 = self.tabs.find(function (x) { return x.id === tabId; });
           if (!t2 || t2.jobId !== jobId) return;
-          if (!d.ok) { t2.running = false; t2.jobId = null; t2.err = d.error || "任务丢失"; self.persist(); return; }
-          if (d.status === "running") {
+          if (!d.ok) { t2.running = false; t2.jobId = null; t2.jobStatus = ""; t2.err = d.error || "任务丢失"; self.persist(); return; }
+          if (d.status === "queued" || d.status === "running") {
             t2.running = true;
-            setTimeout(function () { self.pollJob(tabId, jobId, page); }, 450);
+            t2.jobStatus = d.status;
+            t2.jobQueuePos = d.queue_position;
+            t2.jobElapsedMs = d.elapsed_ms || 0;
+            t2.jobWaitMs = d.wait_ms || 0;
+            // 排队中轮询更勤（排队位置变化及时反映），执行中稍缓
+            setTimeout(function () { self.pollJob(tabId, jobId, page); }, d.status === "queued" ? 300 : 450);
             return;
           }
-          t2.running = false; t2.jobId = null;
+          t2.running = false; t2.jobId = null; t2.jobStatus = "";
+          if (d.status === "canceled") { t2.err = d.error || "已取消"; self.persist(); return; }
           if (d.status === "error") { t2.err = d.error; self.persist(); return; }
           var r = d.result || {};
           if (r.kind === "workflow") {
@@ -1468,6 +1486,15 @@
         }).catch(function () {  // 网络抖动：稍后重试
           setTimeout(function () { self.pollJob(tabId, jobId, page); }, 1200);
         });
+      },
+      cancelJob: function () {
+        var t = this.activeTab;
+        if (!t || !t.jobId) return;
+        var self = this, jid = t.jobId;
+        apiPost("/admin/sql/cancel", { id: jid }).then(function (d) {
+          // 排队中会立刻变 canceled；运行中发出 KILL 后由下一次轮询收敛为 canceled
+          self.flash(d.ok ? "已请求取消" : "任务已结束，无需取消");
+        }).catch(function (e) { self.flash("取消失败：" + e); });
       },
       goPage: function (p) {
         var t = this.activeTab;
@@ -2868,6 +2895,13 @@
       <div class="dg-estatus" :class="execState.cls" :title="execState.tip"><span>{{ execState.icon }}</span></div>
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
         <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>
+        <!-- 执行中/排队中浮条：计时 + 取消（取消运行中的查询会向 DB 发 KILL） -->
+        <div v-if="activeTab && activeTab.running" class="dg-run-pill" :class="{queued: activeTab.jobStatus==='queued'}">
+          <span class="dg-run-ico">{{ execState.icon }}</span>
+          <span class="dg-run-txt">{{ execState.tip }}</span>
+          <button class="dg-run-cancel" @click="cancelJob"
+                  title="取消执行：排队中直接撤销；运行中向数据库发 KILL QUERY 中断">取消</button>
+        </div>
         <!-- 执行 schema 选择器浮在编辑器右上角（原顶部栏整条已去掉） -->
         <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres') && activeTab && activeTab.type==='query'"
                class="dg-schema-float" title="选择语句执行所在的库 / schema">

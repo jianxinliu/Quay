@@ -108,6 +108,7 @@ class DbmService:
     def _read(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
         caller: CallerInfo, max_rows: int, schema: str | None = None,
+        on_start=None,  # noqa: ANN001
     ) -> dict:
         """执行一条已判定只读的 SQL：跑 reader、落审计、脱敏，返回结果 dict。
 
@@ -120,7 +121,8 @@ class DbmService:
         try:
             engine = self.pool.get(project, connection, cfg, schema=schema)
             result = engines.run_query(engine, sql, max_rows,
-                                        max_cell_chars=cfg.policy.max_cell_chars)
+                                        max_cell_chars=cfg.policy.max_cell_chars,
+                                        on_start=on_start)
         except QueryRejected:
             raise
         except Exception as e:
@@ -182,6 +184,7 @@ class DbmService:
     def admin_run_sql(
         self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False,
         page: int = 0, page_size: int | None = None, schema: str | None = None,
+        on_start=None,  # noqa: ANN001
     ) -> dict:
         """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
 
@@ -203,7 +206,7 @@ class DbmService:
             if paginated:
                 # 取 size+1 行探测是否有下一页；不受连接 max_rows 二次截断影响
                 out = self._read(project, connection, cfg, paged_sql, caller, size + 1,
-                                 schema=schema)
+                                 schema=schema, on_start=on_start)
                 rows = out["rows"]
                 out["has_next"] = len(rows) > size
                 out["rows"] = rows[:size]
@@ -213,7 +216,7 @@ class DbmService:
                 return {"kind": "read", **out}
             # 自带 LIMIT / 非 SELECT：不分页，仍受 max_rows 兜底
             out = self._read(project, connection, cfg, sql, caller, cfg.policy.max_rows,
-                             schema=schema)
+                             schema=schema, on_start=on_start)
             out["paginated"] = False
             return {"kind": "read", **out}
 
@@ -231,7 +234,7 @@ class DbmService:
             rec.detail = f"schema={schema}"
         try:
             engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
-            result = engines.run_write(engine, sql)
+            result = engines.run_write(engine, sql, on_start=on_start)
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
