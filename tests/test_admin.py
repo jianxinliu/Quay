@@ -62,6 +62,19 @@ def test_search_tables_and_lint(client):
     assert tok["errors"] and tok["errors"][0]["message"]
 
 
+def test_lint_blank_line_separated_statements(client):
+    """空行分隔的多条 SQL（无分号）不应误报——每块独立解析，合法块不标错。
+    修的坑：sqlglot 只认分号，整体解析会把两条当成一条、在下一条起始处误报红波浪线。"""
+    tc, _ = client
+    # 两条合法 SELECT 用空行隔开、第一条无分号 → 不应有任何错误
+    two = "SELECT max(id) FROM users\n\nSELECT 1"
+    assert tc.post("/admin/sql/lint", data={"sql": two, "dialect": "mysql"}).json()["errors"] == []
+    # 真正的错误落在出错的那一块（第 3 行），而不是别处
+    bad = "SELECT 1 FROM users\n\nSELEC bad syntax here"
+    errs = tc.post("/admin/sql/lint", data={"sql": bad, "dialect": "mysql"}).json()["errors"]
+    assert errs and errs[0]["line"] == 3
+
+
 def test_settings_info_tab(client):
     """系统信息 tab：展示路径/运行时/token 指引；token 明文绝不出现在页面。"""
     tc, svc = client

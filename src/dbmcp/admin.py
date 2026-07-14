@@ -483,9 +483,8 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
 
 # 查询台页面：Vue 3 + Monaco 深色 IDE。页面只给挂载点与脚本，逻辑在 static/console.js，
 # 数据全走 /admin/sql/* JSON 接口（连接/表/结构/执行/导出/片段），与服务端渲染解耦。
-def _lint_sql(sql: str, dialect: str) -> list[dict]:
-    """sqlglot 语法检查（查询台编辑器标红）。只报错误，不阻断任何执行路径——
-    执行时的「默认拒绝」判定在 classify/assess，与这里无关。"""
+def _lint_one(sql: str, dialect: str) -> list[dict]:
+    """对单块 SQL 做 sqlglot 语法检查，返回错误列表（行列相对本块文本）。"""
     import re as _re
 
     import sqlglot
@@ -508,6 +507,54 @@ def _lint_sql(sql: str, dialect: str) -> list[dict]:
                  "message": str(e).split("\n")[0][:200]}]
     except Exception:  # noqa: BLE001  lint 永不抛错影响编辑
         return []
+
+
+def _split_blank_line_blocks(sql: str) -> list[tuple[int, str]]:
+    """按**空行**把 SQL 拆成块（连续非空行为一块），返回 [(起始行号 1-indexed, 文本)]。
+    与前端 stmtRanges 的「空行也分隔语句」一致。"""
+    blocks: list[tuple[int, str]] = []
+    cur: list[str] = []
+    start = 0
+    for i, ln in enumerate(sql.split("\n"), 1):
+        if ln.strip() == "":
+            if cur:
+                blocks.append((start, "\n".join(cur)))
+                cur = []
+        else:
+            if not cur:
+                start = i
+            cur.append(ln)
+    if cur:
+        blocks.append((start, "\n".join(cur)))
+    return blocks
+
+
+def _lint_sql(sql: str, dialect: str) -> list[dict]:
+    """sqlglot 语法检查（查询台编辑器标红）。只报错误，不阻断任何执行路径——
+    执行时的「默认拒绝」判定在 classify/assess，与这里无关。
+
+    关键：sqlglot 只按分号拆多语句、不认空行分隔。所以「无分号 + 空行分隔的多条」会被当成
+    一条、在下一条起始处误报语法错（红波浪线标到错的语句上，用户反馈的坑）。修法：整体能解析
+    就直接放行（避免拆块假阳性，如字符串内的空行）；整体报错时才按空行拆块逐块 lint，把错误
+    行号回填到原文——这样每一块独立解析，合法块不报错、错误也落在真正出错的那条上。"""
+    if not sql.strip():
+        return []
+    errs = _lint_one(sql, dialect)
+    if not errs:
+        return []
+    blocks = _split_blank_line_blocks(sql)
+    if len(blocks) <= 1:
+        return errs   # 只有一块 → 就是这块的错，行号已正确
+    out: list[dict] = []
+    for start_line, text in blocks:
+        for e in _lint_one(text, dialect):
+            e = dict(e)
+            if e.get("line"):
+                e["line"] = e["line"] + start_line - 1   # 块内行号 → 原文行号（列不变，块从行首起）
+            out.append(e)
+        if len(out) >= 5:
+            break
+    return out[:5]
 
 
 def _console_body() -> str:
