@@ -17,7 +17,7 @@
   var models = new Map();     // tabId -> ITextModel
   var bmCollection = null;    // 书签装饰集合（切 tab 时重设为该 tab 的书签）
   var execCollection = null;  // 执行状态字形装饰（在被执行语句行左侧显示 ⟳/✓/✗）
-  var stmtBoxCol = null;      // 当前语句边框高亮（⌘↵ 将执行的那条 SQL）
+  var stmtBoxCol = null;      // 缺分号波浪线装饰
   var monacoReady = false;
   var currentTables = [];     // 补全用：当前连接可见表（未绑库为 库.表）
   var currentConn = "";
@@ -1544,26 +1544,59 @@
       },
       // 当前语句边框高亮：框住 ⌘↵ 将执行的那条 SQL；缺尾分号时末尾加轻微波浪线。
       // 有选区时不画（选区本身就是执行目标，且和框选视觉冲突）。
+      // 拿当前编辑器里的边框 overlay（按 DOM 现查现取/现建，避免缓存到失效的旧节点）
+      _boxEl: function () {
+        if (!editor || !editor.getDomNode) return null;
+        var dom = editor.getDomNode(); if (!dom) return null;
+        var box = dom.querySelector(".dg-stmt-boxel");
+        if (box) return box;
+        var guard = dom.querySelector(".overflow-guard"); if (!guard) return null;
+        box = document.createElement("div");
+        box.className = "dg-stmt-boxel";
+        guard.appendChild(box);
+        return box;
+      },
       applyStmtBox: function () {
         if (!stmtBoxCol || !window.monaco || !editor) return;
-        var t = this.activeTab;
-        var sel = editor.getSelection();
-        if (!t || t.type !== "query" || (sel && !sel.isEmpty())) { stmtBoxCol.clear(); return; }
+        var monaco = window.monaco, t = this.activeTab, sel = editor.getSelection();
+        var boxEl = this._boxEl();
+        var hide = function () { stmtBoxCol.clear(); if (boxEl) boxEl.style.display = "none"; };
+        if (!t || t.type !== "query" || (sel && !sel.isEmpty())) { hide(); return; }
         var info = this.stmtRangeAtCursor();
-        if (!info) { stmtBoxCol.clear(); return; }
-        // 整条语句用**一个外框**（整行装饰：首行画上边+两侧、末行画下边+两侧、中间只画两侧），
-        // 而非每行各一个框（inline 装饰会把多行框成锯齿状）。
-        var R = window.monaco.Range, s = info.start.lineNumber, e = info.end.lineNumber, decos = [];
-        for (var ln = s; ln <= e; ln++) {
-          var cls = s === e ? "dg-stmt-box-one"
-            : ln === s ? "dg-stmt-box-top" : ln === e ? "dg-stmt-box-bot" : "dg-stmt-box-mid";
-          decos.push({ range: new R(ln, 1, ln, 1), options: { isWholeLine: true, className: cls } });
+        if (!info) { hide(); return; }
+        var model = editor.getModel(), s = info.start.lineNumber, e = info.end.lineNumber;
+        // 外框：贴合语句内容的包围盒（右缘=最宽那行的行尾，而非整个编辑器宽度）
+        if (boxEl) {
+          var stmtBoxEl = boxEl;
+          var st = editor.getScrollTop(), lh = editor.getOption(monaco.editor.EditorOption.lineHeight);
+          var cl = editor.getLayoutInfo().contentLeft, sl = editor.getScrollLeft();
+          var fi = editor.getOption(monaco.editor.EditorOption.fontInfo);
+          var top = editor.getTopForLineNumber(s) - st;
+          var bottom = editor.getTopForLineNumber(e) + lh - st;
+          var left = cl - sl;
+          // 右缘：取各行行尾像素的最大值（getScrolledVisiblePosition 精确含中文全角），
+          // 都不可见时退回等宽字符估算
+          var right = null;
+          for (var ln = s; ln <= e; ln++) {
+            var vp = editor.getScrolledVisiblePosition({ lineNumber: ln, column: model.getLineMaxColumn(ln) });
+            if (vp) right = right == null ? vp.left : Math.max(right, vp.left);
+          }
+          if (right == null) {
+            var maxCol = 1;
+            for (var l2 = s; l2 <= e; l2++) maxCol = Math.max(maxCol, model.getLineMaxColumn(l2));
+            right = cl + (maxCol - 1) * (fi.typicalHalfwidthCharacterWidth || 7.2) - sl;
+          }
+          stmtBoxEl.style.left = (left - 3) + "px";
+          stmtBoxEl.style.top = top + "px";
+          stmtBoxEl.style.width = Math.max(20, right - left + 8) + "px";
+          stmtBoxEl.style.height = (bottom - top) + "px";
+          stmtBoxEl.style.display = "block";
         }
-        if (info.noSemi && info.end.column > 1) {   // 末字符加波浪线，提示缺分号（非报错，仅提示）
-          decos.push({ range: new R(info.end.lineNumber, info.end.column - 1, info.end.lineNumber, info.end.column),
-            options: { className: "dg-stmt-nosemi", isWholeLine: false } });
-        }
-        stmtBoxCol.set(decos);
+        // 缺分号：末字符加轻微波浪线（非报错，仅提示）
+        if (info.noSemi && info.end.column > 1) {
+          stmtBoxCol.set([{ range: new monaco.Range(info.end.lineNumber, info.end.column - 1,
+            info.end.lineNumber, info.end.column), options: { className: "dg-stmt-nosemi" } }]);
+        } else stmtBoxCol.clear();
       },
       // 执行状态字形："run"（转圈）/"ok"（✓）/"err"（✗）/""（清除），画在被执行语句行左侧字形边栏。
       // 更新「当前条」（execIdx）的状态；多语句顺序执行时每条各有一个 mark、各自保留 run→✓/✗。
@@ -2814,10 +2847,11 @@
         // 书签：⌘/Ctrl+B 切换、F2/⇧F2 跳下一个/上一个、点字形边栏切换
         bmCollection = editor.createDecorationsCollection();
         execCollection = editor.createDecorationsCollection();  // 执行状态字形（语句行左侧 ⟳/✓/✗）
-        stmtBoxCol = editor.createDecorationsCollection();       // 当前语句边框高亮
-        // 光标移动/选区变化 → 更新当前语句边框（框住 ⌘↵ 将执行的那条 SQL）+ 重 lint 当前语句
+        stmtBoxCol = editor.createDecorationsCollection();       // 缺分号波浪线
+        // 光标移动/选区变化/滚动 → 更新当前语句边框（框住 ⌘↵ 将执行的那条 SQL）+ 重 lint
         editor.onDidChangeCursorPosition(function () { self.applyStmtBox(); self.scheduleLint(); });
         editor.onDidChangeCursorSelection(function () { self.applyStmtBox(); });
+        editor.onDidScrollChange(function () { self.applyStmtBox(); });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, function () { self.toggleBookmark(); });
         editor.addCommand(monaco.KeyCode.F2, function () { self.gotoBookmark(1); });
         editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.F2, function () { self.gotoBookmark(-1); });
