@@ -4,14 +4,51 @@
 """
 
 import sqlite3
+import threading
 
 import pytest
 
-from dbmcp.approvals import ApprovalStore
+from dbmcp.approvals import ApprovalError, ApprovalStore
 from dbmcp.audit.log import AuditStore
 from dbmcp.config import AppConfig
 from dbmcp.metadata import MetadataCache
 from dbmcp.service import CallerInfo, DbmService
+
+
+def test_consume_is_atomic_under_concurrency(tmp_path):
+    """C1 回归：多个线程并发核销同一审批单，必须只有 1 个成功（防双花）。
+
+    修复前 consume 的「查 approved」与「写 consumed」分处两个锁块、UPDATE 无条件，
+    50 并发实测 ~29 个成功。改为条件 UPDATE + rowcount 校验后应恒为 1。
+    """
+    store = ApprovalStore(tmp_path / "a.sqlite3")
+    ch = store.create(project="p", connection="c", environment="dev", engine="sqlite",
+                      sql="UPDATE t SET x=1", fingerprint="fp", reason="",
+                      risk_level="LOW", risk_report={}, agent="a", session_id="s")
+    store.approve(ch.id, "admin")
+
+    n = 50
+    results = {"ok": 0, "fail": 0}
+    rlock = threading.Lock()
+    barrier = threading.Barrier(n)
+
+    def worker():
+        barrier.wait()  # 尽量让所有线程同时冲进 consume，制造 TOCTOU 竞争
+        try:
+            store.consume(ch.id, "fp", ("p", "c"))
+            with rlock:
+                results["ok"] += 1
+        except ApprovalError:
+            with rlock:
+                results["fail"] += 1
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results["ok"] == 1, results
+    assert results["fail"] == n - 1
 
 CALLER = CallerInfo(agent="pytest/1.0", session_id="s1")
 
@@ -84,6 +121,19 @@ class TestHappyPath:
                                 CALLER, change_id=cid)
         assert again["status"] == "rejected"
         assert "只能执行一次" in again["reason"]
+
+    def test_change_id_forces_consume_not_query_bypass(self, service):
+        """H5：带 change_id 的重提一律走核销，不因'重提被判为只读'而绕过 consume。
+
+        构造：审批一条写，重提时换成只读 SELECT（分类为 readonly）。修复前会走 query()
+        当普通查询执行、绕开指纹与核销；修复后 change_id 强制走核销 → 指纹不符被拒。
+        """
+        r = service.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", CALLER)
+        cid = r["change_id"]
+        service.approve_change(cid, "alice@ops")
+        bypass = service.execute("demo", "main", "SELECT 1", CALLER, change_id=cid)
+        assert bypass["status"] == "rejected"       # 未被当只读查询执行
+        assert "不一致" in bypass["reason"]          # 走了指纹校验
 
 
 class TestRejectionPaths:

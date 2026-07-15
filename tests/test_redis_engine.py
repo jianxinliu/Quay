@@ -6,7 +6,37 @@ import pytest
 
 from dbmcp.audit.log import AuditStore
 from dbmcp.config import AppConfig
-from dbmcp.redis_engine import keyspace_dbs, redact_command_result
+from dbmcp.audit.redis_rules import parse_command
+from dbmcp.redis_engine import keyspace_dbs, redact_command_result, redact_command_text
+
+
+class TestRedactCommandText:
+    """H3：命令原文里的凭证脱敏后再落审计（密码永不进审计记录）。"""
+
+    def _red(self, cmd):
+        return redact_command_text(cmd, parse_command(cmd))
+
+    def test_config_set_requirepass(self):
+        out = self._red("CONFIG SET requirepass s3cr3t")
+        assert "s3cr3t" not in out and "***" in out
+
+    def test_config_set_masterauth(self):
+        assert "hunter2" not in self._red("CONFIG SET masterauth hunter2")
+
+    def test_config_set_non_secret_kept(self):
+        assert self._red("CONFIG SET maxmemory 100mb") == "CONFIG SET maxmemory 100mb"
+
+    def test_acl_setuser_password(self):
+        out = self._red("ACL SETUSER alice on >topsecret ~* +@all")
+        assert "topsecret" not in out
+
+    def test_auth_password(self):
+        assert "mypw" not in self._red("AUTH mypw")
+        assert "mypw" not in self._red("AUTH user mypw")
+
+    def test_non_sensitive_unchanged(self):
+        assert self._red("GET foo") == "GET foo"
+        assert self._red("SET k v") == "SET k v"
 from dbmcp.service import CallerInfo, DbmService, QueryRejected
 
 

@@ -124,6 +124,12 @@ class TestQuery:
         with pytest.raises(Exception, match="query_only|readonly|attempt to write"):
             engines.run_query(engine, "DELETE FROM users", max_rows=10)
 
+    def test_bigint_serialized_as_string_with_number_type(self, service):
+        # 雪花 ID 超 2^53：值以字符串返回保精度，列类型仍标 number（前端图标显 #、编辑 WHERE 精确）
+        out = service.query("demo", "main", "SELECT 1726946581640544256 AS id", CALLER)
+        assert out["rows"][0][0] == "1726946581640544256"
+        assert out["column_types"][0] == "number"
+
     def test_query_error_audited(self, service):
         with pytest.raises(Exception):
             service.query("demo", "main", "SELECT * FROM no_such_table", CALLER)
@@ -173,6 +179,14 @@ class TestAdminConsole:
         out = service.admin_run_sql("demo", "main", "SELECT id, name FROM users ORDER BY id", CALLER)
         assert out["kind"] == "read"
         assert out["columns"] == ["id", "name"]
+
+    def test_syntax_error_returns_error_not_write_confirm(self, service):
+        """语法错误 SQL 应报'语法错误'，而非被当写操作弹'确认执行'卡片。"""
+        out = service.admin_run_sql("demo", "main", "SELECT 'unterminated", CALLER)
+        assert out["kind"] == "error"
+        assert "语法" in out["error"]
+        # 不是 confirm/write
+        assert out["kind"] not in ("confirm", "write")
 
     def test_write_without_confirm_returns_risk_not_executed(self, service):
         out = service.admin_run_sql("demo", "main", "DELETE FROM users WHERE name='bob'", CALLER)

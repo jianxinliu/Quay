@@ -1722,19 +1722,15 @@
               self.pushOutcome(t2, t2.pendingSql, { result: r });
             }
           }
+          else if (r.kind === "error") {
+            // 后端判定的语法错误（ParseError）：直接报错，不弹「确认写操作」
+            self.setExecGlyph(t2, "err");
+            self.pushOutcome(t2, t2.pendingSql, { err: r.error || "SQL 语法错误" });
+            t2.confirm = null;
+          }
           else if (r.kind === "confirm") {
-            // 读语句（含数据 tab 自动生成的 SELECT）被判为写，多半是 WHERE/ORDER BY 语法错，
-            // 直接报语法错，别弹「确认写操作」误导。
-            var ps = (t2.pendingSql || "").trim().toUpperCase();
-            if (t2.type === "data" || /^(SELECT|WITH|SHOW|DESC|DESCRIBE|EXPLAIN)\b/.test(ps)) {
-              self.setExecGlyph(t2, "err");
-              self.pushOutcome(t2, t2.pendingSql, { err: "SQL 无法解析，无法作为查询执行 —— 请检查语法" +
-                       (t2.type === "data" ? "（WHERE / ORDER BY 表达式，如 desc 别写成 des）" : "") + "。" });
-              t2.confirm = null;
-            } else {
-              self.setExecGlyph(t2, "");  // 待人工确认，非终态
-              t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
-            }
+            self.setExecGlyph(t2, "");  // 待人工确认，非终态
+            t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
           }
           else if (r.kind === "write") {
             self.setExecGlyph(t2, "ok");
@@ -2001,7 +1997,10 @@
           if (/blob|binary|bytea/.test(type)) return "binary";
           return "string";
         }
-        var rows = t.result.rows;   // 无表结构：扫本页首个非空值推断
+        // 查询 tab：优先用后端返回的权威列类型（大整数以字符串传输，仍标为 number）
+        var bt = t.result.column_types;
+        if (bt && bt[ci]) return bt[ci];
+        var rows = t.result.rows;   // 后端未给类型的列（如字符串）：扫本页首个非空值推断
         for (var i = 0; i < rows.length && i < 40; i++) {
           var v = rows[i][ci]; if (v != null) return this.inferCat(v);
         }

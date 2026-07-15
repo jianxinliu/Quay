@@ -178,6 +178,38 @@ def redact_command_result(parts: list[str], value: Any) -> Any:
     return value
 
 
+def redact_command_text(command: str, parts: list[str]) -> str:
+    """对**命令原文**里的凭证脱敏后再落审计（H3：密码永不进审计记录）。
+
+    覆盖会把明文口令写在命令里的命令：CONFIG SET requirepass/masterauth …、
+    ACL SETUSER …（>明文 / #哈希 / <待删）、AUTH …、HELLO … AUTH user pass。
+    非敏感命令原样返回（保留原始文本）。redact 后按 token 重组，仅用于审计展示，
+    真正执行用的仍是未脱敏的 parts。
+    """
+    if not parts:
+        return command
+    cmd = parts[0].upper()
+    sub = parts[1].upper() if len(parts) > 1 else ""
+    red = list(parts)
+    if cmd == "CONFIG" and sub == "SET":
+        # CONFIG SET <param> <value> [<param> <value> ...]：敏感参数遮蔽其值
+        for i in range(2, len(red) - 1, 2):
+            if any(h in red[i].lower() for h in _SECRET_CFG_HINT):
+                red[i + 1] = _MASK
+    elif cmd == "ACL" and sub == "SETUSER":
+        red = [_ACL_SECRET_RE.sub(_MASK, tok) for tok in red]
+    elif cmd == "AUTH":
+        if len(red) >= 2:  # AUTH <pass> 或 AUTH <user> <pass>：最后一个 token 是口令
+            red[-1] = _MASK
+    elif cmd == "HELLO":
+        for i, tok in enumerate(red):  # HELLO [proto] AUTH <user> <pass>
+            if tok.upper() == "AUTH" and i + 2 < len(red):
+                red[i + 2] = _MASK
+    else:
+        return command  # 无敏感内容：保留原文
+    return " ".join(red)
+
+
 def _redact_config_pairs(value: Any) -> Any:
     """CONFIG GET 结果是 [key, val, key, val, ...]；键名含 pass/auth 等则遮蔽其值。"""
     if not isinstance(value, list):

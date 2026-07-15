@@ -35,8 +35,34 @@ _WRITE_NODES = (
     exp.Grant,
 )
 
-# PG EXPLAIN 的选项关键词（用于剥离后递归判定被解释的语句）
-_EXPLAIN_OPTION_WORDS = {"analyze", "verbose", "costs", "buffers", "timing", "summary", "wal"}
+# PG EXPLAIN 的裸选项关键词：PG 文法里 EXPLAIN 后只有 ANALYZE / VERBOSE 允许不带括号，
+# 其余选项（COSTS/BUFFERS/…）必须写在括号内（已由括号剥离处理）。收窄到文法真实允许的两个，
+# 避免"剥掉未知词后把写语句误解析成只读"（H4）。
+_EXPLAIN_OPTION_WORDS = {"analyze", "verbose"}
+
+# 有副作用/危险的函数：即便语法上出现在 SELECT 里也不能按只读放行——否则只读账号即可
+# 被用来 DoS（SLEEP/BENCHMARK）、读服务器文件（pg_read_file/LOAD_FILE）、读写文件（lo_export）
+# 或外连执行（dblink），绕过整个审批体系（H2）。命中即按写操作处理（默认拒绝原则）。
+_UNSAFE_FUNCTIONS = {
+    "SLEEP", "PG_SLEEP", "BENCHMARK", "GET_LOCK", "RELEASE_LOCK",           # DoS / 会话锁
+    "LOAD_FILE", "PG_READ_FILE", "PG_READ_BINARY_FILE", "PG_LS_DIR", "PG_STAT_FILE",  # 读文件/目录
+    "LO_EXPORT", "LO_IMPORT", "LO_GET", "LO_PUT",                          # 大对象读写服务器文件
+    "DBLINK", "DBLINK_EXEC",                                               # 外部连接执行
+}
+
+
+def _unsafe_function_name(stmt: exp.Expression) -> str | None:
+    """遍历语句树，返回首个命中危险函数黑名单的函数名（大写），无则 None。"""
+    for node in stmt.walk():
+        if isinstance(node, exp.Anonymous):
+            name = str(node.this or "").upper()
+            if name in _UNSAFE_FUNCTIONS:
+                return name
+        elif isinstance(node, exp.Func):
+            name = (node.sql_names()[0] if node.sql_names() else "").upper()
+            if name in _UNSAFE_FUNCTIONS:
+                return name
+    return None
 
 
 @dataclass
@@ -56,10 +82,12 @@ def classify(sql: str, engine: str) -> Verdict:
     try:
         statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
     except sqlglot.errors.SqlglotError as e:
-        # 解析/分词均失败（含引号不闭合等 TokenizeError）→ 默认拒绝，按写操作处理
+        # 解析/分词均失败（含引号不闭合等 TokenizeError）→ 默认拒绝，按写操作处理。
+        # statement_kind=ParseError 让上层（后台查询台）能把"语法错误"与"真写操作"区分开，
+        # 给出正确提示而非误导的"确认写操作"卡片。
         errs = getattr(e, "errors", None)
         desc = errs[0].get("description") if errs else str(e)
-        return Verdict(False, f"SQL 解析失败，按写操作处理: {desc}")
+        return Verdict(False, f"SQL 解析失败: {desc}", "ParseError")
 
     if not statements:
         return Verdict(False, "空语句")
@@ -99,6 +127,10 @@ def classify(sql: str, engine: str) -> Verdict:
             return Verdict(False, "SELECT ... FOR UPDATE/SHARE 会加锁，按写操作处理", kind, tables)
         if isinstance(node, exp.Into):
             return Verdict(False, "SELECT ... INTO 会写出数据，按写操作处理", kind, tables)
+
+    unsafe = _unsafe_function_name(stmt)
+    if unsafe:
+        return Verdict(False, f"包含有副作用/危险函数 {unsafe}()，不按只读放行（按写操作处理）", kind, tables)
 
     return Verdict(True, "只读语句", kind, tables)
 

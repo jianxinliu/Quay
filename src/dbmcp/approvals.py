@@ -213,12 +213,20 @@ class ApprovalStore:
                 f"重提的 SQL 与审批单 #{change_id} 已批准的 SQL 不一致，拒绝执行。"
                 "请提交与审批时完全相同的 SQL，或重新发起审批。"
             )
-        now = datetime.now(UTC).isoformat(timespec="seconds")
+        # 原子核销（compare-and-swap）：只有 status 仍为 approved 的那一次 UPDATE 生效，
+        # rowcount!=1 说明被并发抢先核销——防止两个线程都通过上面的检查后重复执行（双花）。
+        # 上面的状态/指纹/连接检查仍保留：给出清晰错误信息 + 惰性过期判定（过期在 DB 里
+        # 仍是 approved，故过期拦截必须在 CAS 之前）。
         with self._lock:
-            self._conn.execute(
-                "UPDATE change_request SET status = ? WHERE id = ?", (STATUS_CONSUMED, change_id)
+            cur = self._conn.execute(
+                "UPDATE change_request SET status = ? WHERE id = ? AND status = ?",
+                (STATUS_CONSUMED, change_id, STATUS_APPROVED),
             )
             self._conn.commit()
+        if cur.rowcount != 1:
+            raise ApprovalError(
+                f"审批单 #{change_id} 已被使用过（并发核销），一张审批单只能执行一次"
+            )
         return self.get(change_id)
 
     def purge_old(self, retention_days: int) -> int:

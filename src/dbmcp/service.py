@@ -153,6 +153,7 @@ class DbmService:
             "row_count": result.row_count,
             "truncated": result.truncated,
             "duration_ms": result.duration_ms,
+            "column_types": result.column_types,
         }
         if masked:
             out["masked_columns"] = masked
@@ -200,6 +201,13 @@ class DbmService:
         """
         cfg = self.config.get_connection(project, connection)
         verdict = classify(sql, cfg.engine)
+        # 语法错误：明确报语法错，不走"确认写操作"流程（默认拒绝仍成立——不执行）
+        if verdict.statement_kind == "ParseError":
+            rec = self._base_record(project, connection, cfg, "query", sql, caller)
+            rec.status = "rejected"
+            rec.detail = verdict.reason
+            self.store.record(rec)
+            return {"kind": "error", "error": f"SQL 语法错误：{verdict.reason.replace('SQL 解析失败: ', '')}"}
         if verdict.readonly:
             page = max(page, 0)
             default_size = int(self._setting("sql_page_size") or ADMIN_PAGE_SIZE)
@@ -603,12 +611,14 @@ class DbmService:
         if self.approvals is None:
             raise QueryRejected("审批子系统未启用，无法执行写操作")
 
+        # 带 change_id：一律走审批单核销（指纹校验 + 原子核销），不看重新分类结果——
+        # 否则可构造「首提判写→生成审批单、重提判读→走 query() 绕开 consume 的指纹与核销」（H5）。
+        if change_id is not None:
+            return self._execute_approved(project, connection, cfg, sql, change_id, caller)
+
         verdict = classify(sql, cfg.engine)
         if verdict.readonly:
             return {"status": "executed", "readonly": True, **self.query(project, connection, sql, caller)}
-
-        if change_id is not None:
-            return self._execute_approved(project, connection, cfg, sql, change_id, caller)
         return self._request_approval(project, connection, cfg, sql, reason, caller)
 
     def _request_approval(
@@ -801,10 +811,12 @@ class DbmService:
         is_prod = (cfg.environment or "").lower() == "prod"
         verdict = classify_command(command)
         parts = parse_command(command)
+        # 命令原文脱敏后再入审计（密码永不进审计记录）；执行仍用未脱敏的 parts
+        safe_command = redis_engine.redact_command_text(command, parts)
 
         if verdict.readonly:
-            rec = self._base_record(project, connection, cfg, "redis_command", command, caller)
-            rec.fingerprint = command_fingerprint(command)
+            rec = self._base_record(project, connection, cfg, "redis_command", safe_command, caller)
+            rec.fingerprint = command_fingerprint(safe_command)
             if db is not None:
                 rec.detail = f"db={db}"
             try:
@@ -833,8 +845,8 @@ class DbmService:
             raise QueryRejected(
                 f"生产环境写命令需输入连接名「{connection}」确认后才执行")
 
-        rec = self._base_record(project, connection, cfg, "admin_execute", command, caller)
-        rec.fingerprint = command_fingerprint(command)
+        rec = self._base_record(project, connection, cfg, "admin_execute", safe_command, caller)
+        rec.fingerprint = command_fingerprint(safe_command)
         role = "writer" if cfg.writer is not None else "reader"
         try:
             client = self.redis_pool.get(project, connection, cfg, role=role, db=db)

@@ -41,6 +41,9 @@ class QueryResult:
     row_count: int
     truncated: bool
     duration_ms: int
+    # 每列的权威类型分类（number/string/datetime/date/time/bool/json/binary/""），
+    # 由原始 Python 值类型推断——供前端类型图标用，尤其大整数以字符串传输后仍标为 number。
+    column_types: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -404,14 +407,17 @@ def run_query(
             columns = list(result.keys())
             fetched = result.fetchmany(max_rows + 1)
             truncated = len(fetched) > max_rows
+            page = fetched[:max_rows]
+            # 列类型分类须在 _jsonable 前用原始 Python 值算（大整数一旦转字符串就丢了类型）
+            column_types = _col_categories(len(columns), page)
             rows = [
                 [truncate_cell(_jsonable(v), max_cell_chars) for v in row]
-                for row in fetched[:max_rows]
+                for row in page
             ]
         else:
-            columns, rows, truncated = [], [], False
+            columns, rows, truncated, column_types = [], [], False, []
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
-    return QueryResult(columns, rows, len(rows), truncated, duration_ms)
+    return QueryResult(columns, rows, len(rows), truncated, duration_ms, column_types)
 
 
 def truncate_cell(value: Any, max_chars: int) -> Any:
@@ -679,9 +685,17 @@ def _ensure_table_exists(insp, table: str, schema: str | None = None) -> None:  
         raise ValueError(f"表 {table!r} 不存在，可用表: {', '.join(sorted(names)) or '（无）'}")
 
 
+# JS Number.MAX_SAFE_INTEGER = 2^53-1；超过它的整数（雪花 ID/int64）在前端 JSON.parse
+# 时会被 double 近似而丢精度（末位改变），必须以字符串下发；列类型另由 column_types 标注。
+_JS_SAFE_INT = 9007199254740991
+
+
 def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, float, str)):
         return value
+    if isinstance(value, int):
+        # 超 JS 安全整数范围 → 转字符串保精度（不影响小整数，仍是数字）
+        return str(value) if abs(value) > _JS_SAFE_INT else value
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
         return value.isoformat()
     if isinstance(value, decimal.Decimal):
@@ -689,3 +703,40 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray)):
         return {"__bytes_base64__": base64.b64encode(bytes(value)).decode("ascii")}
     return str(value)
+
+
+def _value_category(v: Any) -> str:
+    """由原始 Python 值推断列类型分类，与前端 COL_GLYPH 词表对齐。
+
+    只对**类型明确**的 Python 值给出分类；字符串返回 ""（未知），让前端按内容推断
+    （保留查询台对日期串/JSON 串的既有识别，不回退）。大整数虽以字符串下发，但这里
+    看到的是原始 int → 归类 number，前端图标据此显示 #。
+    """
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float, decimal.Decimal)):
+        return "number"
+    if isinstance(v, dt.datetime):
+        return "datetime"
+    if isinstance(v, dt.date):
+        return "date"
+    if isinstance(v, dt.time):
+        return "time"
+    if isinstance(v, (bytes, bytearray)):
+        return "binary"
+    if isinstance(v, (dict, list)):
+        return "json"
+    return ""  # 字符串等：交给前端按内容推断
+
+
+def _col_categories(ncols: int, rows: list) -> list[str]:
+    """每列取首个非空原始值推断类型分类；全空列为 ""。"""
+    cats = [""] * ncols
+    for j in range(ncols):
+        for row in rows:
+            if row[j] is not None:
+                cats[j] = _value_category(row[j])
+                break
+    return cats

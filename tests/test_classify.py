@@ -62,6 +62,34 @@ class TestBypassAttemptsRejected:
         assert "cfg" in v.tables
         assert "多语句" in v.reason
 
+    def test_unsafe_functions_not_readonly(self):
+        """H2：有副作用/危险函数不能按只读放行（否则只读账号即可 DoS/读写文件）。"""
+        for sql, eng in [
+            ("SELECT SLEEP(10)", "mysql"),
+            ("SELECT BENCHMARK(1000000, MD5(1))", "mysql"),
+            ("SELECT LOAD_FILE('/etc/passwd')", "mysql"),
+            ("SELECT pg_sleep(10)", "postgres"),
+            ("SELECT pg_read_file('/etc/passwd')", "postgres"),
+            ("SELECT lo_export(1, '/tmp/x')", "postgres"),
+        ]:
+            v = classify(sql, eng)
+            assert v.readonly is False, sql
+            assert "危险函数" in v.reason, sql
+
+    def test_explain_write_not_readonly(self):
+        """H4：EXPLAIN 内层写语句/危险函数一律不放行（PG EXPLAIN ANALYZE 会真执行内层）。"""
+        assert classify("EXPLAIN ANALYZE DELETE FROM t", "postgres").readonly is False
+        assert classify("EXPLAIN ANALYZE DELETE FROM t", "mysql").readonly is False
+        assert classify("EXPLAIN ANALYZE SELECT pg_read_file('/x')", "postgres").readonly is False
+        # 正常 EXPLAIN 只读语句仍放行
+        assert classify("EXPLAIN SELECT 1", "postgres").readonly is True
+
+    def test_parse_error_marked(self):
+        """语法错误须标记 statement_kind=ParseError（供后台区分'语法错'与'真写操作'）。"""
+        v = classify("SELECT 'unterminated", "mysql")
+        assert v.readonly is False
+        assert v.statement_kind == "ParseError"
+
     def test_cte_hiding_dml(self):
         # 顶层是 Select，但 CTE 里藏了 INSERT（PG 合法语法）
         sql = "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x"

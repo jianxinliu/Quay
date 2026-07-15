@@ -4,13 +4,61 @@
 SET 语句导致 1064 语法错误。SQLite 单测跑不到 MySQL 方言，故用纯函数断言语句拆分。
 """
 
+import datetime as dt
+import decimal
+
 from dbmcp.config import Policy
 from dbmcp.engines import (
+    _col_categories,
+    _jsonable,
+    _value_category,
     make_canceller,
     mysql_read_timeout,
     mysql_session_statements,
     role_timeouts,
 )
+
+
+class TestJsonableBigInt:
+    """大整数（雪花 ID/int64）须以字符串下发，避免前端 JSON.parse 丢精度改行。"""
+
+    def test_bigint_beyond_js_safe_becomes_string(self):
+        assert _jsonable(1726946581640544256) == "1726946581640544256"
+        assert _jsonable(2 ** 60) == str(2 ** 60)
+        assert _jsonable(-(2 ** 60)) == str(-(2 ** 60))
+
+    def test_just_over_2pow53_is_string(self):
+        # MAX_SAFE_INTEGER = 2^53-1；恰好超一位就转字符串
+        assert _jsonable(9007199254740991) == 9007199254740991      # 边界内仍是数字
+        assert _jsonable(9007199254740992) == "9007199254740992"    # 超一位 → 字符串
+
+    def test_small_int_stays_number(self):
+        assert _jsonable(42) == 42 and isinstance(_jsonable(42), int)
+
+    def test_bool_not_treated_as_int(self):
+        # bool 是 int 子类，不能被大整数逻辑吞掉
+        assert _jsonable(True) is True and _jsonable(False) is False
+
+
+class TestValueCategory:
+    """列类型分类：只对类型明确的 Python 值给分类，字符串留空交前端推断。"""
+
+    def test_categories(self):
+        assert _value_category(1726946581640544256) == "number"   # 原始 int（下发前）→ number
+        assert _value_category(3.14) == "number"
+        assert _value_category(decimal.Decimal("1.5")) == "number"
+        assert _value_category(True) == "bool"
+        assert _value_category(dt.datetime(2026, 7, 15)) == "datetime"
+        assert _value_category(dt.date(2026, 7, 15)) == "date"
+        assert _value_category(dt.time(1, 2)) == "time"
+        assert _value_category(b"x") == "binary"
+        assert _value_category({"a": 1}) == "json"
+        assert _value_category("2026-07-15") == ""   # 字符串留给前端 inferCat
+        assert _value_category(None) == ""
+
+    def test_col_categories_first_non_null(self):
+        rows = [[None, "us"], [1726946581640544256, "cn"]]
+        assert _col_categories(2, rows) == ["number", ""]
 
 
 def test_reader_statements_are_separate():
