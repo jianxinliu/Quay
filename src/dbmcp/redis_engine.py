@@ -245,7 +245,7 @@ def _database_count(client: redis.Redis, default: int = 16) -> int:
 MIN_DBS_SHOWN = 16  # 至少展示这么多库（覆盖常见 0..15），即便实例配置更多且都为空
 
 
-def keyspace_dbs(client: redis.Redis) -> list[dict]:
+def keyspace_dbs(client: redis.Redis, min_dbs: int = MIN_DBS_SHOWN) -> list[dict]:
     """列出逻辑库（含空库）；有数据的带键数（`INFO keyspace` 只报有键的库）。
 
     返回 [{"db": 0, "keys": 12, "expires": 3}, {"db": 1, "keys": 0, "expires": 0}, ...]，
@@ -268,7 +268,7 @@ def keyspace_dbs(client: redis.Redis) -> list[dict]:
         stats_by_db[idx] = {"keys": keys, "expires": expires}
     total = _database_count(client)
     max_nonempty = max(stats_by_db) if stats_by_db else -1
-    shown = min(total, max(MIN_DBS_SHOWN, max_nonempty + 1))
+    shown = min(total, max(min_dbs, max_nonempty + 1))
     # range(shown) 覆盖连续前缀；并集 stats_by_db 保证任何有数据的库（哪怕号很大）都在
     idxs = set(range(shown)) | set(stats_by_db)
     out = [{"db": i, **stats_by_db.get(i, {"keys": 0, "expires": 0})} for i in sorted(idxs)]
@@ -372,20 +372,33 @@ def _hexdump(b: bytes) -> str:
     return "BINARY HEX " + " ".join(h[i:i + 2].upper() for i in range(0, len(h), 2))
 
 
+# msgpack 解码是全局展示偏好（系统设置 redis_msgpack_decode），由 service 在读值前设置。
+# 用模块级开关而非逐层穿参：_decode_bytes 被 _jsonable 深层递归调用，穿参会散落到几十处；
+# 且该值对所有请求一致，并发下即便竞态也只会写成同一个值，无害。
+_MSGPACK_DECODE = True
+
+
+def set_msgpack_decode(enabled: bool) -> None:
+    """设置是否对非 UTF-8 值尝试 msgpack 解码（系统设置驱动）。"""
+    global _MSGPACK_DECODE
+    _MSGPACK_DECODE = bool(enabled)
+
+
 def _decode_bytes(b: bytes) -> Any:
-    """字节值智能解码：优先 UTF-8 文本；否则试 msgpack（仅当解出 dict/list 结构，
+    """字节值智能解码：优先 UTF-8 文本；否则（若开启）试 msgpack（仅当解出 dict/list 结构，
     避免任意二进制被误判）→ 返回结构化对象（供 JSON 展示）；再否则回退 BINARY HEX。"""
     try:
         return b.decode("utf-8")
     except UnicodeDecodeError:
         pass
-    try:
-        import msgpack  # noqa: PLC0415  可选依赖，未装则跳过（回退 HEX）
-        obj = msgpack.unpackb(b, raw=False, strict_map_key=False)
-        if isinstance(obj, (dict, list)):   # 只认结构化，标量/误判一律按二进制
-            return obj
-    except Exception:  # noqa: BLE001  解码失败即非 msgpack，回退
-        pass
+    if _MSGPACK_DECODE:
+        try:
+            import msgpack  # noqa: PLC0415  可选依赖，未装则跳过（回退 HEX）
+            obj = msgpack.unpackb(b, raw=False, strict_map_key=False)
+            if isinstance(obj, (dict, list)):   # 只认结构化，标量/误判一律按二进制
+                return obj
+        except Exception:  # noqa: BLE001  解码失败即非 msgpack，回退
+            pass
     return _hexdump(b)
 
 

@@ -12,17 +12,37 @@ from pathlib import Path
 
 # 已知设置项及默认值。get_all 始终返回全部键（缺失回落默认），前端无需兜底。
 DEFAULTS: dict[str, object] = {
-    "theme": "dark",           # 界面主题：dark（深色）/ light（浅色），作用于查询台与 Redis 控制台
-    "sql_page_size": 100,      # 查询台（DB）结果每页行数
-    "sql_minimap": True,       # 查询台编辑器是否显示 minimap（代码缩略图），默认开启
-    "redis_page_size": 100,    # Redis 结果每页行数（键详情集合 / 命令结果）
-    "redis_key_limit": 1000,   # Redis 键列表默认加载上限（SCAN）
+    # ——整体
+    "theme": "dark",             # 界面主题：dark / light，作用于查询台与 Redis 控制台
+    "ui_font_size": 14,          # 后台整体基础字号（px）
+    # ——查询台（DB）
+    "sql_page_size": 100,        # 结果每页行数
+    "sql_minimap": True,         # 编辑器是否显示 minimap
+    "sql_font_size": 13,         # 编辑器字号（px）
+    "sql_word_wrap": False,      # 编辑器是否自动换行
+    "sql_max_rows": 1000,        # 结果默认行上限（自动 LIMIT 兜底 / 非分页读取上限）
+    "sql_max_cell_chars": 4096,  # 单元格最大字符数（超长值截断）
+    # ——Redis 控制台
+    "redis_page_size": 100,      # 结果每页行数（键详情集合 / 命令结果）
+    "redis_key_limit": 1000,     # 键列表默认加载上限（SCAN）
+    "redis_scan_count": 500,     # SCAN 每批 COUNT（越大越快但单次更阻塞）
+    "redis_msgpack_decode": True,  # 非 UTF-8 值是否尝试 msgpack 解码
+    "redis_min_dbs": 16,         # 库切换器最少展示的逻辑库数
+    # ——操作审计
+    "audit_auto_refresh": False,  # 审计页默认是否自动刷新（5s）
+    "audit_hide_admin_ui": True,  # 审计页默认是否隐藏 agent=admin-ui 的记录
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
+    "ui_font_size": (11, 20),
     "sql_page_size": (10, 2000),
+    "sql_font_size": (10, 24),
+    "sql_max_rows": (10, 500_000),
+    "sql_max_cell_chars": (256, 65_536),
     "redis_page_size": (10, 2000),
     "redis_key_limit": (100, 100_000),
+    "redis_scan_count": (50, 10_000),
+    "redis_min_dbs": (1, 256),
 }
 
 _SCHEMA = """

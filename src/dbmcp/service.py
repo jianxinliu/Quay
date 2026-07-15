@@ -112,11 +112,13 @@ class DbmService:
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
         caller: CallerInfo, max_rows: int, schema: str | None = None,
         on_start=None,  # noqa: ANN001
+        max_cell_chars: int | None = None,
     ) -> dict:
         """执行一条已判定只读的 SQL：跑 reader、落审计、脱敏，返回结果 dict。
 
         max_rows 由调用方决定（query 用连接策略；查询台分页用 page_size+1 以探测下一页），
         与 truncated 检测解耦，便于复用。schema 为查询台的执行 schema 上下文。
+        max_cell_chars 缺省用连接策略（查询台可传系统设置的 sql_max_cell_chars 覆盖）。
         """
         rec = self._base_record(project, connection, cfg, "query", sql, caller)
         if schema:
@@ -124,7 +126,7 @@ class DbmService:
         try:
             engine = self.pool.get(project, connection, cfg, schema=schema)
             result = engines.run_query(engine, sql, max_rows,
-                                        max_cell_chars=cfg.policy.max_cell_chars,
+                                        max_cell_chars=max_cell_chars or cfg.policy.max_cell_chars,
                                         on_start=on_start)
         except QueryRejected:
             raise
@@ -211,13 +213,15 @@ class DbmService:
         if verdict.readonly:
             page = max(page, 0)
             default_size = int(self._setting("sql_page_size") or ADMIN_PAGE_SIZE)
+            eff_cell = int(self._setting("sql_max_cell_chars") or cfg.policy.max_cell_chars)
+            # 分页每页行数仍受连接策略上限（连接可显式限行）；单元格上限用系统设置
             size = min(page_size or default_size, cfg.policy.max_rows)
             paged_sql, paginated, ordered = engines.paginate_sql(
                 sql, cfg.engine, size + 1, page * size)
             if paginated:
                 # 取 size+1 行探测是否有下一页；不受连接 max_rows 二次截断影响
                 out = self._read(project, connection, cfg, paged_sql, caller, size + 1,
-                                 schema=schema, on_start=on_start)
+                                 schema=schema, on_start=on_start, max_cell_chars=eff_cell)
                 rows = out["rows"]
                 out["has_next"] = len(rows) > size
                 out["rows"] = rows[:size]
@@ -225,9 +229,10 @@ class DbmService:
                 out.update(paginated=True, page=page, page_size=size, ordered=ordered)
                 out.pop("truncated", None)
                 return {"kind": "read", **out}
-            # 自带 LIMIT / 非 SELECT：不分页，仍受 max_rows 兜底
-            out = self._read(project, connection, cfg, sql, caller, cfg.policy.max_rows,
-                             schema=schema, on_start=on_start)
+            # 自带 LIMIT / 非 SELECT：不分页，受系统设置的结果行上限 sql_max_rows 兜底
+            eff_max_rows = int(self._setting("sql_max_rows") or cfg.policy.max_rows)
+            out = self._read(project, connection, cfg, sql, caller, eff_max_rows,
+                             schema=schema, on_start=on_start, max_cell_chars=eff_cell)
             out["paginated"] = False
             return {"kind": "read", **out}
 
@@ -765,9 +770,11 @@ class DbmService:
     def redis_databases(self, project: str, connection: str, caller: CallerInfo) -> list[dict]:
         """列出全部逻辑库（db0..N-1），有数据的带键数。对标 Medis 底部库切换器。"""
         cfg = self._redis_cfg(project, connection)
+        min_dbs = int(self._setting("redis_min_dbs") or redis_engine.MIN_DBS_SHOWN)
         return self._audited(
             project, connection, cfg, "redis_keyspace", "", caller,
-            lambda: redis_engine.keyspace_dbs(self.redis_pool.get(project, connection, cfg)))
+            lambda: redis_engine.keyspace_dbs(self.redis_pool.get(project, connection, cfg),
+                                              min_dbs=min_dbs))
 
     def redis_keys(
         self, project: str, connection: str, caller: CallerInfo,
@@ -775,18 +782,20 @@ class DbmService:
     ) -> dict:
         cfg = self._redis_cfg(project, connection)
         limit = max_keys if max_keys is not None else int(self._setting("redis_key_limit"))
+        scan_count = int(self._setting("redis_scan_count") or 500)
         detail = f"db={db if db is not None else ''} match={pattern}"
         return self._audited(
             project, connection, cfg, "redis_scan", detail, caller,
             lambda: redis_engine.scan_keys(
                 self.redis_pool.get(project, connection, cfg, db=db),
-                pattern=pattern or "*", max_keys=limit))
+                pattern=pattern or "*", max_keys=limit, scan_count=scan_count))
 
     def redis_value(
         self, project: str, connection: str, key: str, caller: CallerInfo,
         db: int | None = None,
     ) -> dict:
         cfg = self._redis_cfg(project, connection)
+        redis_engine.set_msgpack_decode(bool(self._setting("redis_msgpack_decode")))
         detail = f"db={db if db is not None else ''} key={key}"
         return self._audited(
             project, connection, cfg, "redis_read", detail, caller,

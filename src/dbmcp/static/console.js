@@ -414,6 +414,8 @@
         leftW: 264, editorH: 300, dataLogH: 150,
         theme: "dark",          // 系统设置：dark | light（浅色主题）
         minimapOn: true,        // 系统设置：编辑器 minimap 是否显示（DB 配置，默认开）
+        editorFontSize: 13,     // 系统设置：编辑器字号（sql_font_size）
+        editorWordWrap: false,  // 系统设置：编辑器自动换行（sql_word_wrap）
         schemaFloatRight: 16,   // schema 浮层距编辑器右缘距离（动态避开 minimap）
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
       };
@@ -2807,7 +2809,8 @@
         editor = monaco.editor.create(this.$refs.editorEl, {
           model: active, language: "sql",
           theme: this.theme === "light" ? "vs" : "vs-dark", automaticLayout: true,
-          fontSize: 13, minimap: { enabled: this.minimapOn }, scrollBeyondLastLine: false, tabSize: 2,
+          fontSize: this.editorFontSize, wordWrap: this.editorWordWrap ? "on" : "off",
+          minimap: { enabled: this.minimapOn }, scrollBeyondLastLine: false, tabSize: 2,
           glyphMargin: true,   // 书签图标显示在行号左侧的字形边栏
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
@@ -3045,7 +3048,13 @@
         if (d && d.ok && d.settings) {
           self.theme = d.settings.theme || "dark";
           self.minimapOn = d.settings.sql_minimap !== false;  // 缺省视为开启
-          if (editor) { editor.updateOptions({ minimap: { enabled: self.minimapOn } }); self.syncSchemaFloat(); }
+          if (d.settings.sql_font_size) self.editorFontSize = +d.settings.sql_font_size;
+          self.editorWordWrap = !!d.settings.sql_word_wrap;
+          if (editor) {
+            editor.updateOptions({ minimap: { enabled: self.minimapOn }, fontSize: self.editorFontSize,
+              wordWrap: self.editorWordWrap ? "on" : "off" });
+            self.syncSchemaFloat();
+          }
         }
       }).catch(function () {});
       this.loadConnections().then(function () { self.loadSnippets(); });

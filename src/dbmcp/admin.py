@@ -109,18 +109,21 @@ _FAVICON_HREF = "data:image/svg+xml;base64," + base64.b64encode(_FAVICON_SVG.enc
 _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
-def _page(title: str, body: str, pending: int = 0, doc: bool = True) -> str:
+def _page(title: str, body: str, pending: int = 0, doc: bool = True,
+          font_size: int | None = None) -> str:
     nav_badge = f"<span class='nav-count'>{pending}</span>" if pending else ""
     banner = (f"<a class='pending-banner' href='/admin/approvals'>"
               f"⚠ <b>{pending}</b> 条数据变更待审批，点此处理 →</a>" if pending else "")
     doc_css = ('<link rel="stylesheet" href="/admin/static/admin-doc.css">'
                if doc else '')
+    # 整体字号（系统设置 ui_font_size）：只作用于服务端渲染页，SPA（查询台/Redis）另有字号设置
+    font_css = f"<style>body{{font-size:{font_size}px}}</style>" if font_size else ""
     return f"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · Quay</title>
 {_FAVICON_LINK}
-<link rel="stylesheet" href="/admin/static/admin-chrome.css">{doc_css}</head><body>
+<link rel="stylesheet" href="/admin/static/admin-chrome.css">{doc_css}{font_css}</head><body>
 <div class="shell">
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>Quay</b><span>gatekeeper</span></div></div>
@@ -617,6 +620,22 @@ def _settings_form(inner: str) -> str:
             f"</form></div>{_SETTINGS_SUBMIT_JS}")
 
 
+def _num_setting(label: str, name: str, s: dict, default: object, hint: str) -> str:
+    return ("<div style='margin-bottom:16px'>"
+            + _field(label, name, s.get(name, default), ph=str(default), typ="number", width="200px")
+            + f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
+
+
+def _bool_setting(label: str, name: str, s: dict, default: bool,
+                  on_text: str, off_text: str, hint: str) -> str:
+    on = bool(s.get(name, default))
+    opts = (f"<option value='true'{' selected' if on else ''}>{_esc(on_text)}</option>"
+            f"<option value='false'{'' if on else ' selected'}>{_esc(off_text)}</option>")
+    return (f"<div style='margin-bottom:16px'><label>{_esc(label)}</label>"
+            f"<select name='{name}' style='width:200px'>{opts}</select>"
+            f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
+
+
 def _settings_general_body(s: dict) -> str:
     def sel(v: str) -> str:
         return " selected" if s.get("theme") == v else ""
@@ -625,33 +644,40 @@ def _settings_general_body(s: dict) -> str:
         f"<select name='theme' style='width:200px'>"
         f"<option value='dark'{sel('dark')}>深色（默认）</option>"
         f"<option value='light'{sel('light')}>浅色</option></select>"
-        "<div class='muted' style='margin-top:4px'>作用于查询台与 Redis 控制台的深色 IDE 界面。</div></div>")
+        "<div class='muted' style='margin-top:4px'>作用于查询台与 Redis 控制台的深色 IDE 界面。</div></div>"
+        + _num_setting("后台整体字号（px）", "ui_font_size", s, 14, "后台各页面的基础字号，10–20 之间。")
+        + _bool_setting("审计页默认自动刷新", "audit_auto_refresh", s, False,
+                        "开启（每 5s）", "关闭（默认）", "打开操作审计页时是否默认每 5 秒自动刷新。")
+        + _bool_setting("审计页默认隐藏 admin-ui", "audit_hide_admin_ui", s, True,
+                        "隐藏（默认）", "显示", "默认是否隐藏 agent=admin-ui（查询台自身操作）的审计记录。"))
 
 
 def _settings_db_body(s: dict) -> str:
-    on = bool(s.get("sql_minimap", True))
-    mm_opts = (f"<option value='true'{' selected' if on else ''}>显示（默认）</option>"
-               f"<option value='false'{'' if on else ' selected'}>隐藏</option>")
     return _settings_form(
-        "<div style='margin-bottom:16px'>"
-        + _field("查询台结果每页行数", "sql_page_size", s.get("sql_page_size", 100),
-                 ph="100", typ="number", width="200px")
-        + "<div class='muted' style='margin-top:4px'>查询台（DB）结果分页大小。</div></div>"
-        "<div style='margin-bottom:16px'><label>编辑器 minimap（代码缩略图）</label>"
-        f"<select name='sql_minimap' style='width:200px'>{mm_opts}</select>"
-        "<div class='muted' style='margin-top:4px'>查询台 SQL 编辑器右侧的代码缩略图，隐藏可让出更多编辑宽度。</div></div>")
+        _num_setting("查询台结果每页行数", "sql_page_size", s, 100, "查询台（DB）结果分页大小。")
+        + _bool_setting("编辑器 minimap（代码缩略图）", "sql_minimap", s, True,
+                        "显示（默认）", "隐藏", "编辑器右侧代码缩略图，隐藏可让出更多编辑宽度。")
+        + _num_setting("编辑器字号（px）", "sql_font_size", s, 13, "查询台 SQL 编辑器字号，10–24 之间。")
+        + _bool_setting("编辑器自动换行", "sql_word_wrap", s, False,
+                        "开启", "关闭（默认）", "超出宽度的长 SQL 是否自动折行。")
+        + _num_setting("结果默认行上限", "sql_max_rows", s, 1000,
+                       "缺 LIMIT 的查询自动兜底的行上限、非分页读取的截断上限。")
+        + _num_setting("单元格最大字符数", "sql_max_cell_chars", s, 4096,
+                       "超长 TEXT/BLOB 单元格截断的字符数。"))
 
 
 def _settings_redis_body(s: dict) -> str:
     return _settings_form(
-        "<div style='margin-bottom:16px'>"
-        + _field("Redis 结果每页行数", "redis_page_size", s.get("redis_page_size", 100),
-                 ph="100", typ="number", width="200px")
-        + "<div class='muted' style='margin-top:4px'>Redis 键详情（hash/list/set/zset）与命令结果分页大小。</div></div>"
-        "<div style='margin-bottom:16px'>"
-        + _field("Redis 键列表加载上限", "redis_key_limit", s.get("redis_key_limit", 1000),
-                 ph="1000", typ="number", width="200px")
-        + "<div class='muted' style='margin-top:4px'>左侧键树 SCAN 一次最多加载的键数量。</div></div>")
+        _num_setting("Redis 结果每页行数", "redis_page_size", s, 100,
+                     "Redis 键详情（hash/list/set/zset）与命令结果分页大小。")
+        + _num_setting("Redis 键列表加载上限", "redis_key_limit", s, 1000,
+                       "左侧键树 SCAN 一次最多加载的键数量。")
+        + _num_setting("SCAN 每批 COUNT", "redis_scan_count", s, 500,
+                       "SCAN 每轮的批大小，越大越快但单次更阻塞（50–10000）。")
+        + _bool_setting("非 UTF-8 值 msgpack 解码", "redis_msgpack_decode", s, True,
+                        "开启（默认）", "关闭", "非 UTF-8 的值是否尝试用 msgpack 解码为结构展示。")
+        + _num_setting("库切换器最少展示库数", "redis_min_dbs", s, 16,
+                       "底部数据库切换器至少列出多少个逻辑库（1–256）。"))
 
 
 def _settings_info_body(service: "DbmService", req: "Request") -> str:
@@ -876,7 +902,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                            if c.effective_status() == "pending"])
         except Exception:
             pending = 0
-        return HTMLResponse(_page(title, body, pending=pending, doc=doc))
+        fs = None
+        if doc:
+            try:
+                fs = int(service.get_settings().get("ui_font_size") or 14)
+            except Exception:
+                fs = None
+        return HTMLResponse(_page(title, body, pending=pending, doc=doc, font_size=fs))
 
     @mcp.custom_route("/favicon.ico", methods=["GET"])
     @mcp.custom_route("/favicon.svg", methods=["GET"])
@@ -1044,8 +1076,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             limit, offset = 200, 0
         # 服务端筛选（下推到 SQL）
         filters = {k: qp.get(k) for k in ("project", "connection", "agent", "status") if qp.get(k)}
-        # 默认隐藏查询台自身操作（agent=admin-ui，噪音大）；show_admin=1 或明确筛选它时显示
-        show_admin = qp.get("show_admin") == "1" or filters.get("agent") == "admin-ui"
+        # 默认是否隐藏查询台自身操作（agent=admin-ui）由系统设置 audit_hide_admin_ui 决定；
+        # show_admin=1 或明确筛选它时始终显示
+        _st = service.get_settings()
+        _hide_default = bool(_st.get("audit_hide_admin_ui", True))
+        show_admin = (qp.get("show_admin") == "1" or filters.get("agent") == "admin-ui"
+                      or not _hide_default)
         query_filters = dict(filters)
         if not show_admin:
             query_filters["agent__ne"] = "admin-ui"
@@ -1149,7 +1185,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             f"<th>SQL</th><th>状态</th><th>时间</th><th>结果</th></tr>{table_rows}</table></div>{pager}</div>"
             "<script>(function(){"
             "var box=document.getElementById('auto-refresh');"
-            "if(box){var on=localStorage.getItem('dbm-audit-refresh')==='1';box.checked=on;"
+            f"var refreshDefault={'true' if bool(_st.get('audit_auto_refresh', False)) else 'false'};"
+            "if(box){var ls=localStorage.getItem('dbm-audit-refresh');"
+            "var on=ls===null?refreshDefault:ls==='1';box.checked=on;"
             "var t=on?setTimeout(function(){location.reload();},5000):null;"
             "box.addEventListener('change',function(){"
             "localStorage.setItem('dbm-audit-refresh',box.checked?'1':'0');"
@@ -1534,10 +1572,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     @guard
     async def _settings_save(req: Request) -> JSONResponse:
         f = await req.form()
-        updates = {}
-        for key in ("theme", "sql_page_size", "sql_minimap", "redis_page_size", "redis_key_limit"):
-            if key in f:
-                updates[key] = str(f.get(key))
+        # 白名单即全部已知设置项；SettingsStore.save 还会再忽略未知键并夹取区间
+        from .settings import DEFAULTS as _SETTING_DEFAULTS
+        updates = {key: str(f.get(key)) for key in _SETTING_DEFAULTS if key in f}
         try:
             settings = service.save_settings(updates)
         except Exception as e:  # noqa: BLE001

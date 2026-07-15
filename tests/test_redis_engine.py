@@ -80,10 +80,31 @@ class TestKeyspaceDbsCap:
         assert 200 in idxs
         assert 0 in idxs
 
+    def test_min_dbs_param_controls_floor(self):
+        # 系统设置 redis_min_dbs 驱动最少展示库数
+        c = FakeRedis({"db0": {"keys": 3}}, databases=256)
+        assert [d["db"] for d in keyspace_dbs(c, min_dbs=4)] == list(range(4))
+        assert len(keyspace_dbs(c, min_dbs=32)) == 32
+
     def test_config_disabled_falls_back_to_16(self):
         c = FakeRedis({"db0": {"keys": 1}}, config_raises=True)
         dbs = keyspace_dbs(c)
         assert [d["db"] for d in dbs] == list(range(16))
+
+
+def test_msgpack_decode_toggle():
+    """系统设置 redis_msgpack_decode：关闭后非 UTF-8 值不再 msgpack 解码，回退 HEX。"""
+    import msgpack
+
+    from dbmcp.redis_engine import _decode_bytes, set_msgpack_decode
+    packed = msgpack.packb({"a": 1})
+    try:
+        set_msgpack_decode(True)
+        assert _decode_bytes(packed) == {"a": 1}
+        set_msgpack_decode(False)
+        assert not isinstance(_decode_bytes(packed), dict)   # 不解码 → HEX 串
+    finally:
+        set_msgpack_decode(True)   # 复位，避免污染其它用例
 
 
 class TestRedaction:
