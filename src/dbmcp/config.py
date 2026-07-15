@@ -24,8 +24,16 @@ DEFAULT_WRITE_TIMEOUT_S = 600
 
 
 class SshIdentity(BaseModel):
-    """一条可复用的 SSH 证书：只存路径引用，绝不存密钥文件内容。"""
+    """一条可复用的 SSH 配置：主机/用户/端口/私钥/known_hosts。
 
+    只存路径引用，绝不存密钥文件内容。host/user/port 可选——跳板引用本配置时，
+    跳板处未填的字段从这里继承（向后兼容：旧的只含 key_path 的配置，host/user/port 为 None，
+    此时跳板必须自己写 host）。
+    """
+
+    host: str | None = None
+    user: str | None = None
+    port: int | None = None
     key_path: str
     known_hosts_path: str | None = None
 
@@ -66,7 +74,7 @@ class JumpHost(BaseModel):
     兼容旧配置：裸字符串 "user@host:port" 会被 before-validator 解析成本模型。
     """
 
-    host: str
+    host: str | None = None          # 可空：仅引用 SSH 配置时，host 从配置继承
     user: str | None = None
     port: int | None = None
     identity: str | None = None      # 引用 AppConfig.ssh_identities 的键名
@@ -80,9 +88,16 @@ class JumpHost(BaseModel):
             return parse_hostspec(v)
         return v
 
+    @model_validator(mode="after")
+    def _need_host_or_identity(self) -> "JumpHost":
+        if not self.host and not self.identity:
+            raise ValueError("跳板必须填 host，或引用一条 SSH 配置（identity）")
+        return self
+
     def label(self) -> str:
         """用于列表/日志展示的一行文本，如 "alice@bastion:22"。不含任何密钥内容。"""
-        s = f"{self.user}@{self.host}" if self.user else self.host
+        base = self.host or (f"@{self.identity}" if self.identity else "?")
+        s = f"{self.user}@{base}" if self.user else base
         if self.port:
             s += f":{self.port}"
         return s

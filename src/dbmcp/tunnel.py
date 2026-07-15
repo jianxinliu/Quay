@@ -91,6 +91,7 @@ def resolve_jump_hosts(
     for jh in jump_hosts or []:
         if isinstance(jh, str):
             jh = JumpHost.model_validate(parse_hostspec(jh))
+        host, user, port = jh.host, jh.user, jh.port
         key_path = jh.key_path
         known_hosts_path = jh.known_hosts_path
         if jh.identity:
@@ -98,13 +99,21 @@ def resolve_jump_hosts(
             if ident is None:
                 available = ", ".join(sorted(identities)) or "（空）"
                 raise TunnelError(
-                    f"跳板 {jh.label()} 引用的 SSH 证书 {jh.identity!r} 不存在，"
-                    f"可用证书: {available}"
+                    f"跳板 {jh.label()} 引用的 SSH 配置 {jh.identity!r} 不存在，"
+                    f"可用配置: {available}"
                 )
             key_path = ident.key_path
             known_hosts_path = ident.known_hosts_path
+            # 跳板未指定的 host/user/port 从所引用的 SSH 配置继承
+            host = jh.host or ident.host
+            user = jh.user or ident.user
+            port = jh.port or ident.port
+        if not host:
+            raise TunnelError(
+                f"跳板缺少 host：跳板本身与所引用的 SSH 配置 {jh.identity!r} 都未提供主机"
+            )
         resolved.append(ResolvedHop(
-            host=jh.host, user=jh.user, port=jh.port,
+            host=host, user=user, port=port,
             key_path=key_path, known_hosts_path=known_hosts_path,
         ))
     return resolved

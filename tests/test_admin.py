@@ -240,9 +240,9 @@ class TestSshIdentitiesAndHops:
                     data={"name": "prod-bastion", "key_path": key}, follow_redirects=False)
         assert r.status_code == 303
         assert "prod-bastion" in svc.config.ssh_identities
-        # SSH 证书 tab 展示它
+        # SSH 配置 tab 展示它
         page = tc.get("/admin/settings?tab=ssh")
-        assert "prod-bastion" in page.text and "SSH 证书库" in page.text
+        assert "prod-bastion" in page.text and "SSH 配置库" in page.text
         # 建一个多跳连接：第一跳引用证书，第二跳内联 key
         # httpx 用「列表值」表示重复表单键 → 平行数组按行对齐
         r = tc.post("/admin/connections/save", data={
@@ -264,6 +264,35 @@ class TestSshIdentitiesAndHops:
         r = tc.post("/admin/ssh-identities/delete",
                     data={"name": "prod-bastion"}, follow_redirects=False)
         assert r.status_code == 400 and "引用" in r.text
+
+    def test_full_ssh_config_and_identity_only_hop(self, ssh_client):
+        """#4：SSH 配置带 host/user/port；跳板仅引用配置（不写 host）时继承这些字段。"""
+        tc, svc, key, cfg_path = ssh_client
+        # 存一条完整 SSH 配置（含主机/用户/端口）
+        r = tc.post("/admin/ssh-identities/save", data={
+            "name": "bastion-full", "key_path": key,
+            "host": "jump.example.com", "user": "ops", "port": "2200",
+        }, follow_redirects=False)
+        assert r.status_code == 303
+        ident = svc.config.ssh_identities["bastion-full"]
+        assert ident.host == "jump.example.com" and ident.user == "ops" and ident.port == 2200
+        # 建连接：跳板只引用配置、host/user/port 全留空
+        r = tc.post("/admin/connections/save", data={
+            "project": "local", "connection": "db2", "engine": "mysql",
+            "environment": "dev", "host": "h", "port": "3306", "database": "d",
+            "user": "u", "password": "p", "force_privileged": "1",
+            "hop_host": [""], "hop_user": [""], "hop_port": [""],
+            "hop_identity": ["bastion-full"], "hop_key_path": [""],
+            "ssh_options_extra": "", "max_rows": "500", "mask_columns": "",
+        }, follow_redirects=False)
+        assert r.status_code == 303, r.text
+        hops = svc.config.get_connection("local", "db2").jump_hosts
+        assert len(hops) == 1 and hops[0].identity == "bastion-full" and not hops[0].host
+        # 解析后从配置继承 host/user/port
+        from dbmcp.tunnel import resolve_jump_hosts
+        resolved = resolve_jump_hosts(hops, svc.config.ssh_identities)
+        assert resolved[0].host == "jump.example.com"
+        assert resolved[0].user == "ops" and resolved[0].port == 2200
 
     def test_identity_delete_when_unreferenced(self, ssh_client):
         tc, svc, key, cfg_path = ssh_client

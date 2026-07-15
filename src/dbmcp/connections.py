@@ -218,12 +218,16 @@ class ConnectionManager:
     # ---------- SSH 证书库（只存路径引用，绝不存密钥内容）----------
 
     def upsert_identity(
-        self, name: str, key_path: str, known_hosts_path: str | None = None
+        self, name: str, key_path: str, known_hosts_path: str | None = None,
+        host: str | None = None, user: str | None = None, port: str | int | None = None,
     ) -> None:
-        """新增/修改一条可复用的 SSH 证书。校验路径可用后原地写入并持久化。"""
+        """新增/修改一条可复用的 SSH 配置。校验路径可用后原地写入并持久化。
+
+        host/user/port 可选：跳板引用本配置时继承这些字段（跳板处可覆盖）。
+        """
         name = (name or "").strip()
         if not name:
-            raise ConnectionAdminError("证书名不能为空")
+            raise ConnectionAdminError("配置名不能为空")
         key_path = (key_path or "").strip()
         if not key_path:
             raise ConnectionAdminError("私钥路径不能为空")
@@ -231,20 +235,27 @@ class ConnectionManager:
         known_hosts_path = (known_hosts_path or "").strip() or None
         if known_hosts_path:
             validate_known_hosts_path(known_hosts_path)
+        port_num: int | None = None
+        if str(port or "").strip():
+            try:
+                port_num = int(port)
+            except (TypeError, ValueError) as e:
+                raise ConnectionAdminError(f"端口必须是数字：{port!r}") from e
         # 原地改 dict（引擎池持有同一引用，即时可见）
         self.config.ssh_identities[name] = SshIdentity(
-            key_path=key_path, known_hosts_path=known_hosts_path
+            host=(host or "").strip() or None, user=(user or "").strip() or None,
+            port=port_num, key_path=key_path, known_hosts_path=known_hosts_path,
         )
         save_config(self.config, self.config_path)
 
     def delete_identity(self, name: str) -> None:
         """删除证书。被任何连接的跳板引用时拒删（列出引用者）。"""
         if name not in self.config.ssh_identities:
-            raise ConnectionAdminError(f"SSH 证书 {name!r} 不存在")
+            raise ConnectionAdminError(f"SSH 配置 {name!r} 不存在")
         referers = self.identity_referers(name)
         if referers:
             raise ConnectionAdminError(
-                f"SSH 证书 {name!r} 正被以下连接引用，不能删除：{'、'.join(referers)}"
+                f"SSH 配置 {name!r} 正被以下连接引用，不能删除：{'、'.join(referers)}"
             )
         self.config.ssh_identities.pop(name)
         save_config(self.config, self.config_path)

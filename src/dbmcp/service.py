@@ -1054,13 +1054,14 @@ class DbmService:
         return dict(self.config.ssh_identities)
 
     def upsert_ssh_identity(
-        self, name: str, key_path: str, known_hosts_path: str | None, caller: CallerInfo
+        self, name: str, key_path: str, known_hosts_path: str | None, caller: CallerInfo,
+        host: str | None = None, user: str | None = None, port: str | int | None = None,
     ) -> None:
         from .connections import ConnectionManager
 
         mgr = ConnectionManager(self.config, self._require_config_path())
         referers = mgr.identity_referers(name)
-        mgr.upsert_identity(name, key_path, known_hosts_path)
+        mgr.upsert_identity(name, key_path, known_hosts_path, host=host, user=user, port=port)
         # 证书变更影响引用它的连接的隧道：回收让下次用新证书重建
         for ref in referers:
             proj, conn = ref.split("/", 1)
@@ -1068,7 +1069,7 @@ class DbmService:
             self.redis_pool.dispose_connection(proj, conn)
         self.store.record(AuditRecord(
             project="admin", connection=name, tool="upsert_ssh_identity", status="ok",
-            agent=caller.agent, session_id=caller.session_id, detail="已保存 SSH 证书"))
+            agent=caller.agent, session_id=caller.session_id, detail="已保存 SSH 配置"))
 
     def delete_ssh_identity(self, name: str, caller: CallerInfo) -> None:
         from .connections import ConnectionManager
@@ -1077,7 +1078,7 @@ class DbmService:
         mgr.delete_identity(name)
         self.store.record(AuditRecord(
             project="admin", connection=name, tool="delete_ssh_identity", status="ok",
-            agent=caller.agent, session_id=caller.session_id, detail="已删除 SSH 证书"))
+            agent=caller.agent, session_id=caller.session_id, detail="已删除 SSH 配置"))
 
     def probe_connection_fields(self, fields: dict, existing_password: str | None = None):
         """用表单值临时探测连通性与账号权限（测试按钮）。不保存、不入池。"""

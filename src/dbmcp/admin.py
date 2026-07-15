@@ -271,7 +271,7 @@ def _hop_row(hop, identities: list[str]) -> str:  # noqa: ANN001
     return (
         "<div class='hop-row' style='display:flex;gap:6px;align-items:center;"
         "margin-bottom:6px;flex-wrap:wrap'>"
-        f"<input name='hop_host' value='{host}' placeholder='跳板 host' style='width:150px'>"
+        f"<input name='hop_host' value='{host}' placeholder='host（引用配置时可空）' style='width:170px'>"
         f"<input name='hop_user' value='{user}' placeholder='user' style='width:88px'>"
         f"<input name='hop_port' value='{port}' placeholder='22' style='width:60px'>"
         f"{_ident_select(identity, identities)}"
@@ -283,7 +283,11 @@ def _hop_row(hop, identities: list[str]) -> str:  # noqa: ANN001
 
 
 def _parse_hop_rows(f) -> list[dict]:  # noqa: ANN001
-    """从表单的平行数组字段还原跳板列表；host 为空的行跳过。"""
+    """从表单的平行数组字段还原跳板列表。
+
+    一行保留的条件：填了 host **或** 引用了一条 SSH 配置（identity）——仅引用配置时
+    host/user/port 可留空，由配置继承。两者都空的行才跳过。
+    """
     hosts = f.getlist("hop_host")
     users = f.getlist("hop_user")
     ports = f.getlist("hop_port")
@@ -294,17 +298,21 @@ def _parse_hop_rows(f) -> list[dict]:  # noqa: ANN001
         return str(seq[i]).strip() if i < len(seq) else ""
 
     out: list[dict] = []
-    for i, host in enumerate(hosts):
-        host = str(host).strip()
-        if not host:
+    n = max(len(hosts), len(idents))
+    for i in range(n):
+        host = _at(hosts, i)
+        identity = _at(idents, i)
+        if not host and not identity:
             continue
-        hop: dict = {"host": host}
+        hop: dict = {}
+        if host:
+            hop["host"] = host
         if _at(users, i):
             hop["user"] = _at(users, i)
         if _at(ports, i):
             hop["port"] = int(_at(ports, i))
-        if _at(idents, i):
-            hop["identity"] = _at(idents, i)
+        if identity:
+            hop["identity"] = identity
         elif _at(keys, i):
             hop["key_path"] = _at(keys, i)
         out.append(hop)
@@ -358,8 +366,8 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
  </div>
  <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
  <label>SSH 跳板链（按序，最后一跳落地转发到数据库）</label>
- <div class="muted" style="margin:2px 0 8px">每跳可选一条已保存的 SSH 证书，或填内联私钥路径；不同跳板可用不同证书。无跳板＝直连。
- 证书在<a href="/admin/settings?tab=ssh">SSH 证书</a>页维护。</div>
+ <div class="muted" style="margin:2px 0 8px">每跳可引用一条已保存的 SSH 配置（主机/用户/私钥都从配置来，跳板处可留空覆盖），或填内联主机+私钥；不同跳板可用不同配置。无跳板＝直连。
+ 配置在<a href="/admin/settings?tab=ssh">SSH 配置</a>页维护。</div>
  <div id="hops">{hop_rows}</div>
  <template id="hop-tpl">{empty_hop}</template>
  <button type="button" id="add-hop" class="btn btn-ghost" style="margin:2px 0 10px">＋ 加一跳</button>
@@ -588,7 +596,7 @@ def _redis_body() -> str:
 
 
 _SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
-                  ("connections", "连接管理"), ("ssh", "SSH 证书"), ("info", "系统信息")]
+                  ("connections", "连接管理"), ("ssh", "SSH 配置"), ("info", "系统信息")]
 
 _SETTINGS_SUBMIT_JS = """<script>
 document.querySelectorAll('form.settings-form').forEach(function(f){
@@ -834,7 +842,11 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
 
 
 def _ssh_identities_body(service: "DbmService") -> str:
-    """SSH 证书库（系统设置『SSH 证书』tab）：列表 + 新增表单。只存路径引用。"""
+    """SSH 配置库（系统设置『SSH 配置』tab）：列表 + 新增表单。只存路径引用。
+
+    一条 SSH 配置 = 主机/用户/端口/私钥/known_hosts。连接的跳板可直接引用一条配置，
+    跳板处不必再重复填主机等（跳板留空即继承本配置）。
+    """
     from .connections import identity_referers
 
     idents = service.config.ssh_identities
@@ -845,6 +857,12 @@ def _ssh_identities_body(service: "DbmService") -> str:
         ref_txt = "、".join(refs) if refs else "<span class='muted'>—</span>"
         kh = f"<code>{_esc(ident.known_hosts_path)}</code>" if ident.known_hosts_path \
             else "<span class='muted'>—</span>"
+        target = ident.host or ""
+        if target and ident.user:
+            target = f"{ident.user}@{target}"
+        if target and ident.port:
+            target += f":{ident.port}"
+        target_html = f"<code>{_esc(target)}</code>" if target else "<span class='muted'>—</span>"
         if refs:
             del_btn = ("<button class='btn btn-ghost' disabled "
                        "style='padding:3px 11px;font-size:12.5px' "
@@ -857,28 +875,35 @@ def _ssh_identities_body(service: "DbmService") -> str:
                 "<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form>")
         rows.append(
             f"<tr><td><code>{_esc(name)}</code></td>"
+            f"<td class='mono'>{target_html}</td>"
             f"<td class='mono'><code>{_esc(ident.key_path)}</code></td>"
             f"<td class='mono'>{kh}</td><td class='muted mono'>{ref_txt}</td>"
             f"<td style='white-space:nowrap'>{del_btn}</td></tr>"
         )
-    table = "".join(rows) or '<tr><td colspan="5" class="muted">（无证书）</td></tr>'
+    table = "".join(rows) or '<tr><td colspan="6" class="muted">（无配置）</td></tr>'
     return (
-        "<div class='card'><h2 style='margin-top:0'>SSH 证书库</h2>"
-        "<p class='muted' style='margin-top:-4px'>可复用的 SSH 证书，新建连接的跳板可直接引用。"
-        "只保存<b>路径引用</b>，绝不读取或存储密钥文件内容。</p>"
-        "<div class='tablewrap'><table><tr><th>名字</th><th>私钥路径</th>"
+        "<div class='card'><h2 style='margin-top:0'>SSH 配置库</h2>"
+        "<p class='muted' style='margin-top:-4px'>可复用的 SSH 配置（主机/用户/端口/私钥/known_hosts）。"
+        "新建连接的跳板可直接引用，跳板处不必再重复填主机。只保存<b>路径引用</b>，绝不读取或存储密钥内容。</p>"
+        "<div class='tablewrap'><table><tr><th>名字</th><th>主机（user@host:port）</th><th>私钥路径</th>"
         "<th>known_hosts</th><th>被引用</th><th>操作</th></tr>"
         f"{table}</table></div></div>"
-        "<div class='card' style='max-width:620px'><h2 style='margin-top:0'>新增 / 覆盖证书</h2>"
+        "<div class='card' style='max-width:620px'><h2 style='margin-top:0'>新增 / 覆盖配置</h2>"
         "<form method='post' action='/admin/ssh-identities/save'>"
         "<div class='row'>"
         f"<div>{_field('名字', 'name', ph='prod-bastion', width='200px')}</div>"
+        f"<div>{_field('主机 host（可选）', 'host', ph='bastion.example.com', width='320px')}</div>"
+        "</div><div class='row'>"
+        f"<div>{_field('用户 user（可选）', 'user', ph='ops', width='150px')}</div>"
+        f"<div>{_field('端口 port（可选）', 'port', ph='22', typ='number', width='110px')}</div>"
+        "</div><div class='row'>"
         f"<div>{_field('私钥路径', 'key_path', ph='~/.ssh/prod_key', width='320px')}</div>"
         "</div><div class='row'>"
         f"<div>{_field('known_hosts 路径（可选）', 'known_hosts_path', ph='~/.ssh/known_hosts_prod', width='320px')}</div>"
         "</div>"
-        "<div class='muted' style='margin:4px 0 10px'>同名覆盖即更新。私钥需权限≤600，否则 ssh 会拒绝。</div>"
-        "<button class='btn btn-primary' type='submit'>保存证书</button></form></div>"
+        "<div class='muted' style='margin:4px 0 10px'>同名覆盖即更新。主机/用户/端口留空则由跳板处填写。"
+        "私钥需权限≤600，否则 ssh 会拒绝。</div>"
+        "<button class='btn btn-primary' type='submit'>保存配置</button></form></div>"
     )
 
 
@@ -1280,6 +1305,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 str(f.get("key_path") or "").strip(),
                 str(f.get("known_hosts_path") or "").strip() or None,
                 _caller(req),
+                host=str(f.get("host") or "").strip() or None,
+                user=str(f.get("user") or "").strip() or None,
+                port=str(f.get("port") or "").strip() or None,
             )
         except ConnectionAdminError as e:
             body = (f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>"
