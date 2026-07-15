@@ -879,3 +879,17 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-tab .tconn.env-staging { background: rgba(200,140,20,.2); color: var(--dg-amber); font-weight: 600; }
 .dg-tab .tconn.env-dev { color: #6ea8fe; background: rgba(80,130,240,.15); }
 .dg-tab .tconn.env-local, .dg-tab .tconn.env-none { color: var(--dg-muted); }
+
+/* tab 分组标题栏：同连接一簇，组头带环境色，可点击折叠 */
+.dg-tabgrp-hd { display: flex; align-items: center; gap: 4px; flex: none; cursor: pointer;
+  padding: 0 8px 0 7px; font-size: 11px; color: var(--dg-muted); user-select: none;
+  border-left: 3px solid var(--dg-border); background: var(--dg-panel-2);
+  border-bottom: 1px solid var(--dg-border); white-space: nowrap; }
+.dg-tabgrp-hd:hover { color: var(--dg-text); background: var(--dg-bg); }
+.dg-tabgrp-hd .car { font-size: 9px; opacity: .7; }
+.dg-tabgrp-hd .gnm { font-family: var(--dg-mono); max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.dg-tabgrp-hd .gcount { font-size: 9px; padding: 0 4px; border-radius: 7px; background: var(--dg-border); color: var(--dg-faint); }
+.dg-tabgrp-hd.collapsed { color: var(--dg-faint); }
+.dg-tabgrp-hd.env-prod { border-left-color: var(--dg-red); color: #ff8f8f; }
+.dg-tabgrp-hd.env-staging { border-left-color: #d97706; color: var(--dg-amber); }
+.dg-tabgrp-hd.env-dev { border-left-color: #6ea8fe; }

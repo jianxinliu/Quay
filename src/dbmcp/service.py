@@ -913,6 +913,12 @@ class DbmService:
         schema: str | None = None,
     ) -> dict:
         cfg = self.config.get_connection(project, connection)
+        # 未绑定默认库时的两道防线（否则 SQLAlchemy 反射取默认库为 None → NoneType.replace 崩）：
+        # ① 从「库.表」限定名拆出 schema；② 仍无 schema 且无默认库 → 明确报错引导，而非让它崩
+        if schema is None and "." in table:
+            schema, table = table.split(".", 1)
+        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres"):
+            raise ValueError("此连接未绑定默认库，请用「库名.表名」指定表，或先选择一个库（schema）")
         engine = self.pool.get(project, connection, cfg)
         detail = f"{schema}.{table}" if schema else table
         return self._audited(project, connection, cfg, "describe_table", detail, caller,

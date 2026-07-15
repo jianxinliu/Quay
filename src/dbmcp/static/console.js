@@ -384,6 +384,8 @@
     data: function () {
       return {
         connections: [], workspaces: [], wfs: [], tabs: [], activeId: null,
+        // tab 分组折叠状态（按连接名），持久化到 localStorage
+        tabGroupCollapsed: (function () { try { return JSON.parse(localStorage.getItem("dbm-tabgrp-collapsed") || "{}"); } catch (e) { return {}; } })(),
         clockTick: 0,      // 每 200ms +1，驱动执行计时秒表刷新
         importPlan: null,  // {t, db, workspace, dataset, limit} 导入到分析工作区的内联表单
         importRows: null,  // {t, db, text, header, parsed} 数据导入（CSV/粘贴 → INSERT）
@@ -421,6 +423,16 @@
         var id = this.activeId, ts = this.tabs;
         for (var i = 0; i < ts.length; i++) if (ts[i].id === id) return ts[i];
         return null;
+      },
+      // 编辑区 tab 按连接分组：同连接聚成一簇，组头显示连接名+环境，可折叠（否则 tab 多了太乱）
+      tabGroups: function () {
+        var self = this, order = [], map = {};
+        this.tabs.forEach(function (t) {
+          var key = t.conn || "";
+          if (!(key in map)) { map[key] = { conn: key, tabs: [], meta: self.tabConn(t) }; order.push(key); }
+          map[key].tabs.push(t);
+        });
+        return order.map(function (k) { return map[k]; });
       },
       // 当前 query tab 的书签列表（行号 + 该行 SQL 预览），供左栏「书签」区直接跳转/执行
       bmList: function () {
@@ -779,6 +791,10 @@
           if (t.table) { var k = this.mk(t.table, t.schema); if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema); }
         }
         this.scheduleLint();
+      },
+      toggleTabGroup: function (conn) {
+        this.tabGroupCollapsed[conn] = !this.tabGroupCollapsed[conn];
+        try { localStorage.setItem("dbm-tabgrp-collapsed", JSON.stringify(this.tabGroupCollapsed)); } catch (e) {}
       },
       onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
       onTabDrop: function (targetId) {
@@ -3182,18 +3198,27 @@
       <button class="dg-btn" @click="saveWorkflow" title="把当前脚本/流程图存为可重跑的 workflow">存工作流</button>
     </div>
     <div class="dg-tabs">
-      <div v-for="t in tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId, drag: t.id===dragId}" @click="switchTab(t.id)"
-           @contextmenu="openTabCtx($event, t.id)"
-           draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">
-        <span class="ticon" v-if="t.type==='data'">▦</span><span class="ticon" v-else-if="t.type==='ddl'">≔</span>
-        <input v-if="renamingId===t.id" class="rename-in" v-model="renameVal"
-               @click.stop @keydown.enter="commitRename" @keydown.esc="cancelRename" @blur="commitRename">
-        <span v-else class="nm" @dblclick.stop="beginRename(t.id)" title="双击改名 · 右键更多">{{ t.title }}<span v-if="t.dirty && t.type==='query'" class="dirty" title="有未保存改动">*</span></span>
-        <span class="tconn" :class="'env-'+tabConn(t).env" :title="'连接：'+t.conn">{{ tabConn(t).name }}</span>
-        <span class="pin" :class="{on: t.pinned}" @click.stop="togglePin(t.id)"
-              :title="t.pinned ? '取消固定' : '固定（防误关）'">⚲</span>
-        <span v-if="!t.pinned" class="x" @click.stop="closeTab(t.id)">✕</span>
-      </div>
+      <template v-for="g in tabGroups" :key="g.conn">
+        <div class="dg-tabgrp-hd" :class="['env-'+g.meta.env, {collapsed: tabGroupCollapsed[g.conn]}]"
+             @click="toggleTabGroup(g.conn)" :title="'连接：'+(g.conn||'无')+' · 点击折叠/展开该组'">
+          <span class="car">{{ tabGroupCollapsed[g.conn] ? '▸' : '▾' }}</span>
+          <span class="gnm">{{ g.meta.name }}</span>
+          <span class="gcount">{{ g.tabs.length }}</span>
+        </div>
+        <template v-if="!tabGroupCollapsed[g.conn]">
+          <div v-for="t in g.tabs" :key="t.id" class="dg-tab" :class="{active: t.id===activeId, drag: t.id===dragId}" @click="switchTab(t.id)"
+               @contextmenu="openTabCtx($event, t.id)"
+               draggable="true" @dragstart="onTabDragStart(t.id, $event)" @dragover.prevent @drop="onTabDrop(t.id)" @dragend="dragId=null">
+            <span class="ticon" v-if="t.type==='data'">▦</span><span class="ticon" v-else-if="t.type==='ddl'">≔</span>
+            <input v-if="renamingId===t.id" class="rename-in" v-model="renameVal"
+                   @click.stop @keydown.enter="commitRename" @keydown.esc="cancelRename" @blur="commitRename">
+            <span v-else class="nm" @dblclick.stop="beginRename(t.id)" title="双击改名 · 右键更多">{{ t.title }}<span v-if="t.dirty && t.type==='query'" class="dirty" title="有未保存改动">*</span></span>
+            <span class="pin" :class="{on: t.pinned}" @click.stop="togglePin(t.id)"
+                  :title="t.pinned ? '取消固定' : '固定（防误关）'">⚲</span>
+            <span v-if="!t.pinned" class="x" @click.stop="closeTab(t.id)">✕</span>
+          </div>
+        </template>
+      </template>
       <button class="dg-tab-add" @click="newTab({})" title="新建查询">＋</button>
     </div>
     <div v-if="dropPlan" class="dg-drop">

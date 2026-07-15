@@ -151,6 +151,11 @@ class TestSchemaTools:
         with pytest.raises(ValueError, match="不存在"):
             service.describe_table("demo", "main", "nope", CALLER)
 
+    def test_describe_table_qualified_name_splits_schema(self, service):
+        # 「库.表」限定名应拆出 schema，不整体当表名（sqlite 下 schema 无效但不应崩）
+        info = service.describe_table("demo", "main", "main.users", CALLER)
+        assert [c["name"] for c in info["columns"]] == ["id", "name", "age"]
+
     def test_sample_rows_table_name_not_injectable(self, service):
         with pytest.raises(ValueError, match="不存在"):
             service.sample_rows("demo", "main", "users; DROP TABLE users", 5, CALLER)
