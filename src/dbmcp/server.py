@@ -14,6 +14,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from .agent_format import render_agent_result
 from .approvals import ApprovalError
 from .service import CallerInfo, DbmService, QueryRejected
 
@@ -114,6 +115,10 @@ def build_mcp(service: DbmService) -> FastMCP:
             "——会使索引失效；应改成对常量侧做转换、用范围比较（如 `ts >= 起 AND ts < 止`）。"
             "⑤ execute 支持多语句批量（分号分隔，如 ALTER + 回填 UPDATE 的迁移），"
             "整批一次审批、按语句拆开在同一事务逐条执行。"
+            "⑥ query/sample_rows 返回**紧凑 TSV 文本**（非 JSON，省 token）：顶部 `#` 元信息行 + "
+            "`# types:` 列类型，随后首行列名、其余数据行，制表符分隔，`\\N`=NULL，大整数为字符串。"
+            "结果有**两级硬上限**：行数（默认 1000）+ 字符预算（默认 ≈12k token）；元信息里 "
+            "`truncated=true` 即没给全——**别重复拉全量**，用 WHERE/LIMIT/聚合收窄，或用分析工作台下推计算。"
         ),
     )
 
@@ -136,13 +141,23 @@ def build_mcp(service: DbmService) -> FastMCP:
         connection: str,
         sql: Annotated[str, Field(description="单条只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN）")],
         ctx: Context | None = None,
-    ) -> dict:
-        """在指定连接上执行只读 SQL。结果默认截断到连接策略的 max_rows（默认 1000 行）。
+    ) -> str:
+        """在指定连接上执行只读 SQL，返回紧凑 TSV 文本（比 JSON 省 token）。
 
-        非只读语句（含多语句、CTE 中夹带 DML、SELECT FOR UPDATE 等）会被拒绝并记录审计。
+        输出格式：顶部 `#` 元信息行（`shown=N truncated=bool reason=... elapsed_ms=...`）+
+        `# types:` 列类型行；随后首行是列名、其余是数据行，**制表符分隔**，`\\N` 表示 NULL，
+        值里的 `\\ \\t \\n` 做反斜杠转义。**大整数以字符串返回**（超 2^53 精度安全）。
+
+        结果受两级硬上限：① 行数（连接 max_rows，默认 1000）；② 字符预算
+        （agent_max_result_chars，默认 40000≈12k token）。`truncated=true` 表示没给全——
+        **不要重复拉全量**，改用 WHERE/LIMIT/聚合收窄，或用分析工作台（analysis_*）下推计算。
+
+        非只读语句（含多语句、CTE 中夹带 DML、SELECT FOR UPDATE、SLEEP 等有副作用函数）会被拒绝。
         """
         try:
-            return service.query(project, connection, sql, _caller_from_ctx(ctx))
+            result = service.query(project, connection, sql, _caller_from_ctx(ctx))
+            budget = service.agent_result_budget(project, connection)
+            return render_agent_result(result, budget)
         except (QueryRejected, KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 
@@ -227,10 +242,12 @@ def build_mcp(service: DbmService) -> FastMCP:
         table: str,
         limit: Annotated[int, Field(ge=1, le=100)] = 10,
         ctx: Context | None = None,
-    ) -> dict:
-        """抽样查看表数据（默认 10 行，上限 100 行）。"""
+    ) -> str:
+        """抽样查看表数据（默认 10 行，上限 100 行）。返回紧凑 TSV 文本（格式同 query）。"""
         try:
-            return service.sample_rows(project, connection, table, limit, _caller_from_ctx(ctx))
+            result = service.sample_rows(project, connection, table, limit, _caller_from_ctx(ctx))
+            budget = service.agent_result_budget(project, connection)
+            return render_agent_result(result, budget)
         except (KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 HOUSEKEEPING_INTERVAL_S = 60
 DEFAULT_RETENTION_DAYS = 30
 ADMIN_PAGE_SIZE = 100  # 查询台每页行数（上限受连接 max_rows 约束）
+DEFAULT_AGENT_MAX_RESULT_CHARS = 40000  # agent 结果字符预算的最终兜底（settings 未启用时）
 
 
 class QueryRejected(Exception):
@@ -758,6 +759,13 @@ class DbmService:
 
     def _setting(self, key: str):
         return self.get_settings().get(key)
+
+    def agent_result_budget(self, project: str, connection: str) -> int:
+        """解析给 agent 的结果字符预算：连接级 Policy 优先，否则全局设置兜底。"""
+        cfg = self.config.get_connection(project, connection)
+        if cfg.policy.agent_max_result_chars:
+            return int(cfg.policy.agent_max_result_chars)
+        return int(self._setting("agent_max_result_chars") or DEFAULT_AGENT_MAX_RESULT_CHARS)
 
     # ---------- Redis 浏览 / 命令窗口（管理后台，对标 Medis）----------
 

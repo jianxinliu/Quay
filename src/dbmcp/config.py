@@ -112,6 +112,9 @@ class Policy(BaseModel):
     auto_approve_low_risk_write: bool = False
     # 单元格最大字符数：超长 TEXT/BLOB 截断，防止撑爆 agent 上下文
     max_cell_chars: int = 4096
+    # 给 agent 返回结果的字符预算（≈token×4）；None = 用全局设置兜底。行数上限之外的第二道
+    # 硬限：宽表 200 行也可能几万 token，按序列化后大小截断才真正盯住上下文成本
+    agent_max_result_chars: int | None = None
     # 敏感字段脱敏：内置模式（password/token/secret 等）+ 自定义列名（不区分大小写）
     mask_default_patterns: bool = True
     mask_columns: list[str] = Field(default_factory=list)

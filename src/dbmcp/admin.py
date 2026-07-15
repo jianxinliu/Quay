@@ -671,7 +671,10 @@ def _settings_db_body(s: dict) -> str:
         + _num_setting("结果默认行上限", "sql_max_rows", s, 1000,
                        "缺 LIMIT 的查询自动兜底的行上限、非分页读取的截断上限。")
         + _num_setting("单元格最大字符数", "sql_max_cell_chars", s, 4096,
-                       "超长 TEXT/BLOB 单元格截断的字符数。"))
+                       "超长 TEXT/BLOB 单元格截断的字符数。")
+        + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
+                       "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
+                       "连接级 Policy 可单独覆盖。"))
 
 
 def _settings_redis_body(s: dict) -> str:

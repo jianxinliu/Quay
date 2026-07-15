@@ -78,7 +78,9 @@ async def test_elicitation_deny_rejects(tmp_path):
             # 数据没被删
             q = await c.call_tool("query", {"project": "demo", "connection": "main",
                                             "sql": "SELECT count(*) FROM users"})
-            assert q.data["rows"][0][0] == 2
+            # query 现在返回紧凑 TSV 文本：末行是唯一数据行（count 值）
+            body = [ln for ln in q.data.splitlines() if not ln.startswith("#")]
+            assert body[-1] == "2"
     finally:
         svc.close()
 

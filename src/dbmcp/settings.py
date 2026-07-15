@@ -31,6 +31,8 @@ DEFAULTS: dict[str, object] = {
     # ——操作审计
     "audit_auto_refresh": False,  # 审计页默认是否自动刷新（5s）
     "audit_hide_admin_ui": True,  # 审计页默认是否隐藏 agent=admin-ui 的记录
+    # ——Agent 输出
+    "agent_max_result_chars": 40000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
@@ -43,6 +45,7 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
     "redis_key_limit": (100, 100_000),
     "redis_scan_count": (50, 10_000),
     "redis_min_dbs": (1, 256),
+    "agent_max_result_chars": (2000, 500_000),
 }
 
 _SCHEMA = """
