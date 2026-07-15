@@ -193,6 +193,31 @@ class TestAdminConsole:
         res = service.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)
         assert res["rows"][0][0] == 2
 
+    def test_multi_statement_write_splits_and_executes(self, service):
+        # 多语句批量：run_write 按分号拆开逐条执行（单条 execute 不支持多语句）
+        out = service.admin_run_sql(
+            "demo", "main",
+            "INSERT INTO users (name, age) VALUES ('dave', 40); "
+            "UPDATE users SET age = 41 WHERE name = 'dave'",
+            CALLER, confirm=True,
+        )
+        assert out["kind"] == "write"
+        assert out["affected_rows"] == 2  # 1 插入 + 1 更新，累加
+        res = service.query("demo", "main", "SELECT age FROM users WHERE name='dave'", CALLER)
+        assert res["rows"][0][0] == 41
+
+    def test_multi_statement_without_confirm_returns_batch_risk(self, service):
+        out = service.admin_run_sql(
+            "demo", "main",
+            "UPDATE users SET age=1 WHERE name='alice'; DELETE FROM users WHERE name='bob'",
+            CALLER,
+        )
+        assert out["kind"] == "confirm"
+        assert out["risk"]["statement_kind"] == "MultiStatement"
+        # 未执行：alice 年龄未变、bob 还在
+        res = service.query("demo", "main", "SELECT count(*) AS c FROM users", CALLER)
+        assert res["rows"][0][0] == 3
+
     def test_export_read_result_as_csv(self, service):
         data, media_type, ext = service.admin_export(
             "demo", "main", "SELECT id, name FROM users ORDER BY id", "csv", CALLER

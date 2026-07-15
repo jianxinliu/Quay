@@ -52,6 +52,16 @@ class TestBypassAttemptsRejected:
     def test_multi_statement(self):
         assert not classify("SELECT 1; DROP TABLE t", "mysql").readonly
 
+    def test_multi_statement_classified_as_batch_write(self):
+        # 多语句放行进审批流：非只读、标为 MultiStatement、表名跨语句聚合
+        v = classify(
+            "ALTER TABLE cfg ADD COLUMN c INT; UPDATE cfg SET c=1 WHERE k='a'", "mysql"
+        )
+        assert v.readonly is False
+        assert v.statement_kind == "MultiStatement"
+        assert "cfg" in v.tables
+        assert "多语句" in v.reason
+
     def test_cte_hiding_dml(self):
         # 顶层是 Select，但 CTE 里藏了 INSERT（PG 合法语法）
         sql = "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x"

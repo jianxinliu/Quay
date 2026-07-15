@@ -98,6 +98,22 @@ def build_mcp(service: DbmService) -> FastMCP:
             "人或 agent 沉淀的流程（多语句脚本或后台画布 DAG）用 run_workflow 一键重跑："
             "自动重拉源数据 → 逐步执行 → 返回每步状态与输出，"
             "可用列表见 analysis_workspaces。所有操作都会被审计记录。"
+            "\n【写 SQL 的约定，务必遵守】"
+            "① 时区：本服务不固定数据库会话时区，@@session.time_zone 继承各库设置"
+            "（可能是 UTC+8，也可能是 UTC 或其它）。凡用 FROM_UNIXTIME / UNIX_TIMESTAMP / "
+            "NOW / CURDATE / DATE 等依赖会话时区的函数，先 `SELECT @@session.time_zone` 确认，"
+            "切勿重复叠加时区偏移——典型坑：会话已是 UTC+8 却又手动 +28800，等于 +16h，"
+            "按天分组会把傍晚的数据串到第二天、同一天裂成两行。"
+            "② epoch 秒列按天分组：优先纯算术 `FLOOR((ts+偏移)/86400)` 得 day_idx，"
+            "日期由 day_idx 反推 `DATE_ADD('1970-01-01', INTERVAL day_idx DAY)`，绕开隐式时区，"
+            "day_idx 唯一决定日期、不必把日期再放进 GROUP BY。"
+            "③ 大表 SELECT 必须带 LIMIT 或 WHERE 收窄，别全表拉取。"
+            "④ 尽量走索引：WHERE / JOIN / ORDER BY 的过滤列尽量命中索引，先用 describe_table "
+            "看有哪些索引，不确定就用 query 跑 EXPLAIN（access_type=ALL/table 即全表扫描）。"
+            "别对索引列套函数或运算（如 `DATE(ts)`、`FROM_UNIXTIME(ts)`、`ts+1` 放在 WHERE 左侧）"
+            "——会使索引失效；应改成对常量侧做转换、用范围比较（如 `ts >= 起 AND ts < 止`）。"
+            "⑤ execute 支持多语句批量（分号分隔，如 ALTER + 回填 UPDATE 的迁移），"
+            "整批一次审批、按语句拆开在同一事务逐条执行。"
         ),
     )
 
@@ -134,7 +150,9 @@ def build_mcp(service: DbmService) -> FastMCP:
     async def execute(
         project: str,
         connection: str,
-        sql: Annotated[str, Field(description="要执行的写 SQL（INSERT/UPDATE/DELETE/DDL）")],
+        sql: Annotated[str, Field(description="要执行的写 SQL（INSERT/UPDATE/DELETE/DDL）；"
+                                  "支持多语句批量（分号分隔，如 ALTER + 回填 UPDATE 的迁移），"
+                                  "整批一次审批、按语句拆开在同一事务逐条执行")],
         reason: Annotated[str, Field(description="变更原因，供审批人参考")] = "",
         change_id: Annotated[
             int | None, Field(description="已获批审批单号；批准后带上它重提相同 SQL 即可执行")

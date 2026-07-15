@@ -475,13 +475,24 @@ def run_write(
     """执行写 SQL（调用方必须确保已通过审批），返回受影响行数。事务自动提交。
 
     on_start：拿到连接后回调一次，传入取消函数（KILL QUERY），供串行队列 cancel 中断大写操作。
+
+    多语句批量：按分号拆成单条、在同一事务里逐条执行（pymysql/psycopg 单条 execute
+    不支持多语句），受影响行数为各 DML 语句 rowcount 之和。注意 MySQL 的 DDL 会隐式
+    提交，ALTER+DML 混合批次无法整体回滚（MySQL 本身限制）。
     """
+    from .workflows import split_statements  # 懒加载避免与 workflows 循环导入
+
+    stmts = split_statements(sql) or [sql]
     start = dt.datetime.now()
+    affected = 0
     with engine.begin() as conn:
         if on_start is not None:
             on_start(make_canceller(engine, conn))
-        result = conn.execute(text(sql))
-        affected = result.rowcount if result.rowcount is not None else -1
+        for stmt in stmts:
+            result = conn.execute(text(stmt))
+            rc = result.rowcount if result.rowcount is not None else -1
+            if rc > 0:
+                affected += rc
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
     return QueryResult(columns=[], rows=[], row_count=affected, truncated=False, duration_ms=duration_ms)
 

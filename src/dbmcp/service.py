@@ -650,7 +650,7 @@ class DbmService:
                 f"该操作被评估为需人工授权（风险等级 {report.level}）。"
                 f"已生成审批单 #{change.id}，请通知用户在管理后台审批；"
                 f"批准后带上 change_id={change.id} 重新提交相同 SQL 即可执行。"
-                f"审批单 30 分钟内有效。"
+                f"审批单 60 分钟内有效。"
             ),
         }
 

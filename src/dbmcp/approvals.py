@@ -4,7 +4,7 @@
 - 写操作首次提交 → 生成 pending 审批单（存储完整 SQL + 风险报告）并拒绝 agent；
 - 人在后台 approve / reject；
 - agent 带 change_id 重提 → 校验后执行**审批单里存储的 SQL**（重提文本只作指纹校验）；
-- 审批单一次性核销（consumed），TTL 30 分钟，过期作废。
+- 审批单一次性核销（consumed），TTL 60 分钟，过期作废。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-DEFAULT_TTL_MINUTES = 30
+DEFAULT_TTL_MINUTES = 60
 
 # 状态机：pending → approved → consumed
 #                  ↘ rejected
@@ -224,7 +224,7 @@ class ApprovalStore:
     def purge_old(self, retention_days: int) -> int:
         """删除超过保留期的**终态**审批单（consumed/rejected/expired 及已过期的 pending/approved）。
 
-        未过期的 pending/approved 无论多老都保留（虽然 TTL 30 分钟意味着这不会发生）。
+        未过期的 pending/approved 无论多老都保留（虽然 TTL 60 分钟意味着这不会发生）。
         """
         now = datetime.now(UTC)
         cutoff = (now - timedelta(days=retention_days)).isoformat(timespec="seconds")

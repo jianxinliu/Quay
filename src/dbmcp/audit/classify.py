@@ -64,7 +64,16 @@ def classify(sql: str, engine: str) -> Verdict:
     if not statements:
         return Verdict(False, "空语句")
     if len(statements) > 1:
-        return Verdict(False, "不支持多语句提交，请拆分为单条语句")
+        # 多语句批量：按写操作统一进审批流（安全红线）。逐条评估在 risk.assess，
+        # 执行时按语句拆开单事务逐条跑（engines.run_write）。
+        kinds = [type(s).__name__ for s in statements]
+        tables = sorted({t for s in statements for t in _extract_tables(s)})
+        return Verdict(
+            False,
+            f"多语句批量提交（{len(statements)} 条：{'、'.join(kinds)}），按写操作进审批流",
+            "MultiStatement",
+            tables,
+        )
 
     stmt = statements[0]
     kind = type(stmt).__name__

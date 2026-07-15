@@ -30,6 +30,8 @@ td code{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border
 .sql-toggle:hover{background:#e6faf6;color:var(--accent-ink)}
 .sql-full td{background:#0f141b;padding:0} .sql-full pre{margin:0;border-radius:0;border:none}
 .cell-detail{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;margin-top:2px}
+.detail-toggle:hover{background:#e6faf6;color:var(--accent-ink);border-radius:4px}
+.detail-full td{background:#0f141b;padding:0} .detail-full pre{margin:0;border-radius:0;border:none;white-space:pre-wrap;word-break:break-word}
 .pager{display:flex;align-items:center;gap:14px;margin-top:16px}
 .pager-info{font-size:13px;color:var(--muted)}
 .btn.pg{padding:6px 13px;font-size:13px}

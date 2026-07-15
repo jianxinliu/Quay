@@ -1061,9 +1061,17 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             if r["duration_ms"] is not None:
                 stat.append(f"{r['duration_ms']}ms")
             statline = f"<span class='mono'>{' · '.join(stat)}</span>" if stat else ""
+            # 结果详情：与 SQL 列一致，点击在下方展开完整内容（错误信息常很长）
             detail = r["detail"] or ""
-            dline = (f"<div class='cell-detail' title='{_esc(detail)}'>{_esc(detail[:70])}"
-                     f"{'…' if len(detail) > 70 else ''}</div>") if detail else ""
+            if detail:
+                dtrunc = _esc(detail[:70]) + ("…" if len(detail) > 70 else "")
+                dline = (f"<div class='cell-detail detail-toggle' data-i='{i}' "
+                         f"title='点击展开完整结果'>{dtrunc}</div>")
+                detail_expand = (f"<tr class='detail-full' id='detailfull-{i}' style='display:none'>"
+                                 f"<td colspan='8'><pre>{_esc(detail)}</pre></td></tr>")
+            else:
+                dline = ""
+                detail_expand = ""
             # SQL：点击展开该行下方的格式化完整 SQL
             raw_sql = r["sql"] or ""
             if raw_sql:
@@ -1084,7 +1092,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 f"<td>{_badge(r['status'], _STATUS_COLOR)}</td>"
                 f"<td class='muted mono' style='white-space:nowrap'>{_esc(_fmt_ts(r['ts']))}</td>"
                 f"<td class='muted'>{statline}{dline}</td></tr>"
-                f"{expand_row}"
+                f"{expand_row}{detail_expand}"
             )
         table_rows = "".join(trs) or '<tr><td colspan="8" class="muted">（无匹配记录）</td></tr>'
 
@@ -1146,10 +1154,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             "box.addEventListener('change',function(){"
             "localStorage.setItem('dbm-audit-refresh',box.checked?'1':'0');"
             "if(box.checked)location.reload();else if(t)clearTimeout(t);});}"
-            "document.querySelectorAll('.sql-toggle').forEach(function(c){"
+            "[['.sql-toggle','sqlfull-'],['.detail-toggle','detailfull-']].forEach(function(p){"
+            "document.querySelectorAll(p[0]).forEach(function(c){"
             "c.style.cursor='pointer';c.addEventListener('click',function(){"
-            "var f=document.getElementById('sqlfull-'+c.getAttribute('data-i'));"
-            "if(f)f.style.display=f.style.display==='none'?'table-row':'none';});});"
+            "var f=document.getElementById(p[1]+c.getAttribute('data-i'));"
+            "if(f)f.style.display=f.style.display==='none'?'table-row':'none';});});});"
             "})();</script>"
         )
         return _shell("操作审计", body)

@@ -46,6 +46,26 @@ class TestCritical:
         assert r.level == "CRITICAL" and r.statement_kind == "Unparseable"
 
 
+class TestMultiStatement:
+    """多语句批量：逐条评估、等级取最高、逐条列出理由。"""
+
+    def test_batch_takes_max_level(self):
+        # INSERT(MEDIUM) + DROP(CRITICAL) → 整批 CRITICAL
+        r = assess("INSERT INTO t (a) VALUES (1); DROP TABLE u", "mysql", provider({}))
+        assert r.level == "CRITICAL"
+        assert r.statement_kind == "MultiStatement"
+        assert set(r.tables) == {"t", "u"}
+        # 概要 + 每条一行
+        assert any("多语句批量" in x for x in r.reasons)
+        assert sum(1 for x in r.reasons if x.startswith("[")) == 2
+
+    def test_batch_all_medium(self):
+        r = assess("INSERT INTO t (a) VALUES (1); INSERT INTO t (a) VALUES (2)",
+                   "mysql", provider({}))
+        assert r.level == "MEDIUM"
+        assert r.statement_kind == "MultiStatement"
+
+
 class TestHigh:
     def test_delete_where_unindexed_column(self):
         # WHERE 用了未索引的列 → 可能全表扫描 → HIGH

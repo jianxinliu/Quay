@@ -73,7 +73,11 @@ def _bump(current: str, candidate: str) -> str:
 
 
 def assess(sql: str, engine: str, meta_provider: MetaProvider) -> RiskReport:
-    """评估一条写 SQL 的风险。调用方应已通过 classify 确认这是写操作。"""
+    """评估一条（或多条）写 SQL 的风险。调用方应已通过 classify 确认这是写操作。
+
+    多语句批量：逐条评估后聚合——等级取最高，reasons/warnings 逐条列出，
+    表名合并去重（对应 classify 已放行的多语句进审批流）。
+    """
     dialect = _DIALECTS.get(engine)
     try:
         statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
@@ -85,15 +89,32 @@ def assess(sql: str, engine: str, meta_provider: MetaProvider) -> RiskReport:
             tables=[],
             reasons=["SQL 无法解析，无法评估影响范围，按最高风险处理"],
         )
-    if len(statements) != 1:
-        return RiskReport(
-            level="CRITICAL",
-            statement_kind="MultiStatement",
-            tables=[],
-            reasons=["多语句提交，无法逐条评估，按最高风险处理"],
-        )
+    if not statements:
+        return RiskReport(level="CRITICAL", statement_kind="Empty", tables=[],
+                          reasons=["空语句，无法评估，按最高风险处理"])
+    if len(statements) > 1:
+        return _assess_batch(statements, meta_provider)
+    return _assess_one(statements[0], meta_provider)
 
-    stmt = statements[0]
+
+def _assess_batch(statements: list[exp.Expression], meta_provider: MetaProvider) -> RiskReport:
+    """逐条评估多语句并聚合：等级取最高，逐条列出理由与警告。"""
+    reports = [_assess_one(s, meta_provider) for s in statements]
+    level = "LOW"
+    for r in reports:
+        level = _bump(level, r.level)
+    tables = sorted({t for r in reports for t in r.tables})
+    reasons = [f"多语句批量提交（{len(statements)} 条），逐条评估取最高风险等级 {level}"]
+    for i, r in enumerate(reports, 1):
+        detail = "；".join(r.reasons) if r.reasons else "—"
+        reasons.append(f"[{i}] {r.statement_kind}（{r.level}）：{detail}")
+    warnings = [f"[{i}] {w}" for i, r in enumerate(reports, 1) for w in r.warnings]
+    return RiskReport(level=level, statement_kind="MultiStatement", tables=tables,
+                      reasons=reasons, warnings=warnings)
+
+
+def _assess_one(stmt: exp.Expression, meta_provider: MetaProvider) -> RiskReport:
+    """评估单条已解析语句。"""
     kind = type(stmt).__name__
     tables = sorted({t.name for t in stmt.find_all(exp.Table) if t.name})
     report = RiskReport(level="MEDIUM", statement_kind=kind, tables=tables)
