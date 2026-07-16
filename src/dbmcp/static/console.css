@@ -20,7 +20,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 }
 .side:hover .brand { justify-content: flex-start; padding: 4px 8px 20px !important; }
 .side:hover .brand > div { display: block; }
-.side:hover nav a { font-size: 14px; justify-content: flex-start; padding: 9px 11px !important; }
+.side:hover nav a { font-size: 14px; justify-content: flex-start; gap: 10px !important; padding: 9px 11px !important; }
 .side:hover nav a .nav-count { position: static; transform: none; font-size: 11px; }
 .side:hover .foot a { font-size: 13px; text-align: left; padding: 6px 11px !important; }
 .side:hover .foot a::before { content: ""; }
