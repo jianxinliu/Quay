@@ -32,6 +32,16 @@ flowchart TB
   可视化 DAG 编排 workflow,人和 Agent 都能一键重跑。
 - 🤖 **MCP**:给 Agent 的受控通道。只读直通、写操作走"拒绝—重提 + 人工授权",全程审计。
 
+## 界面一览
+
+**查询台**（DataGrip 风深色 SQL IDE）：库→表→列树、多 tab、光标处执行、分页、结果网格与图表切换。
+
+![查询台 · SQL IDE 与结果网格](assets/screenshots/query-console.png)
+
+结果一键切「图表」——柱/折线/饼/散点 + X/Y/聚合，随 tab 保活、可存进 workflow：
+
+![查询台 · 结果图表](assets/screenshots/query-console-chart.png)
+
 ## 文档地图
 
 | 你是谁 | 看哪份 |

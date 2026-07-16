@@ -39,6 +39,18 @@ flowchart TB
 - 🤖 **MCP**: a controlled channel for agents. Reads pass through; writes go through
   "reject-and-resubmit + human authorization," with everything audited.
 
+## Screenshots
+
+**Query Console** (DataGrip-style dark SQL IDE): database → table → column tree, multiple tabs,
+run-at-cursor, pagination, a result grid, and a chart toggle.
+
+![Query Console — SQL IDE with result grid](assets/screenshots/query-console.png)
+
+One click flips the result into a **chart** — bar / line / pie / scatter with X/Y/aggregation,
+persisted per tab and saveable into a workflow:
+
+![Query Console — result chart](assets/screenshots/query-console-chart.png)
+
 ## Documentation map
 
 | Who you are | What to read |
