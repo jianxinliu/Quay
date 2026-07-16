@@ -499,6 +499,10 @@
       },
       isProd: function () { var m = this.connMeta; return !!m && m.environment === "prod"; },
       isStaging: function () { var m = this.connMeta; return !!m && m.environment === "staging"; },
+      connName: function () {  // 连接名（"project/connection" → connection），prod 写闸门需用户输入匹配
+        var t = this.activeTab; if (!t || !t.conn) return "";
+        return t.conn.split("/").slice(1).join("/") || t.conn;
+      },
       envInfo: function () {
         var m = this.connMeta;
         if (!m || !m.environment) return null;
@@ -1090,13 +1094,18 @@
       confirmDrop: function () {
         var self = this, plan = this.dropPlan, tab = this.activeTab;
         if (!plan || plan.running || !tab) return;
+        // C3：prod 写须连接名匹配（后端强校验，前端先拦一道）
+        var ctext = this.isProd ? ((plan.ctext || "").trim() || null) : null;
+        if (this.isProd && ctext !== this.connName) {
+          this.flash("请输入连接名「" + this.connName + "」以确认生产环境 DROP"); return;
+        }
         plan.running = true; plan.results = [];
         // 逐条执行（每条经 confirm=1，由 writer 执行并落审计 admin_execute）
         var chain = Promise.resolve();
         plan.items.forEach(function (item) {
           chain = chain.then(function () {
             var q = self.qn(item);
-            return apiPost("/admin/sql/run", { conn: tab.conn, sql: "DROP TABLE " + q, confirm: "1" })
+            return apiPost("/admin/sql/run", { conn: tab.conn, sql: "DROP TABLE " + q, confirm: "1", confirm_text: ctext })
               .then(function (d) {
                 plan.results.push({ q: q, ok: !!(d.ok && d.kind === "write"), error: d.error || "" });
               })
@@ -1647,6 +1656,8 @@
         // 同一 tab 已有查询在执行 → 直接拒绝（不排队、不并发），提示先取消
         if (t.running) { this.flash("当前查询仍在执行，请先取消或等待完成"); return; }
         t.isPaging = !!isPage;  // 翻页更新当前结果 tab；否则新执行=新结果 tab
+        // 确认执行：捕获确认元数据（指纹 H1 / prod 连接名 C3），下面 t.confirm 会被清空
+        var confData = confirm ? t.confirm : null;
         var sql;
         if (sqlOverride != null) sql = sqlOverride;
         else if (confirm && t.pendingSql) sql = t.pendingSql;   // 确认执行的是刚才那条
@@ -1683,7 +1694,9 @@
         // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
         apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
                                           page: page, schema: t.schema || null,
-                                          parallel: t.type === "data" ? "1" : null })
+                                          parallel: t.type === "data" ? "1" : null,
+                                          confirm_text: confData ? ((confData.ctext || "").trim() || null) : null,
+                                          expect_fingerprint: confData ? (confData.fingerprint || null) : null })
           .then(function (d) {
             // 连接忙被拒绝 / 其它提交错误 → 作为一个「出错结果页」呈现（不是顶部横幅）
             if (!d.ok) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: d.error }); self.persist(); return; }
@@ -1748,7 +1761,10 @@
           }
           else if (r.kind === "confirm") {
             self.setExecGlyph(t2, "");  // 待人工确认，非终态
-            t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind };
+            // 存下指纹（H1 确认时回传绑定）+ prod 标记与待输入的连接名（C3 二次闸门）
+            t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind,
+                           fingerprint: r.fingerprint || "", prod: !!r.prod,
+                           expectText: r.expect_text || "", ctext: "" };
           }
           else if (r.kind === "write") {
             self.setExecGlyph(t2, "ok");
@@ -1831,7 +1847,15 @@
         this.persist();
         if (t.result && t.view === "chart") this.$nextTick(this.renderChart);
       },
-      confirmRun: function () { if (this.activeTab) this.activeTab.confirm = null; this.run(true); },
+      confirmRun: function () {
+        var t = this.activeTab; if (!t || !t.confirm) return;
+        var c = t.confirm;
+        // C3：prod 写须再次输入连接名匹配（后端也会强校验，这里先拦一道给出清晰提示）
+        if (c.prod && (c.ctext || "").trim() !== (c.expectText || this.connName)) {
+          this.flash("请输入连接名「" + (c.expectText || this.connName) + "」以确认生产环境写操作"); return;
+        }
+        this.run(true);  // run() 会捕获 t.confirm 后再清空，指纹/连接名随请求带出
+      },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
       applyWhere: function () { this.run(false, 0); },
       // ---------- WHERE / ORDER BY 字段提示 ----------
@@ -2182,7 +2206,8 @@
         var res = this.buildPendingStatements(t);
         if (res.err) { this.flash(res.err); return; }
         if (!res.statements.length) { this.flash("无有效改动（新增行至少填一列）"); return; }
-        if (mode === "sql") t.submit = { statements: res.statements, sql: res.statements.join(";\n") + ";" };
+        // prod 写强制走 SQL 预览卡片，以便收集连接名（C3 二次闸门）
+        if (mode === "sql" || this.isProd) t.submit = { statements: res.statements, sql: res.statements.join(";\n") + ";", ctext: "" };
         else this.doSubmit(res.statements);
       },
       cancelSubmit: function () { if (this.activeTab) this.activeTab.submit = null; },
@@ -2190,11 +2215,16 @@
         var t = this.activeTab; if (!t) return;
         var stmts = statements || (t.submit && t.submit.statements);
         if (!stmts || !stmts.length) return;
+        // C3：prod 写须连接名匹配（后端强校验，前端先拦一道）
+        var ctext = this.isProd ? ((t.submit && t.submit.ctext || "").trim() || null) : null;
+        if (this.isProd && ctext !== this.connName) {
+          this.flash("请输入连接名「" + this.connName + "」以确认生产环境写操作"); return;
+        }
         var self = this; t.submit = null; t.submitting = true; t.err = null;
         var chain = Promise.resolve(), fails = [], okc = 0;
         stmts.forEach(function (sql) {
           chain = chain.then(function () {
-            return apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: "1" }).then(function (d) {
+            return apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: "1", confirm_text: ctext }).then(function (d) {
               if (d && d.ok) okc++; else fails.push((d && d.error) || ("失败：" + sql));
             }).catch(function (e) { fails.push("" + e); });
           });
@@ -3236,9 +3266,13 @@
       <div v-if="dropPlan.results" class="res">
         <div v-for="r in dropPlan.results" :key="r.q" :class="r.ok?'okline':'errline'">{{ r.ok?'✓':'✗' }} {{ r.q }} <span v-if="r.error">— {{ r.error }}</span></div>
       </div>
+      <div v-if="!dropPlan.results && isProd" class="dg-prod-gate">
+        ⚠ 生产环境 —— 请输入连接名 <b>{{ connName }}</b> 以确认：
+        <input v-model="dropPlan.ctext" class="dg-imp-in" style="width:180px" placeholder="连接名">
+      </div>
       <div class="acts">
         <template v-if="!dropPlan.results">
-          <button class="dg-btn danger" :disabled="dropPlan.running" @click="confirmDrop">{{ dropPlan.running ? "执行中…" : "确认 DROP" }}</button>
+          <button class="dg-btn danger" :disabled="dropPlan.running || (isProd && (dropPlan.ctext||'').trim() !== connName)" @click="confirmDrop">{{ dropPlan.running ? "执行中…" : "确认 DROP" }}</button>
           <button class="dg-btn" :disabled="dropPlan.running" @click="dropPlan=null">取消</button>
         </template>
         <button v-else class="dg-btn" @click="dropPlan=null">关闭</button>
@@ -3467,7 +3501,15 @@
           <div style="font-size:12px;color:var(--dg-muted)">将用 writer 账号<b>直接执行</b>并记入审计（后台旁路，不进审批单）。</div>
           <div class="kv"><span>影响表：{{ (activeTab.confirm.risk.tables||[]).join(", ")||"—" }}</span><span>表行量级：{{ numOr(activeTab.confirm.risk.row_estimate) }}</span><span>含 WHERE：{{ boolText(activeTab.confirm.risk.has_where) }}</span><span>命中索引：{{ boolText(activeTab.confirm.risk.uses_index) }}</span></div>
           <div class="reasons" v-for="r in (activeTab.confirm.risk.reasons||[])" :key="r">• {{ r }}</div>
-          <div class="acts"><button class="dg-btn ok" @click="confirmRun">确认执行</button><button class="dg-btn" @click="cancelConfirm">取消</button></div>
+          <div v-if="activeTab.confirm.prod" class="dg-prod-gate">
+            ⚠ 生产环境写操作 —— 请输入连接名
+            <b>{{ activeTab.confirm.expectText || connName }}</b> 以确认：
+            <input v-model="activeTab.confirm.ctext" class="dg-imp-in" style="width:180px"
+                   placeholder="连接名" @keydown.enter="confirmRun">
+          </div>
+          <div class="acts"><button class="dg-btn ok"
+            :disabled="activeTab.confirm.prod && (activeTab.confirm.ctext||'').trim() !== (activeTab.confirm.expectText || connName)"
+            @click="confirmRun">确认执行</button><button class="dg-btn" @click="cancelConfirm">取消</button></div>
         </div>
         <div v-if="activeTab.wfSteps && activeTab.wfSteps.length" class="dg-wfsteps">
           <div v-for="(st,si) in activeTab.wfSteps" :key="si" :class="st.ok?'okline':'errline'">
@@ -3484,7 +3526,13 @@
           <h4>确认提交 · {{ activeTab.submit.statements.length }} 条语句</h4>
           <div style="font-size:12px;color:var(--dg-muted)">将由 writer 账号依次执行并记入审计（后台旁路，不进审批单）。</div>
           <pre class="dg-submit-sql">{{ activeTab.submit.sql }}</pre>
-          <div class="acts"><button class="dg-btn ok" @click="doSubmit()">确认提交（writer 执行）</button>
+          <div v-if="isProd" class="dg-prod-gate">
+            ⚠ 生产环境 —— 请输入连接名 <b>{{ connName }}</b> 以确认：
+            <input v-model="activeTab.submit.ctext" class="dg-imp-in" style="width:180px" placeholder="连接名">
+          </div>
+          <div class="acts"><button class="dg-btn ok"
+            :disabled="isProd && (activeTab.submit.ctext||'').trim() !== connName"
+            @click="doSubmit()">确认提交（writer 执行）</button>
             <button class="dg-btn" @click="cancelSubmit">取消</button></div>
         </div>
         <!-- 结果 tab 条：查询 tab 有结果（含出错/取消的结果页）就展示；点结果页只切换展示，关闭不触发重查 -->

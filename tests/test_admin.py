@@ -46,6 +46,20 @@ def client(tmp_path):
     svc.close()
 
 
+def test_foreign_host_blocked_at_guard(client):
+    """C2：非本机 Host（DNS rebinding）在 guard 层被 403 拦下，先于认证。"""
+    tc, _ = client
+    # 已登录、但伪造攻击者 Host → 403（Host 校验先于 auth）
+    r = tc.get("/admin/approvals", headers={"host": "attacker.example.com"})
+    assert r.status_code == 403
+    # 跨站 Origin 的写请求同样被拦
+    w = tc.post("/admin/sql/run", data={"conn": "demo/main", "sql": "SELECT 1"},
+                headers={"origin": "http://evil.com"})
+    assert w.status_code == 403
+    # 正常本机请求（conftest 允许 testserver）仍放行
+    assert tc.get("/admin/approvals").status_code == 200
+
+
 def test_search_tables_and_lint(client):
     """全局表搜索（sqlite sqlite_master LIKE）+ sqlglot 语法检查接口。"""
     tc, svc = client
@@ -566,7 +580,8 @@ class TestAuth:
 class TestConnectionAdminUI:
     def _app(self, tmp_path, monkeypatch):
         # 内存 keyring
-        import sys, types
+        import sys
+        import types
         store = {}
         mod = types.ModuleType("keyring"); errmod = types.ModuleType("keyring.errors")
         errmod.PasswordDeleteError = type("E", (Exception,), {})

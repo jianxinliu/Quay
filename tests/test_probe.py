@@ -5,7 +5,6 @@
 
 import sqlite3
 
-import pytest
 
 from dbmcp.config import ConnectionConfig
 from dbmcp.probe import analyze_mysql_grants, probe_connection, probe_ssh

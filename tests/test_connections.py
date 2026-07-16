@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from dbmcp.config import AppConfig, load_config
+from dbmcp.config import load_config
 from dbmcp.connections import ConnectionAdminError, ConnectionManager, validate_ssh_key_path
 
 

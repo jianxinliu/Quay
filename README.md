@@ -1,3 +1,5 @@
+**简体中文** | [English](README.en.md)
+
 # Quay
 
 **本地数据库工作台 —— 一个入口，让人和 AI Agent 都能安全地用你的所有数据库。**
@@ -29,6 +31,16 @@ flowchart TB
 - 🔬 **分析工作台**:把不同库/文件的数据快照进本地 DuckDB 沙箱自由 JOIN 分析,
   可视化 DAG 编排 workflow,人和 Agent 都能一键重跑。
 - 🤖 **MCP**:给 Agent 的受控通道。只读直通、写操作走"拒绝—重提 + 人工授权",全程审计。
+
+## 界面一览
+
+**查询台**（DataGrip 风深色 SQL IDE）：库→表→列树、多 tab、光标处执行、分页、结果网格与图表切换。
+
+![查询台 · SQL IDE 与结果网格](assets/screenshots/query-console.png)
+
+结果一键切「图表」——柱/折线/饼/散点 + X/Y/聚合，随 tab 保活、可存进 workflow：
+
+![查询台 · 结果图表](assets/screenshots/query-console-chart.png)
 
 ## 文档地图
 

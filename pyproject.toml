@@ -1,8 +1,29 @@
 [project]
 name = "db-manage-mcp"
 version = "0.1.0"
-description = "为 agent 提供数据库访问的 MCP 服务：连接管理、SQL 审计、人工授权、操作审计"
+description = "Quay — a local database workbench with governed access for humans and AI agents: SQL IDE, Redis console, cross-source analysis, and MCP over one connection & security layer (SQL audit, human approval, full operation trail)."
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "jianxinliu", email = "shmilyljx@gmail.com" }]
+keywords = [
+    "mcp", "model-context-protocol", "database", "mysql", "postgresql", "redis",
+    "sql", "duckdb", "ai-agent", "sql-audit", "database-governance", "workbench",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+]
 dependencies = [
     "fastmcp>=2.0",
     "sqlalchemy>=2.0",
@@ -20,6 +41,11 @@ dependencies = [
 [project.optional-dependencies]
 keyring = ["keyring>=25.0"]
 
+[project.urls]
+Homepage = "https://github.com/jianxinliu/Quay"
+Repository = "https://github.com/jianxinliu/Quay"
+Issues = "https://github.com/jianxinliu/Quay/issues"
+
 [project.scripts]
 dbm = "dbmcp.__main__:main"
 
@@ -28,6 +54,8 @@ dev = [
     "anyio>=4.14.1",
     "pytest>=8.0",
     "pytest-anyio>=0.0.0",
+    "ruff>=0.9",
+    "mypy>=1.14",
 ]
 
 [build-system]
@@ -39,3 +67,25 @@ packages = ["src/dbmcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# 默认 select（E/F）已够；豁免本项目有意的写法：
+# E702 单行分号紧凑语句是查询台/前端胶水代码的惯用风格；测试里为局部性偶把 import 放类后。
+ignore = ["E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/dbmcp"]
+# 建立基线：先宽松（第三方库多无 stub、FastMCP/SQLAlchemy 动态），后续可逐步收紧。
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = false
+warn_return_any = false
+disable_error_code = ["annotation-unchecked"]
