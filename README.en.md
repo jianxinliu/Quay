@@ -12,7 +12,7 @@
 
 **English** · [简体中文](README.md)
 
-<img src="assets/screenshots/query-console.png" width="880" alt="Quay query console">
+<img src="assets/screenshots/hero.gif" width="880" alt="Run a query, flip the result into a chart">
 
 </div>
 
@@ -76,7 +76,7 @@ flowchart TB
 
 A dark, DataGrip-style SQL IDE — connect, browse, query, export, all on one screen.
 
-<img src="assets/screenshots/query-console-chart.png" width="820" alt="Flip a result into a chart">
+<img src="assets/screenshots/query-console.png" width="820" alt="Query console: object tree, editor, result grid">
 
 - **Object tree**: database → table → columns/indexes/keys, table size graded in M/G/T; ⌘-select
   tables and batch DROP from the context menu (a red confirm bar stands in the way).
@@ -94,10 +94,15 @@ A write pops a risk report first (which tables, how many rows, index hit or not,
 after you confirm does the writer account run it, with an audit record. This is a backend bypass —
 an agent's writes still go through the approval flow.
 
-## Redis console
+<details>
+<summary><b>🧊 Redis console</b> — a separate page, built against Medis (expand for a screenshot)</summary>
+
+<br>
 
 Key-value and relational models are too far apart to share a console without fighting each other,
 so Redis gets its own page, built against Medis.
+
+<img src="assets/screenshots/redis-console.png" width="820" alt="Redis console: prefix key tree, type badges, key detail">
 
 - Left column, database → key: all logical DBs listed, non-empty ones show a key count; keys form a
   tree by `:` prefix, folders drill down one branch at a time, types carry colored badges.
@@ -107,16 +112,25 @@ so Redis gets its own page, built against Medis.
   `ACL` output are masked.
 - A docs panel on the right follows the cursor, links to redis.io, covers 176 common commands.
 
-## Analysis workbench
+</details>
+
+<details>
+<summary><b>🔬 Analysis workbench</b> — DuckDB cross-source analysis + DAG orchestration (expand for a screenshot)</summary>
+
+<br>
 
 Snapshot data from different databases, tables, and local CSV/Parquet files into a local DuckDB
 sandbox, then JOIN, aggregate, and build views freely. Cross-source analysis goes from "not
 possible" to "one sentence" for an agent — the fetch runs through reader + audit + a row cap, the
 computation stays in the sandbox, and only the small result comes back to the context.
 
+<img src="assets/screenshots/analysis-dag.png" width="820" alt="DAG canvas: fetch → filter → JOIN → aggregate → SQL">
+
 You don't need to write SQL either: click "＋Flow" in the query console, drag nodes (fetch / filter
 / JOIN / aggregate / SQL / output) into a data-flow graph, run it, and watch each node get marked.
 The graph is saved with the workflow so people and agents can re-run it. See **[ANALYSIS.md](ANALYSIS.md)**.
+
+</details>
 
 ## How a write gets through
 

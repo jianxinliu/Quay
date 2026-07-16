@@ -12,7 +12,7 @@
 
 **简体中文** · [English](README.en.md)
 
-<img src="assets/screenshots/query-console.png" width="880" alt="Quay 查询台">
+<img src="assets/screenshots/hero.gif" width="880" alt="查询台：跑一条 SQL，结果一键切图表">
 
 </div>
 
@@ -69,7 +69,7 @@ flowchart TB
 
 DataGrip 式的深色 SQL IDE，连库、看表、查数、导出一屏搞定。
 
-<img src="assets/screenshots/query-console-chart.png" width="820" alt="结果一键切图表">
+<img src="assets/screenshots/query-console.png" width="820" alt="查询台：对象树 + 编辑器 + 结果网格">
 
 - **对象树**：库 → 表 → 列/索引/键，表容量按 M/G/T 分级；⌘ 多选表右键批量 DROP（红色确认条挡一道）。
 - **编辑器**：Monaco 内核，补全认上下文（`FROM` 后补表、`别名.` 补列、`库.` 补表），多语句只跑光标那条，EXPLAIN 出可视化计划树。
@@ -80,22 +80,36 @@ DataGrip 式的深色 SQL IDE，连库、看表、查数、导出一屏搞定。
 写语句先弹风险报告（影响哪些表、多少行、命中索引没、执行计划），确认了才由 writer 账号执行并审计。
 这是后台旁路——agent 的写操作照样得走审批流。
 
-## Redis 控制台
+<details>
+<summary><b>🧊 Redis 控制台</b> —— 对标 Medis 的独立页（点开看截图）</summary>
+
+<br>
 
 键值和关系两套模型差太远，硬塞进查询台只会互相拖累，所以单开一页，对着 Medis 做。
+
+<img src="assets/screenshots/redis-console.png" width="820" alt="Redis 控制台：前缀键树 + 类型徽章 + 键详情">
 
 - 左栏库 → 键：库列全、有数据的标键数；键按 `:` 前缀成树，点文件夹一路钻到底，类型带彩色徽章。
 - 键详情按类型展开，带 TTL / 内存 / 编码；msgpack 值自动解成 JSON。
 - 命令窗口 Monaco，光标行执行；读直通、写要确认；**prod 写命令得再输一遍连接名**；`CONFIG GET` / `ACL` 结果里的密码口令自动打码。
 - 右侧命令文档随光标切，链到 redis.io，覆盖 176 条常用命令。
 
-## 分析工作台
+</details>
+
+<details>
+<summary><b>🔬 分析工作台</b> —— DuckDB 跨源分析 + DAG 编排（点开看截图）</summary>
+
+<br>
 
 把不同库、不同表、本地 CSV/Parquet 的数据快照进本地 DuckDB 沙箱，随便 JOIN、聚合、建视图。
 跨源分析对 agent 从“做不到”变成“一句话”——取数走 reader + 审计 + 行数上限，算在沙箱里，只把小结果带回上下文。
 
+<img src="assets/screenshots/analysis-dag.png" width="820" alt="DAG 画布：取数 → 过滤 → JOIN → 聚合 → SQL">
+
 不会写 SQL 也能搭：查询台点「＋流程」，拖节点（取数 / 过滤 / JOIN / 聚合 / SQL / 输出）连成数据流图，
 一键跑、逐节点标状态，图随 workflow 存，人和 agent 都能重跑。详见 **[ANALYSIS.md](ANALYSIS.md)**。
+
+</details>
 
 ## 写操作怎么放行
 
