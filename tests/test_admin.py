@@ -664,3 +664,33 @@ class TestConnectionAdminUI:
             assert r.status_code == 400
             assert "失败" in r.text
         svc.close()
+
+
+def test_ai_route_gated_when_disabled(client):
+    """AI 未开启时 /admin/sql/ai 直接 403（门禁），不触达 provider。"""
+    tc, _ = client
+    r = tc.post("/admin/sql/ai", data={"conn": "demo/main", "question": "统计用户数"})
+    assert r.status_code == 403
+    assert r.json()["ok"] is False
+
+
+def test_ai_route_generates_when_enabled(client, monkeypatch):
+    """开启后：回填 SQL + 解释 + session_id（用假 ai.generate_sql，不真调 CLI）。"""
+    from dbmcp import ai
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    monkeypatch.setattr(ai, "generate_sql",
+                        lambda **kw: ai.AIResult(sql="SELECT count(*) FROM users",
+                                                 explanation="走全表", session_id="sid-9"))
+    r = tc.post("/admin/sql/ai",
+                data={"conn": "demo/main", "question": "统计用户数",
+                      "tables": '["users"]', "explain": "1"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    # 路由会用 sqlglot 美化 SQL，故断言语义而非精确字符串
+    assert "COUNT(*)" in d["sql"].upper() and "USERS" in d["sql"].upper()
+    assert d["explanation"] == "走全表"
+    assert d["session_id"] == "sid-9"

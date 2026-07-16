@@ -428,6 +428,8 @@
         editorWordWrap: false,  // 系统设置：编辑器自动换行（sql_word_wrap）
         schemaFloatRight: 16,   // schema 浮层距编辑器右缘距离（动态避开 minimap）
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
+        aiEnabled: false,       // 系统设置：AI 辅助写 SQL 是否开启（决定「✨ AI」按钮是否出现）
+        aiPanel: null,          // AI 生成面板：{question, explain, samples, tables, picked, filter, loading, running, error}
       };
     },
     computed: {
@@ -466,6 +468,15 @@
       needsDb: function () {
         var m = this.connMeta;
         return !!m && (m.engine === "mysql" || m.engine === "postgres") && !m.database;
+      },
+      aiFabStyle: function () {
+        // ✨AI 按钮浮在编辑器右上角（对齐 schema 选择器）；有 schema 选择器时左移让位
+        var m = this.connMeta, t = this.activeTab;
+        var hasSchema = !!m && (m.engine === "mysql" || m.engine === "postgres")
+          && t && t.type === "query";
+        // 右缘一律基于 schemaFloatRight（已动态避开 minimap）；有 schema 选择器时再左移让位
+        return { top: "8px", left: "auto",
+                 right: (this.schemaFloatRight + (hasSchema ? 232 : 0)) + "px" };
       },
       filteredDatabases: function () {
         var conn = this.activeTab ? this.activeTab.conn : "";
@@ -864,6 +875,7 @@
         return apiGet("/admin/sql/connections").then(function (d) {
           self.connections = (d && d.connections) || [];
           self.workspaces = (d && d.workspaces) || [];
+          self.aiEnabled = !!(d && d.ai_enabled);
           self.loadWorkflows();
           if (!self.tabs.length) self.newTab({});
           else if (self.activeTab) self.loadTree();
@@ -1054,6 +1066,135 @@
       insertSelect: function (t, db) {
         var q = db ? db + "." + t : t;
         this.insertText("SELECT * FROM " + q + " LIMIT 100;");
+      },
+
+      // ---------- AI 辅助生成 SQL（只生成、不执行；产物插到光标处） ----------
+      openAiPanel: function () {
+        var t = this.activeTab; if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        this.aiPanel = { question: "", explain: false, samples: false,
+                         tables: [], picked: {}, filter: "", loading: true,
+                         running: false, error: "", sessionId: "", turns: [],
+                         mode: "replace", lastRange: null, pos: { left: 10, top: 8 } };
+        var self = this;
+        this.$nextTick(function () {  // 默认停在编辑器右上角（视口坐标，position:fixed）
+          var host = self.$refs.editorEl && self.$refs.editorEl.parentElement;
+          if (host && self.aiPanel) {
+            var r = host.getBoundingClientRect();
+            self.aiPanel.pos.left = Math.max(10, r.right - 448);
+            self.aiPanel.pos.top = r.top + 8;
+          }
+        });
+        this.aiLoadTables();
+      },
+      closeAiPanel: function () { this.aiPanel = null; },
+      aiSchema: function () {
+        var t = this.activeTab; if (!t) return "";
+        return t.schema || this.schemaDefault[t.conn] || "";
+      },
+      aiLoadTables: function () {
+        var self = this, t = this.activeTab; if (!t || !this.aiPanel) return;
+        var qs = "?conn=" + encodeURIComponent(t.conn);
+        var sc = this.aiSchema(); if (sc) qs += "&schema=" + encodeURIComponent(sc);
+        apiGet("/admin/sql/tables" + qs).then(function (d) {
+          if (!self.aiPanel) return;
+          self.aiPanel.loading = false;
+          if (d && d.ok) self.aiPanel.tables = d.tables || [];
+          else self.aiPanel.error = (d && d.error) || "无法加载表列表";
+        }).catch(function (e) {
+          if (self.aiPanel) { self.aiPanel.loading = false; self.aiPanel.error = String(e); }
+        });
+      },
+      aiTogglePick: function (name) {
+        var p = this.aiPanel; if (!p) return;
+        if (p.picked[name]) delete p.picked[name]; else p.picked[name] = true;
+      },
+      aiPickCount: function () { return this.aiPanel ? Object.keys(this.aiPanel.picked).length : 0; },
+      aiVisibleTables: function () {
+        var p = this.aiPanel; if (!p) return [];
+        var f = (p.filter || "").toLowerCase().trim();
+        if (!f) return p.tables;
+        return p.tables.filter(function (t) { return t.toLowerCase().indexOf(f) >= 0; });
+      },
+      aiWrapComment: function (expl) {
+        // 解释以 -- 注释写在 SQL 上方：完整展示（不截断），按 ~40 字折行，但不切断英文单词/标识符。
+        // 切成单元：ASCII 词/数字/标识符整体保留，中文与标点逐字符——这样只在单元之间断行。
+        var width = 40;
+        var txt = (expl || "").replace(/\s+/g, " ").trim();
+        if (!txt) return "";
+        var units = txt.match(/[A-Za-z0-9_.]+|\s|[^\sA-Za-z0-9_.]/g) || [];
+        var lines = [], cur = "";
+        units.forEach(function (u) {
+          if (u === " ") { if (cur) cur += " "; return; }
+          if (cur.length + u.length > width && cur.length) { lines.push(cur); cur = ""; }
+          cur += u;
+        });
+        if (cur) lines.push(cur);
+        return lines.map(function (l) { return "-- " + l.replace(/\s+$/, ""); }).join("\n") + "\n";
+      },
+      aiDragStart: function (e) {
+        var p = this.aiPanel; if (!p) return;
+        var sx = e.clientX, sy = e.clientY, sl = p.pos.left, st = p.pos.top;
+        function move(ev) {
+          p.pos.left = Math.max(0, sl + ev.clientX - sx);
+          p.pos.top = Math.max(0, st + ev.clientY - sy);
+        }
+        function up() {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+        }
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+      },
+      aiInsertAt: function (text, range) {
+        // range=null 插到光标处；否则替换该区间。返回插入后文本所占的新区间。
+        if (!editor) return null;
+        var mono = window.monaco;
+        var r = range ? new mono.Range(range.startLineNumber, range.startColumn,
+                                       range.endLineNumber, range.endColumn)
+                      : editor.getSelection();
+        var sl = r.startLineNumber, sc = r.startColumn;
+        editor.executeEdits("dbm-ai", [{ range: r, text: text, forceMoveMarkers: true }]);
+        var lines = text.split("\n");
+        var el = sl + lines.length - 1;
+        var ec = lines.length === 1 ? sc + text.length : lines[lines.length - 1].length + 1;
+        editor.focus();
+        return { startLineNumber: sl, startColumn: sc, endLineNumber: el, endColumn: ec };
+      },
+      aiGenerate: function () {
+        var self = this, p = this.aiPanel, t = this.activeTab;
+        if (!p || !t || p.running) return;
+        var q = (p.question || "").trim();
+        if (!q) { p.error = "请填写你想查什么"; return; }
+        var picked = Object.keys(p.picked);
+        p.running = true; p.error = "";
+        var body = { conn: t.conn, question: q,
+                     tables: JSON.stringify(picked),
+                     explain: p.explain ? "1" : null,
+                     include_samples: p.samples ? "1" : null,
+                     session_id: p.sessionId || null };
+        var sc = this.aiSchema(); if (sc) body.schema = sc;
+        apiPost("/admin/sql/ai", body).then(function (d) {
+          if (!self.aiPanel) return;
+          p.running = false;
+          if (!d || !d.ok) { p.error = (d && d.error) || "生成失败"; return; }
+          var text = "";
+          if (p.explain && d.explanation) text = self.aiWrapComment(d.explanation);
+          text += (d.sql || "").replace(/\s+$/, "") + "\n";
+          // 首轮：插到光标处。追问：按选择「替换上一条」或「追加在后面」。
+          if (p.sessionId && p.lastRange && p.mode === "replace") {
+            p.lastRange = self.aiInsertAt(text, p.lastRange);
+          } else if (p.sessionId && p.lastRange && p.mode === "append") {
+            var end = { startLineNumber: p.lastRange.endLineNumber, startColumn: p.lastRange.endColumn,
+                        endLineNumber: p.lastRange.endLineNumber, endColumn: p.lastRange.endColumn };
+            p.lastRange = self.aiInsertAt("\n" + text, end);
+          } else {
+            p.lastRange = self.aiInsertAt(text, null);
+          }
+          // 保持会话：记录本轮、带回 session_id，面板不关，可继续追问
+          p.turns.push(q);
+          if (d.session_id) p.sessionId = d.session_id;
+          p.question = "";
+        }).catch(function (e) { if (self.aiPanel) { p.running = false; p.error = String(e); } });
       },
 
       // ---------- 表右键菜单 / 批量 DROP ----------
@@ -3331,6 +3472,45 @@
     <div class="dg-editor-row" v-show="activeTab && activeTab.type!=='data' && activeTab.type!=='flow'" :style="editorRowStyle">
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
         <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>
+        <button v-if="aiEnabled && !aiPanel && activeTab && activeTab.type==='query'"
+                class="dg-ai-fab" :style="aiFabStyle" @click="openAiPanel"
+                title="用 AI 按表结构生成 SQL（插入光标处，不执行）">✨ AI</button>
+        <!-- AI 生成面板：可拖动的浮层小卡片，浮在编辑器上（position:absolute，不挤占编辑区） -->
+        <div v-if="aiPanel" class="dg-ai-pop" :style="{left: aiPanel.pos.left + 'px', top: aiPanel.pos.top + 'px'}">
+          <div class="dg-ai-head" @mousedown="aiDragStart"><span class="t">✨ AI 生成 SQL</span>
+            <span class="x" @mousedown.stop @click="closeAiPanel" :title="aiPanel.turns.length ? '完成' : '关闭'">✕</span></div>
+          <div v-if="aiPanel.turns.length" class="dg-ai-turns">
+            <div v-for="(qt,qi) in aiPanel.turns" :key="qi" class="row">{{ qi+1 }}. {{ qt }} ✓</div>
+          </div>
+          <textarea class="dg-ai-q" v-model="aiPanel.question" rows="2" spellcheck="false"
+                    :placeholder="aiPanel.sessionId ? '继续追问，例如：改成按周分组' : '描述你想查什么，例如：每天新增订单数'"
+                    @keydown.meta.enter.stop="aiGenerate" @keydown.ctrl.enter.stop="aiGenerate"></textarea>
+          <div class="dg-ai-scope" v-if="!aiPanel.sessionId">
+            <div class="dg-ai-scope-hd">
+              <span>表 · 已选 {{ aiPickCount() }}（不选=整库）</span>
+              <input v-model="aiPanel.filter" placeholder="筛选…" class="dg-ai-filter">
+            </div>
+            <div v-if="aiPanel.loading" class="dg-ai-empty">加载表…</div>
+            <div v-else-if="aiPanel.tables.length" class="dg-ai-tables">
+              <label v-for="tb in aiVisibleTables()" :key="tb" class="dg-ai-tbl">
+                <input type="checkbox" :checked="!!aiPanel.picked[tb]" @change="aiTogglePick(tb)"> {{ tb }}
+              </label>
+            </div>
+            <div v-else class="dg-ai-empty">（无法列表，可整库生成或先选 schema）</div>
+          </div>
+          <div v-if="aiPanel.sessionId" class="dg-ai-mode">
+            <span>插入：</span>
+            <label><input type="radio" value="replace" v-model="aiPanel.mode"> 替换上一条</label>
+            <label><input type="radio" value="append" v-model="aiPanel.mode"> 追加在后面</label>
+          </div>
+          <div class="dg-ai-foot">
+            <label class="dg-ai-opt"><input type="checkbox" v-model="aiPanel.explain"> 解释思路</label>
+            <label class="dg-ai-opt" v-if="!aiPanel.sessionId"><input type="checkbox" v-model="aiPanel.samples"> 样本行</label>
+            <span class="sp"></span>
+            <button class="dg-btn run" :disabled="aiPanel.running" @click="aiGenerate">{{ aiPanel.running ? "生成中…" : (aiPanel.sessionId ? "追问 ⌘↵" : "生成 ⌘↵") }}</button>
+          </div>
+          <div v-if="aiPanel.error" class="dg-ai-err">{{ aiPanel.error }}</div>
+        </div>
         <!-- 执行中浮条：计时 + 取消（取消运行中的查询会向 DB 发 KILL）。执行状态图标在语句行左侧字形边栏 -->
         <div v-if="activeTab && activeTab.running" class="dg-run-pill">
           <span class="dg-run-ico">⟳</span>

@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import html
+import json
 import os
 from collections.abc import Awaitable, Callable
 from functools import wraps
@@ -648,6 +649,7 @@ def _redis_body() -> str:
 
 
 _SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
+                  ("ai", "AI 助手"),
                   ("connections", "连接管理"), ("ssh", "SSH 配置"), ("info", "系统信息")]
 
 _SETTINGS_SUBMIT_JS = """<script>
@@ -727,6 +729,43 @@ def _settings_db_body(s: dict) -> str:
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
                        "连接级 Policy 可单独覆盖。"))
+
+
+def _text_setting(label: str, name: str, s: dict, default: str, hint: str,
+                  width: str = "260px") -> str:
+    return ("<div style='margin-bottom:16px'>"
+            + _field(label, name, s.get(name, default), ph=str(default), width=width)
+            + f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
+
+
+def _settings_ai_body(s: dict) -> str:
+    provider = s.get("ai_provider", "claude")
+
+    def psel(v: str) -> str:
+        return " selected" if provider == v else ""
+
+    prompt = _esc(s.get("ai_sql_prompt", ""))
+    return _settings_form(
+        _bool_setting("启用 AI 辅助写 SQL", "ai_enabled", s, False,
+                      "启用", "关闭（默认）",
+                      "开启后查询台会出现「✨ AI」按钮；产物只回填编辑器、绝不自动执行。")
+        + "<div style='margin-bottom:16px'><label>AI 后端</label>"
+        + "<select name='ai_provider' style='width:200px'>"
+        + f"<option value='claude'{psel('claude')}>Claude CLI（claude -p）</option>"
+        + f"<option value='codex'{psel('codex')}>CodeX CLI（codex exec）</option></select>"
+        + "<div class='muted' style='margin-top:4px'>调用本机命令行 AI（需已安装并登录）。</div></div>"
+        + _text_setting("CLI 路径", "ai_cli_path", s, "",
+                        "留空则用后端默认二进制名（claude / codex）；如不在 PATH 中可填绝对路径。")
+        + _text_setting("模型", "ai_model", s, "claude-sonnet-5",
+                        "Claude 用 claude-*（如 claude-sonnet-5）；CodeX 用其账号支持的模型名。")
+        + _num_setting("生成超时（秒）", "ai_timeout_s", s, 60,
+                       "单次生成的最长等待时间，10–600 之间。")
+        + _num_setting("最大表数", "ai_max_tables", s, 40,
+                       "「整库」模式下最多把多少张表的结构发给 AI，超出会要求你勾选具体表（1–200）。")
+        + "<div style='margin-bottom:16px'><label>系统提示词</label>"
+        + f"<textarea name='ai_sql_prompt' rows='12' style='width:100%'>{prompt}</textarea>"
+        + "<div class='muted' style='margin-top:4px'>发给 AI 的系统提示（角色设定 + SQL 约束）。"
+        + "清空并保存即恢复默认。</div></div>")
 
 
 def _settings_redis_body(s: dict) -> str:
@@ -1512,7 +1551,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                 workspaces = [w["workspace"] for w in service.analysis.list_workspaces()]
             except Exception:
                 workspaces = []
-        return JSONResponse({"ok": True, "connections": conns, "workspaces": workspaces})
+        return JSONResponse({"ok": True, "connections": conns, "workspaces": workspaces,
+                             "ai_enabled": bool(service.get_settings().get("ai_enabled"))})
 
     @mcp.custom_route("/admin/sql/databases", methods=["GET"])
     @guard
@@ -1692,6 +1732,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             content = _settings_db_body(s)
         elif tab == "redis":
             content = _settings_redis_body(s)
+        elif tab == "ai":
+            content = _settings_ai_body(s)
         elif tab == "info":
             content = _settings_info_body(service, req)
         else:
@@ -1894,6 +1936,38 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "ddl": ddl})
+
+    @mcp.custom_route("/admin/sql/ai", methods=["POST"])
+    @guard
+    async def _sql_ai(req: Request) -> JSONResponse:
+        """让命令行 AI 按表结构 + 需求生成一条 SQL。只返回文本、前端回填编辑器，不执行。"""
+        from .service import QueryRejected
+        if not service.get_settings().get("ai_enabled"):
+            return JSONResponse({"ok": False, "error": "AI 辅助未开启"}, status_code=403)
+        f = await req.form()
+        question = str(f.get("question") or "")
+        schema = str(f.get("schema") or "").strip() or None
+        explain = str(f.get("explain") or "") in ("1", "on", "true")
+        samples = str(f.get("include_samples") or "") in ("1", "on", "true")
+        session_id = str(f.get("session_id") or "").strip() or None
+        try:
+            tables = json.loads(str(f.get("tables") or "[]"))
+            tables = [str(t).strip() for t in tables if str(t).strip()] or None
+        except (ValueError, TypeError):
+            tables = None
+        caller = _caller(req)
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            out = await anyio.to_thread.run_sync(
+                lambda: service.ai_generate_sql(
+                    project, connection, question, caller, schema=schema, tables=tables,
+                    explain=explain, include_samples=samples, session_id=session_id))
+        except (QueryRejected, KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        # 美化 SQL 再回给前端（AI 常吐一长条）；解析失败则原样返回
+        engine = service.config.get_connection(project, connection).engine
+        out["sql"] = _format_sql(out.get("sql") or "", engine)
+        return JSONResponse({"ok": True, **out})
 
     # 异步查询任务：查询在服务端串行队列执行，页面切走/刷新不中断；前端凭 job_id
     # 轮询取结果（job_id 持久化在前端状态里，切回来自动续接）。结果保留 10 分钟。

@@ -47,6 +47,18 @@ def _is_no_database_error(e: Exception) -> bool:
     )
 
 
+def _rows_to_text(columns: list[str], rows: list[list], max_rows: int = 5) -> str:
+    """把样本行拼成紧凑 TSV（喂 AI 用）：首行列名，其余数据行，制表符分隔，None→\\N。"""
+    def cell(v: object) -> str:
+        if v is None:
+            return "\\N"
+        return str(v).replace("\t", " ").replace("\n", " ")
+    lines = ["\t".join(columns)]
+    for row in rows[:max_rows]:
+        lines.append("\t".join(cell(v) for v in row))
+    return "\n".join(lines)
+
+
 @dataclass
 class CallerInfo:
     agent: str = "unknown"
@@ -1002,6 +1014,79 @@ class DbmService:
         detail = f"{schema}.{table}" if schema else table
         return self._audited(project, connection, cfg, "table_ddl", detail, caller,
                              lambda: engines.get_table_ddl(engine, cfg.engine, table, schema))
+
+    def ai_generate_sql(
+        self, project: str, connection: str, question: str, caller: CallerInfo,
+        *, schema: str | None = None, tables: list[str] | None = None,
+        explain: bool = False, include_samples: bool = False,
+        session_id: str | None = None,
+    ) -> dict:
+        """让命令行 AI 按表结构 + 自然语言需求生成一条 SQL。只生成、不执行。
+
+        tables 为空 = 「整库」模式：列出该库的表（超 ai_max_tables 报错要求收窄）。
+        include_samples 时附少量样本行帮助 AI 理解数据形态。
+        session_id 非空 = 追问：续接同一会话、不重发表结构。返回 {sql, explanation, session_id}。
+        """
+        from . import ai
+
+        s = self.get_settings()
+        if not s.get("ai_enabled"):
+            raise QueryRejected("AI 辅助未开启，请在系统设置中开启")
+        question = (question or "").strip()
+        if not question:
+            raise QueryRejected("请填写你想查什么")
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine not in ("mysql", "postgres", "sqlite"):
+            raise QueryRejected(f"连接引擎 {cfg.engine} 暂不支持 AI 生成 SQL")
+        engine = self.pool.get(project, connection, cfg)
+        max_tables = int(s.get("ai_max_tables") or 40)
+
+        def _run() -> dict:
+            ddls: list[tuple[str, str]] = []
+            samples: dict[str, str] | None = None
+            if not session_id:  # 首轮才收集表结构；追问续接会话、上下文已在 AI 侧
+                names = list(tables or [])
+                if not names:  # 整库：列出全部表
+                    names = engines.list_tables(engine, schema)
+                if not names:
+                    raise QueryRejected("该库没有可用的表")
+                if len(names) > max_tables:
+                    raise QueryRejected(
+                        f"待发送的表有 {len(names)} 张，超过上限 {max_tables}；请勾选具体的表，"
+                        "或在系统设置调大「最大表数」")
+                for t in names:
+                    tbl_schema, tbl = (t.split(".", 1) if "." in t else (schema, t))
+                    ddls.append((tbl, engines.get_table_ddl(engine, cfg.engine, tbl, tbl_schema)))
+                if include_samples:
+                    samples = {}
+                    for t in names:
+                        tbl_schema, tbl = (t.split(".", 1) if "." in t else (schema, t))
+                        try:
+                            r = engines.sample_rows(engine, tbl, 5,
+                                                    max_cell_chars=cfg.policy.max_cell_chars)
+                            samples[tbl] = _rows_to_text(r.columns, r.rows)
+                        except Exception:  # 样本拿不到不阻断生成
+                            continue
+            result = ai.generate_sql(
+                system_prompt=str(s.get("ai_sql_prompt") or ai.DEFAULT_SQL_PROMPT),
+                dialect=cfg.engine, ddls=ddls, question=question,
+                explain=explain, samples=samples,
+                provider=str(s.get("ai_provider") or "claude"),
+                model=str(s.get("ai_model") or ""),
+                timeout=int(s.get("ai_timeout_s") or 60),
+                cli_path=str(s.get("ai_cli_path") or ""),
+                session_id=session_id)
+            if not result.sql.strip():
+                raise QueryRejected("AI 未能生成 SQL，请补充需求描述后重试")
+            return {"sql": result.sql, "explanation": result.explanation,
+                    "session_id": result.session_id}
+
+        tool = "ai_followup_sql" if session_id else "ai_generate_sql"
+        try:
+            return self._audited(project, connection, cfg, tool,
+                                 question[:2000], caller, _run)
+        except ai.AIError as e:
+            raise QueryRejected(str(e)) from e
 
     def sample_rows(self, project: str, connection: str, table: str, limit: int, caller: CallerInfo) -> dict:
         cfg = self.config.get_connection(project, connection)

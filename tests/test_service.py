@@ -303,3 +303,79 @@ class TestNoDatabaseHint:
         assert "note" in conns["nodb"] and "全限定" in conns["nodb"]["note"]
         assert "note" not in conns["withdb"]
         svc.close()
+
+
+class TestAiGenerateSql:
+    """AI 生成 SQL：门禁、首轮收集 DDL、追问续接、审计（用假 ai.generate_sql，不真调 CLI）。"""
+
+    def _enable_ai(self, service, **over):
+        from dbmcp.settings import SettingsStore
+        service.settings = SettingsStore(":memory:")
+        service.save_settings({"ai_enabled": "true", **over})
+
+    def test_disabled_rejects(self, service):
+        with pytest.raises(QueryRejected, match="未开启"):
+            service.ai_generate_sql("demo", "main", "统计用户数", CALLER)
+
+    def test_empty_question_rejects(self, service):
+        self._enable_ai(service)
+        with pytest.raises(QueryRejected, match="想查什么"):
+            service.ai_generate_sql("demo", "main", "  ", CALLER)
+
+    def test_first_turn_gathers_ddl_and_audits(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+        captured = {}
+
+        def fake_gen(**kw):
+            captured.update(kw)
+            return ai.AIResult(sql="SELECT count(*) FROM users", explanation="走全表",
+                               session_id="sid-1")
+        monkeypatch.setattr(ai, "generate_sql", fake_gen)
+        out = service.ai_generate_sql("demo", "main", "统计用户数", CALLER,
+                                      tables=["users"], explain=True)
+        # 首轮把 users 的建表语句发给了 AI
+        ddl_names = [n for n, _ in captured["ddls"]]
+        assert "users" in ddl_names
+        assert "CREATE TABLE" in captured["ddls"][0][1]
+        assert captured["session_id"] is None
+        assert out == {"sql": "SELECT count(*) FROM users",
+                       "explanation": "走全表", "session_id": "sid-1"}
+        # 落审计
+        recs = service.store.recent(filters={"tool": "ai_generate_sql"})
+        assert recs and recs[0]["status"] == "ok"
+
+    def test_followup_skips_ddl_and_passes_session(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+        captured = {}
+
+        def fake_gen(**kw):
+            captured.update(kw)
+            return ai.AIResult(sql="SELECT count(*) FROM users WHERE age>20",
+                               explanation="", session_id="sid-1")
+        monkeypatch.setattr(ai, "generate_sql", fake_gen)
+        service.ai_generate_sql("demo", "main", "只看成年人", CALLER, session_id="sid-1")
+        assert captured["ddls"] == []          # 追问不重发表结构
+        assert captured["session_id"] == "sid-1"
+        recs = service.store.recent(filters={"tool": "ai_followup_sql"})
+        assert recs and recs[0]["status"] == "ok"
+
+    def test_too_many_tables_rejects_before_ddl(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service, ai_max_tables="1")
+        monkeypatch.setattr(ai, "generate_sql",
+                            lambda **kw: pytest.fail("不该调到 AI"))
+        with pytest.raises(QueryRejected, match="超过上限"):
+            service.ai_generate_sql("demo", "main", "q", CALLER,
+                                    tables=["users", "another"])
+
+    def test_ai_error_becomes_query_rejected(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+
+        def boom(**kw):
+            raise ai.AIError("claude 返回错误：403")
+        monkeypatch.setattr(ai, "generate_sql", boom)
+        with pytest.raises(QueryRejected, match="403"):
+            service.ai_generate_sql("demo", "main", "q", CALLER, tables=["users"])
