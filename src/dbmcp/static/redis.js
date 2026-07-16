@@ -23,14 +23,24 @@
     window.require(["vs/editor/editor.main"], function () { monacoReady = true; cb(); });
   }
 
+  // 只在响应确为 JSON 时解析；否则（登录页/错误页 HTML 等）转成可读错误对象，
+  // 避免对 "<!doctype ..." 直接 r.json() 抛出「Unexpected token '<'」误导用户。
+  function parseApi(r) {
+    if ((r.headers.get("content-type") || "").indexOf("application/json") !== -1) return r.json();
+    return r.text().then(function () {
+      var msg = r.status === 401 ? "登录已过期，请刷新页面重新登录"
+              : r.status === 403 ? "请求被拒绝：管理后台只能从本机访问"
+              : "服务返回了非预期响应（HTTP " + (r.status || "?") + "），请刷新页面重试";
+      return { ok: false, error: msg };
+    });
+  }
   function apiGet(url) {
-    return fetch(url, { headers: { Accept: "application/json" } }).then(function (r) { return r.json(); });
+    return fetch(url, { headers: { Accept: "application/json" } }).then(parseApi);
   }
   function apiPost(url, obj) {
     var fd = new FormData();
     for (var k in obj) if (obj[k] != null) fd.append(k, obj[k]);
-    return fetch(url, { method: "POST", headers: { Accept: "application/json" }, body: fd })
-      .then(function (r) { return r.json(); });
+    return fetch(url, { method: "POST", headers: { Accept: "application/json" }, body: fd }).then(parseApi);
   }
 
   var TYPE_COLOR = {
