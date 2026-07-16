@@ -43,6 +43,15 @@ def _authed(req: Request, expected_cookie: str) -> bool:
     return bool(got) and hmac.compare_digest(got, expected_cookie)
 
 
+def _wants_json(req: Request) -> bool:
+    """请求是否来自前端 fetch（期望 JSON）而非浏览器页面导航。
+    查询台/Redis 控制台的 apiGet/apiPost 都带 Accept: application/json；
+    对这类请求鉴权失败应返回 JSON 401，而不是 303 到 HTML 登录页——
+    否则 fetch 静默跟随重定向拿到登录页 HTML，前端 r.json() 报出
+    「Unexpected token '<', "<!doctype "... is not valid JSON」的误导错误。"""
+    return "application/json" in req.headers.get("accept", "")
+
+
 # 本地进程模式下管理后台只应从本机访问。校验 Host / Origin 防两类攻击：
 #   - DNS rebinding：恶意网页把自家域名解析到 127.0.0.1，浏览器带的是攻击者的 Host。
 #   - 跨站状态变更（CSRF）：SameSite=Lax 已挡多数场景，Origin 校验作为纵深防御补齐写请求。
@@ -961,9 +970,19 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         @wraps(handler)
         async def _wrapped(req: Request) -> Response:
             if not _local_request_ok(req):
+                if _wants_json(req):
+                    return JSONResponse(
+                        {"ok": False, "error": "请求被拒绝：管理后台只能从本机访问"},
+                        status_code=403)
                 return Response("forbidden: request must originate from localhost",
                                 status_code=403)
             if not _authed(req, expected_cookie):
+                # 前端 fetch 期望 JSON → 返回 401 JSON（前端据此提示重新登录）；
+                # 浏览器页面导航 → 仍 303 到登录页。
+                if _wants_json(req):
+                    return JSONResponse(
+                        {"ok": False, "error": "登录已过期，请刷新页面重新登录"},
+                        status_code=401)
                 return RedirectResponse(url="/admin/login", status_code=303)
             return await handler(req)
         return _wrapped

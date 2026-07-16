@@ -550,6 +550,25 @@ class TestAuth:
                 assert r.headers["location"] == "/admin/login"
         svc.close()
 
+    def test_unauthenticated_api_call_returns_json_401(self, tmp_path):
+        """前端 fetch（Accept: application/json）鉴权失败 → 401 JSON，而非 303 到登录页 HTML。
+        回归：会话过期时查询台 POST 会被静默重定向拿到登录页 HTML，
+        前端 r.json() 报出「Unexpected token '<', "<!doctype "...」的误导错误。"""
+        svc, mcp = self._fresh_app(tmp_path)
+        with TestClient(mcp.http_app()) as tc:
+            r = tc.post("/admin/sql/run_async",
+                        data={"conn": "demo/main", "sql": "SELECT 1"},
+                        headers={"Accept": "application/json"},
+                        follow_redirects=False)
+            assert r.status_code == 401
+            assert "application/json" in r.headers.get("content-type", "")
+            body = r.json()
+            assert body["ok"] is False and "登录" in body["error"]
+            # 页面导航（非 JSON）仍走 303 到登录页
+            nav = tc.get("/admin/sql", follow_redirects=False)
+            assert nav.status_code == 303 and nav.headers["location"] == "/admin/login"
+        svc.close()
+
     def test_wrong_token_rejected(self, tmp_path):
         svc, mcp = self._fresh_app(tmp_path)
         with TestClient(mcp.http_app()) as tc:
