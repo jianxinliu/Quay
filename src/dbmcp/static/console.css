@@ -8,7 +8,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .side .brand { padding: 0 0 16px !important; justify-content: center; }
 .side .brand > div { display: none; }
 .side .brand svg { width: 26px !important; height: 26px !important; }
-.side nav a { font-size: 0; justify-content: center; padding: 11px 0 !important; }
+.side nav a { font-size: 0; justify-content: center; gap: 0 !important; padding: 11px 0 !important; }
 .side nav a .nico { width: 19px; height: 19px; opacity: .9; }
 .side nav a .nav-count { font-size: 10px; position: absolute; transform: translate(10px, -8px); }
 .side nav a { position: relative; }
@@ -20,7 +20,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 }
 .side:hover .brand { justify-content: flex-start; padding: 4px 8px 20px !important; }
 .side:hover .brand > div { display: block; }
-.side:hover nav a { font-size: 14px; justify-content: flex-start; padding: 9px 11px !important; }
+.side:hover nav a { font-size: 14px; justify-content: flex-start; gap: 10px !important; padding: 9px 11px !important; }
 .side:hover nav a .nav-count { position: static; transform: none; font-size: 11px; }
 .side:hover .foot a { font-size: 13px; text-align: left; padding: 6px 11px !important; }
 .side:hover .foot a::before { content: ""; }
