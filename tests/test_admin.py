@@ -580,7 +580,8 @@ class TestAuth:
 class TestConnectionAdminUI:
     def _app(self, tmp_path, monkeypatch):
         # 内存 keyring
-        import sys, types
+        import sys
+        import types
         store = {}
         mod = types.ModuleType("keyring"); errmod = types.ModuleType("keyring.errors")
         errmod.PasswordDeleteError = type("E", (Exception,), {})

@@ -28,7 +28,7 @@ from .approvals import ApprovalError
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
-    from .service import DbmService
+    from .service import CallerInfo, DbmService
 
 _COOKIE_NAME = "dbm_admin"
 
@@ -1224,7 +1224,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             + _sel("agent", "agent", service.store.distinct_values("agent"))
             + _sel("status", "状态", status_opts)
             + f"<input type='hidden' name='limit' value='{limit}'>"
-            + (f"<input type='hidden' name='show_admin' value='1'>" if show_admin else "")
+            + ("<input type='hidden' name='show_admin' value='1'>" if show_admin else "")
             + "<a href='/admin/audit' style='margin-left:4px'>清除</a>"
             + (f"<a href='{_esc('/admin/audit?' + '&'.join([f'{k}={v}' for k, v in filters.items()]))}'"
                f" style='margin-left:4px'>隐藏 admin-ui</a>" if show_admin else
@@ -1692,7 +1692,6 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     async def _wf_save(req: Request) -> JSONResponse:
         import json as _json
 
-        from .workflows import WorkflowError
         f = await req.form()
         chart_raw = str(f.get("chart") or "")
         graph_raw = str(f.get("graph") or "")

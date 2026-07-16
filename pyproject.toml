@@ -54,6 +54,8 @@ dev = [
     "anyio>=4.14.1",
     "pytest>=8.0",
     "pytest-anyio>=0.0.0",
+    "ruff>=0.9",
+    "mypy>=1.14",
 ]
 
 [build-system]
@@ -65,3 +67,25 @@ packages = ["src/dbmcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# 默认 select（E/F）已够；豁免本项目有意的写法：
+# E702 单行分号紧凑语句是查询台/前端胶水代码的惯用风格；测试里为局部性偶把 import 放类后。
+ignore = ["E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/dbmcp"]
+# 建立基线：先宽松（第三方库多无 stub、FastMCP/SQLAlchemy 动态），后续可逐步收紧。
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = false
+warn_return_any = false
+disable_error_code = ["annotation-unchecked"]

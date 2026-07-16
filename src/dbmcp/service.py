@@ -10,6 +10,7 @@ import hmac
 import logging
 import threading
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .approvals import ApprovalError, ApprovalStore
 from .audit.classify import classify, fingerprint
@@ -20,6 +21,9 @@ from .config import AppConfig, ConnectionConfig
 from .masking import apply_mask
 from .metadata import MetadataCache
 from . import engines, redis_engine
+
+if TYPE_CHECKING:
+    from .snippets import SnippetStore
 
 logger = logging.getLogger(__name__)
 
