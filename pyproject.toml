@@ -1,8 +1,29 @@
 [project]
 name = "db-manage-mcp"
 version = "0.1.0"
-description = "为 agent 提供数据库访问的 MCP 服务：连接管理、SQL 审计、人工授权、操作审计"
+description = "Quay — a local database workbench with governed access for humans and AI agents: SQL IDE, Redis console, cross-source analysis, and MCP over one connection & security layer (SQL audit, human approval, full operation trail)."
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "jianxinliu", email = "shmilyljx@gmail.com" }]
+keywords = [
+    "mcp", "model-context-protocol", "database", "mysql", "postgresql", "redis",
+    "sql", "duckdb", "ai-agent", "sql-audit", "database-governance", "workbench",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+]
 dependencies = [
     "fastmcp>=2.0",
     "sqlalchemy>=2.0",
@@ -19,6 +40,11 @@ dependencies = [
 
 [project.optional-dependencies]
 keyring = ["keyring>=25.0"]
+
+[project.urls]
+Homepage = "https://github.com/jianxinliu/Quay"
+Repository = "https://github.com/jianxinliu/Quay"
+Issues = "https://github.com/jianxinliu/Quay/issues"
 
 [project.scripts]
 dbm = "dbmcp.__main__:main"
