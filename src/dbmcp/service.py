@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
 from dataclasses import dataclass
@@ -192,14 +193,20 @@ class DbmService:
         self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False,
         page: int = 0, page_size: int | None = None, schema: str | None = None,
         on_start=None,  # noqa: ANN001
+        confirm_text: str | None = None, expect_fingerprint: str | None = None,
     ) -> dict:
         """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
 
         - 只读语句：跑 reader 出结果，自动分页（缺 LIMIT 的 SELECT 注入 LIMIT/OFFSET
           兜底，防大表拉挂 DB）；用户自带 LIMIT 则尊重不改。
-        - 写语句 + confirm=False：评估风险并返回风险报告，**不执行**。
+        - 写语句 + confirm=False：评估风险并返回风险报告（含 fingerprint / prod / expect_text），
+          **不执行**。
         - 写语句 + confirm=True：经人工二次确认，直接用 writer 账号执行并落审计。
           这是后台专属旁路（不进审批单）；红线「拒绝—重提」只约束 agent 的 execute。
+          两道二次闸门：
+            · **H1 指纹绑定**：确认时若带回 expect_fingerprint，须与当前 SQL 的指纹一致，
+              否则拒绝——防「看 A 批 B」（确认前后 SQL 被改）。
+            · **C3 prod 写闸门**：生产环境写操作除风险确认外，还须 confirm_text 匹配连接名。
         - schema：执行 schema 上下文（右上角选择），未限定表名的 SQL 在该库下执行。
         """
         cfg = self.config.get_connection(project, connection)
@@ -237,6 +244,8 @@ class DbmService:
             out["paginated"] = False
             return {"kind": "read", **out}
 
+        is_prod = (cfg.environment or "").lower() == "prod"
+        fp = fingerprint(sql, cfg.engine)
         if not confirm:
             report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
             report_dict = report.to_dict()
@@ -244,7 +253,24 @@ class DbmService:
             if plan:
                 report_dict["explain"] = plan
             return {"kind": "confirm", "risk": report_dict,
-                    "statement_kind": verdict.statement_kind}
+                    "statement_kind": verdict.statement_kind,
+                    "fingerprint": fp, "prod": is_prod,
+                    "expect_text": connection if is_prod else None}
+
+        # H1：确认必须绑定到刚才被评估/展示的那条 SQL（指纹一致），否则拒绝执行
+        if expect_fingerprint is not None and not hmac.compare_digest(expect_fingerprint, fp):
+            rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
+            rec.status = "rejected"
+            rec.detail = "确认指纹与提交 SQL 不一致，已拒绝执行（H1）"
+            self.store.record(rec)
+            raise QueryRejected("SQL 在确认前后发生了变化（指纹不一致），已拒绝执行，请重新确认。")
+        # C3：prod 写操作须额外输入连接名匹配，作为第二道人工闸门
+        if is_prod and (confirm_text or "").strip() != connection:
+            rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
+            rec.status = "rejected"
+            rec.detail = "prod 写操作二次闸门：连接名未匹配，已拒绝执行（C3）"
+            self.store.record(rec)
+            raise QueryRejected(f"生产环境写操作需再次输入连接名「{connection}」确认后才能执行。")
 
         rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
         if schema:

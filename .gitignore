@@ -6,3 +6,5 @@ data/
 config/connections.yaml
 .remember/
 *.app/
+.env
+.env.*

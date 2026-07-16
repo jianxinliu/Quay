@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import html
+import os
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from pathlib import Path
@@ -40,6 +41,48 @@ def _session_value(token: str) -> str:
 def _authed(req: Request, expected_cookie: str) -> bool:
     got = req.cookies.get(_COOKIE_NAME, "")
     return bool(got) and hmac.compare_digest(got, expected_cookie)
+
+
+# 本地进程模式下管理后台只应从本机访问。校验 Host / Origin 防两类攻击：
+#   - DNS rebinding：恶意网页把自家域名解析到 127.0.0.1，浏览器带的是攻击者的 Host。
+#   - 跨站状态变更（CSRF）：SameSite=Lax 已挡多数场景，Origin 校验作为纵深防御补齐写请求。
+# 允许的 Host 默认 = 本机回环名；如需在反代/LAN 后使用，用 DBM_ADMIN_ALLOWED_HOSTS 显式配置。
+_DEFAULT_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+
+def _allowed_hosts() -> frozenset[str]:
+    extra = os.environ.get("DBM_ADMIN_ALLOWED_HOSTS", "")
+    names = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return _DEFAULT_LOCAL_HOSTS | frozenset(names)
+
+
+def _hostname_of(value: str) -> str:
+    """从 Host / Origin 值里取出主机名（去端口、去 IPv6 方括号），小写。"""
+    v = (value or "").strip().lower()
+    if v.startswith("http://"):
+        v = v[7:]
+    elif v.startswith("https://"):
+        v = v[8:]
+    v = v.split("/", 1)[0]           # 去掉路径
+    if v.startswith("["):            # IPv6：[::1]:8100 → ::1
+        end = v.find("]")
+        return v[1:end] if end > 0 else v
+    return v.rsplit(":", 1)[0] if ":" in v else v
+
+
+def _local_request_ok(req: Request) -> bool:
+    """校验请求来自允许的本机 Host，且（若是写请求）Origin 同源。返回是否放行。"""
+    allowed = _allowed_hosts()
+    host = _hostname_of(req.headers.get("host", ""))
+    if host not in allowed:
+        return False
+    # 状态变更方法额外校验 Origin（浏览器在跨站/同站 POST 都会带 Origin）。
+    # 非浏览器客户端（curl/后台脚本）通常不带 Origin —— 已过 Host 白名单 + 认证，放行。
+    if req.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = req.headers.get("origin", "")
+        if origin and _hostname_of(origin) not in allowed:
+            return False
+    return True
 
 _LEVEL_COLOR = {
     "CRITICAL": "#b00020",
@@ -914,9 +957,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
     expected_cookie = _session_value(admin_token)
 
     def guard(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
-        """未认证访问受保护路由 → 重定向登录页。"""
+        """未认证访问受保护路由 → 重定向登录页；非本机来源（Host/Origin 不符）→ 403。"""
         @wraps(handler)
         async def _wrapped(req: Request) -> Response:
+            if not _local_request_ok(req):
+                return Response("forbidden: request must originate from localhost",
+                                status_code=403)
             if not _authed(req, expected_cookie):
                 return RedirectResponse(url="/admin/login", status_code=303)
             return await handler(req)
@@ -956,6 +1002,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
 
     @mcp.custom_route("/admin/login", methods=["POST"])
     async def _login_submit(req: Request) -> Response:
+        if not _local_request_ok(req):
+            return Response("forbidden", status_code=403)
         form = await req.form()
         token = str(form.get("token") or "")
         if token and hmac.compare_digest(token, admin_token):
@@ -1849,6 +1897,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         sql = str(f.get("sql") or "")
         confirm = str(f.get("confirm") or "") in ("1", "on", "true")
+        confirm_text = str(f.get("confirm_text") or "") or None
+        expect_fp = str(f.get("expect_fingerprint") or "") or None
         try:
             page = max(int(str(f.get("page") or "0")), 0)
         except ValueError:
@@ -1878,7 +1928,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         def _work(register) -> dict:  # noqa: ANN001
             try:
                 return service.admin_run_sql(project, connection, sql, caller,
-                                             confirm, page, None, schema, on_start=register)
+                                             confirm, page, None, schema, on_start=register,
+                                             confirm_text=confirm_text, expect_fingerprint=expect_fp)
             except (QueryRejected, KeyError, ValueError) as e:
                 raise RuntimeError(str(e)) from e
 
@@ -1924,6 +1975,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         sql = str(f.get("sql") or "")
         confirm = str(f.get("confirm") or "") in ("1", "on", "true")
+        confirm_text = str(f.get("confirm_text") or "") or None
+        expect_fp = str(f.get("expect_fingerprint") or "") or None
         try:
             page = max(int(str(f.get("page") or "0")), 0)
         except ValueError:
@@ -1944,8 +1997,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             result = await anyio.to_thread.run_sync(
-                service.admin_run_sql, project, connection, sql, _caller(req),
-                confirm, page, None, schema)
+                lambda: service.admin_run_sql(
+                    project, connection, sql, _caller(req), confirm, page, None, schema,
+                    confirm_text=confirm_text, expect_fingerprint=expect_fp))
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception as e:

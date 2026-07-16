@@ -333,6 +333,12 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .theme-light .dg-confirm { background: #fdf3e3; border-bottom-color: #e6c489; }
 .theme-light .dg-confirm h4, .theme-light .dg-confirm .reasons { color: #5a3a12; }
 .theme-light .dg-confirm .kv { color: #8a6a3a; }
+/* prod 写二次闸门：醒目红条 + 连接名输入（C3） */
+.dg-prod-gate { margin: 8px 0 2px; padding: 7px 10px; border-radius: 6px; font-size: 12px;
+  background: rgba(220,38,38,.14); border: 1px solid var(--dg-red); color: var(--dg-text);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dg-prod-gate b { color: var(--dg-red); font-family: var(--dg-mono); }
+.theme-light .dg-prod-gate { background: #fdeaea; color: #5a1212; }
 
 /* 结果 tab（查询每执行一次新增一个；hover 显示 SQL） */
 .dg-restabs { flex: none; display: flex; gap: 2px; padding: 4px 8px 0; overflow-x: auto;
