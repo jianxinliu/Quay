@@ -263,6 +263,40 @@ class TestAdminConsole:
         assert out["paginated"] is False
 
 
+class TestConsoleUnmasked:
+    """已认证的后台查询台/导出要看真实数据，不脱敏；agent 路径仍脱敏（密码不落工具返回值）。"""
+
+    @pytest.fixture
+    def svc(self, tmp_path):
+        db_file = tmp_path / "biz.sqlite3"
+        conn = sqlite3.connect(db_file)
+        conn.executescript(
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, password TEXT);"
+            "INSERT INTO accounts (name, password) VALUES ('alice', 's3cr3t');"
+        )
+        conn.commit()
+        conn.close()
+        cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
+            "engine": "sqlite", "database": str(db_file), "environment": "local"}}}}})
+        s = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+        yield s
+        s.close()
+
+    def test_console_read_not_masked(self, svc):
+        out = svc.admin_run_sql("demo", "main", "SELECT name, password FROM accounts", CALLER)
+        assert out["rows"][0] == ["alice", "s3cr3t"]        # 真实密码，未脱敏
+        assert "masked_columns" not in out
+
+    def test_console_export_not_masked(self, svc):
+        data, _, _ = svc.admin_export("demo", "main", "SELECT name, password FROM accounts", "csv", CALLER)
+        assert b"s3cr3t" in data
+
+    def test_agent_query_still_masked(self, svc):
+        out = svc.query("demo", "main", "SELECT name, password FROM accounts", CALLER)
+        assert out["rows"][0][1] == "***MASKED***"          # agent 仍脱敏
+        assert "password" in out.get("masked_columns", [])
+
+
 class TestNoDatabaseSchema:
     """未绑定默认库的连接：不带 schema 列表要给清晰报错（而非 SQLAlchemy 反射崩溃）。"""
 

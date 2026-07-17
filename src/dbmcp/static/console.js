@@ -407,6 +407,7 @@
         treeCache: {},          // conn -> 树快照（切连接/切页保活）
         selected: {},           // metaKey -> {t, db}（多选）
         dragId: null,
+        dragGroup: null,        // 拖动的组（连接 key），用于整体调整组顺序
         ctx: { show: false, x: 0, y: 0, table: "", schema: "", multi: false },
         tabCtx: { show: false, x: 0, y: 0, id: null },  // 编辑区 tab 右键菜单
         renamingId: null, renameVal: "",                // tab 就地改名
@@ -824,14 +825,39 @@
         this.tabGroupCollapsed[conn] = !this.tabGroupCollapsed[conn];
         try { localStorage.setItem("dbm-tabgrp-collapsed", JSON.stringify(this.tabGroupCollapsed)); } catch (e) {}
       },
-      onTabDragStart: function (id, e) { this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
+      onTabDragStart: function (id, e) { this.dragGroup = null; this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
       onTabDrop: function (targetId) {
-        var from = this.tabs.findIndex(function (t) { return t.id === this.dragId; }, this);
-        var to = this.tabs.findIndex(function (t) { return t.id === targetId; });
-        if (from < 0 || to < 0 || from === to) { this.dragId = null; return; }
-        var moved = this.tabs.splice(from, 1)[0];
-        this.tabs.splice(to, 0, moved);
-        this.dragId = null; this.persist();
+        var self = this;
+        var fromT = this.tabs.find(function (t) { return t.id === self.dragId; });
+        var toT = this.tabs.find(function (t) { return t.id === targetId; });
+        this.dragId = null;
+        if (!fromT || !toT || fromT === toT) return;
+        // 只允许同组（同连接）内重排；跨组拖动忽略，避免把分组顺序打乱
+        if ((fromT.conn || "") !== (toT.conn || "")) return;
+        this.tabs.splice(this.tabs.indexOf(fromT), 1);
+        this.tabs.splice(this.tabs.indexOf(toT), 0, fromT);   // 落在目标之前
+        this.persist();
+      },
+      // 拖动组头 → 调整组（连接）的先后顺序：把整组移到目标组之前
+      onGroupDragStart: function (conn, e) { this.dragId = null; this.dragGroup = conn; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
+      onGroupDrop: function (targetConn) {
+        var g = this.dragGroup; this.dragGroup = null;
+        if (g == null || g === targetConn) return;
+        var moved = this.tabs.filter(function (t) { return (t.conn || "") === g; });
+        var rest = this.tabs.filter(function (t) { return (t.conn || "") !== g; });
+        var idx = rest.findIndex(function (t) { return (t.conn || "") === targetConn; });
+        if (idx < 0) idx = rest.length;
+        this.tabs = rest.slice(0, idx).concat(moved, rest.slice(idx));
+        this.persist();
+      },
+      // 让扁平 tabs 数组按组连续排列（组顺序=首次出现），使拖动/分组行为可预期
+      normalizeTabOrder: function () {
+        var order = [], map = {};
+        this.tabs.forEach(function (t) {
+          var k = t.conn || ""; if (!(k in map)) { map[k] = []; order.push(k); } map[k].push(t);
+        });
+        var flat = []; order.forEach(function (k) { flat = flat.concat(map[k]); });
+        this.tabs = flat;
       },
       // 双击表 / 右键「打开表数据」：data 型 tab，主区直接是数据网格
       openTableTab: function (t, db) {
@@ -3283,6 +3309,7 @@
     mounted: function () {
       var self = this;
       this.restore();
+      this.normalizeTabOrder();   // 保活恢复后按组连续排列，使拖动/分组顺序可预期
       // 执行计时秒表：任一 tab 在跑时每 200ms 触发一次重算（clockTick 驱动 runElapsed）
       setInterval(function () {
         if (self.tabs.some(function (t) { return t.running; })) self.clockTick++;
@@ -3456,8 +3483,9 @@
     </div>
     <div class="dg-tabs">
       <template v-for="g in tabGroups" :key="g.conn">
-        <div class="dg-tabgrp-hd" :class="['env-'+g.meta.env, {collapsed: tabGroupCollapsed[g.conn]}]"
-             @click="toggleTabGroup(g.conn)" :title="'连接：'+(g.conn||'无')+' · 点击折叠/展开该组'">
+        <div class="dg-tabgrp-hd" :class="['env-'+g.meta.env, {collapsed: tabGroupCollapsed[g.conn], drag: g.conn===dragGroup}]"
+             @click="toggleTabGroup(g.conn)" :title="'连接：'+(g.conn||'无')+' · 点击折叠/展开 · 拖动可调整组顺序'"
+             draggable="true" @dragstart="onGroupDragStart(g.conn, $event)" @dragover.prevent @drop="onGroupDrop(g.conn)" @dragend="dragGroup=null">
           <span class="car">{{ tabGroupCollapsed[g.conn] ? '▸' : '▾' }}</span>
           <span class="gnm">{{ g.meta.name }}</span>
           <span class="gcount">{{ g.tabs.length }}</span>

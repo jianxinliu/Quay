@@ -894,6 +894,7 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-tabgrp-hd .gnm { font-family: var(--dg-mono); max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
 .dg-tabgrp-hd .gcount { font-size: 9px; padding: 0 4px; border-radius: 7px; background: var(--dg-border); color: var(--dg-faint); }
 .dg-tabgrp-hd.collapsed { color: var(--dg-faint); }
+.dg-tabgrp-hd.drag { opacity: .4; }
 .dg-tabgrp-hd.env-prod { border-left-color: var(--dg-red); color: #ff8f8f; }
 .dg-tabgrp-hd.env-staging { border-left-color: #d97706; color: var(--dg-amber); }
 .dg-tabgrp-hd.env-dev { border-left-color: #6ea8fe; }
