@@ -738,38 +738,92 @@ def _text_setting(label: str, name: str, s: dict, default: str, hint: str,
             + f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
 
 
+def _ai_api_key_present() -> bool:
+    """当前 keyring 里是否已存 AI API key（只判有无，不取值）。"""
+    try:
+        import keyring  # noqa: PLC0415
+        from .ai import AI_API_KEY_ACCOUNT  # noqa: PLC0415
+        from .secrets import KEYRING_SERVICE  # noqa: PLC0415
+        return bool(keyring.get_password(KEYRING_SERVICE, AI_API_KEY_ACCOUNT))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# provider 切换时按后端显隐 CLI / API 专属配置（CLI 组仅命令行后端显示，API 组仅 api 显示）
+_AI_PROVIDER_TOGGLE_JS = """<script>
+(function(){
+  var sel=document.querySelector("select[name='ai_provider']"); if(!sel) return;
+  function upd(){
+    var api = sel.value==='api';
+    document.querySelectorAll('.ai-api-only').forEach(function(e){e.style.display=api?'':'none';});
+    document.querySelectorAll('.ai-cli-only').forEach(function(e){e.style.display=api?'none':'';});
+  }
+  sel.addEventListener('change', upd); upd();
+})();
+</script>"""
+
+
 def _settings_ai_body(s: dict) -> str:
     provider = s.get("ai_provider", "claude")
+    fmt = s.get("ai_api_format", "anthropic")
 
     def psel(v: str) -> str:
         return " selected" if provider == v else ""
 
-    prompt = _esc(s.get("ai_sql_prompt", ""))
+    def fsel(v: str) -> str:
+        return " selected" if fmt == v else ""
+
+    key_hint = ("当前：<b>已存储</b>（留空=不改，填新值=覆盖）" if _ai_api_key_present()
+                else "当前：未存储")
     return _settings_form(
-        _bool_setting("启用 AI 辅助写 SQL", "ai_enabled", s, False,
-                      "启用", "关闭（默认）",
-                      "开启后查询台会出现「✨ AI」按钮；产物只回填编辑器、绝不自动执行。")
+        _bool_setting("启用 AI 辅助写 SQL", "ai_enabled", s, True,
+                      "启用（默认）", "关闭",
+                      "开启后查询台/流程画布会出现「✨ AI」按钮；产物只回填、绝不自动执行。")
         + "<div style='margin-bottom:16px'><label>AI 后端</label>"
-        + "<select name='ai_provider' style='width:200px'>"
+        + "<select name='ai_provider' style='width:220px'>"
         + f"<option value='claude'{psel('claude')}>Claude CLI（claude -p）</option>"
-        + f"<option value='codex'{psel('codex')}>CodeX CLI（codex exec）</option></select>"
-        + "<div class='muted' style='margin-top:4px'>调用本机命令行 AI（需已安装并登录）。</div></div>"
+        + f"<option value='codex'{psel('codex')}>CodeX CLI（codex exec）</option>"
+        + f"<option value='api'{psel('api')}>HTTP API（直连，接入面更广）</option></select>"
+        + "<div class='muted' style='margin-top:4px'>claude/codex 调本机命令行 AI（需已安装登录）；"
+        + "api 直连 HTTP 端点（密钥存钥匙串）。</div></div>"
+        # —— CLI 专属：provider=api 时隐藏
+        + "<div class='ai-cli-only'>"
         + _text_setting("CLI 路径", "ai_cli_path", s, "",
                         "留空则用后端默认二进制名（claude / codex）；如不在 PATH 中可填绝对路径。")
+        + "</div>"
         + _text_setting("模型", "ai_model", s, "claude-sonnet-5",
-                        "Claude 用 claude-*（如 claude-sonnet-5）；CodeX 用其账号支持的模型名。")
+                        "Claude 用 claude-*；CodeX 用其账号支持的模型名；api 用对应厂商模型名。")
+        # —— API 专属：仅 provider=api 时显示
+        + "<div class='ai-api-only'>"
+        + "<div style='margin-bottom:16px'><label>API 格式</label>"
+        + "<select name='ai_api_format' style='width:220px'>"
+        + f"<option value='anthropic'{fsel('anthropic')}>Anthropic Messages</option>"
+        + f"<option value='openai'{fsel('openai')}>OpenAI Chat Completions</option></select>"
+        + "<div class='muted' style='margin-top:4px'>请求/响应格式。</div></div>"
+        + _text_setting("API 根地址", "ai_api_base", s, "https://api.anthropic.com",
+                        "如 https://api.anthropic.com 或 https://api.openai.com。")
+        + "<div style='margin-bottom:16px'><label>API Key</label>"
+        + "<input type='password' name='ai_api_key' value='' autocomplete='new-password' "
+        + "placeholder='填入以覆盖' style='width:260px'>"
+        + "<label style='margin-left:10px;font-size:12px;color:var(--muted)'>"
+        + "<input type='checkbox' name='ai_api_key_clear' value='1'> 清除已存</label>"
+        + "<div class='muted' style='margin-top:4px'>存入系统钥匙串（keyring），"
+        + f"绝不写入设置库/日志。{key_hint}</div></div>"
+        + _text_setting("兜底环境变量名", "ai_api_key_env", s, "DBM_AI_API_KEY",
+                        "钥匙串里没有时，从该环境变量读 key（值不入设置库）。")
+        + "</div>"
         + _num_setting("生成超时（秒）", "ai_timeout_s", s, 60,
                        "单次生成的最长等待时间，10–600 之间。")
         + _num_setting("最大表数", "ai_max_tables", s, 40,
                        "「整库」模式下最多把多少张表的结构发给 AI，超出会要求你勾选具体表（1–200）。")
         + "<div style='margin-bottom:16px'><label>SQL 生成系统提示词</label>"
-        + f"<textarea name='ai_sql_prompt' rows='10' style='width:100%'>{prompt}</textarea>"
+        + f"<textarea name='ai_sql_prompt' rows='10' style='width:100%'>{_esc(s.get('ai_sql_prompt', ''))}</textarea>"
         + "<div class='muted' style='margin-top:4px'>生成 SQL 的系统提示（角色设定 + SQL 约束）。"
         + "清空并保存即恢复默认。</div></div>"
         + "<div style='margin-bottom:16px'><label>流程生成系统提示词</label>"
         + f"<textarea name='ai_workflow_prompt' rows='6' style='width:100%'>{_esc(s.get('ai_workflow_prompt', ''))}</textarea>"
         + "<div class='muted' style='margin-top:4px'>生成可视化流程（DAG 画布）的系统提示。"
-        + "清空并保存即恢复默认。</div></div>")
+        + "清空并保存即恢复默认。</div></div>") + _AI_PROVIDER_TOGGLE_JS
 
 
 def _settings_redis_body(s: dict) -> str:
@@ -1717,8 +1771,20 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         # 白名单即全部已知设置项；SettingsStore.save 还会再忽略未知键并夹取区间
         from .settings import DEFAULTS as _SETTING_DEFAULTS
         updates = {key: str(f.get(key)) for key in _SETTING_DEFAULTS if key in f}
+        # AI API key 单独处理：存钥匙串、绝不入设置库；勾选清除则删除
+        from .ai import AI_API_KEY_ACCOUNT
+        from .secrets import (KEYRING_SERVICE, SecretResolveError,
+                              delete_keyring_secret, store_keyring_secret)
+        key_val = str(f.get("ai_api_key") or "").strip()
+        clear_key = str(f.get("ai_api_key_clear") or "") in ("1", "on", "true")
         try:
             settings = service.save_settings(updates)
+            if clear_key:
+                delete_keyring_secret(f"keyring://{KEYRING_SERVICE}/{AI_API_KEY_ACCOUNT}")
+            elif key_val:
+                store_keyring_secret(AI_API_KEY_ACCOUNT, key_val)
+        except SecretResolveError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "settings": settings})

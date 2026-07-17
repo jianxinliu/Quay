@@ -36,15 +36,19 @@ DEFAULTS: dict[str, object] = {
     "audit_hide_admin_ui": True,  # 审计页默认是否隐藏 agent=admin-ui 的记录
     # ——Agent 输出
     "agent_max_result_chars": 40000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
-    # ——AI 辅助写 SQL（查询台「✨ AI」按钮，默认关；产物只回填编辑器、不执行）
-    "ai_enabled": False,            # 总开关：关则前端按钮不出现、路由直接 403
-    "ai_provider": "claude",       # 命令行 AI：claude / codex
-    "ai_cli_path": "",             # CLI 路径（空 = 用 provider 默认二进制名）
-    "ai_model": "claude-sonnet-5",  # 模型（claude 用 claude-* / codex 用其账号支持的模型名）
+    # ——AI 辅助写 SQL（查询台「✨ AI」按钮；产物只回填编辑器/画布、不执行）
+    "ai_enabled": True,            # 总开关：关则前端按钮不出现、路由直接 403
+    "ai_provider": "claude",       # AI 后端：claude / codex（命令行）/ api（直连 HTTP）
+    "ai_cli_path": "",             # CLI 路径（空 = 用 provider 默认二进制名；provider=api 时不用）
+    "ai_model": "claude-sonnet-5",  # 模型（claude 用 claude-* / codex 用其账号支持模型 / api 用对应厂商模型）
     "ai_timeout_s": 60,            # 单次生成超时（秒）
     "ai_max_tables": 40,           # 「整库」模式喂给 AI 的最大表数（超出要求收窄）
     "ai_sql_prompt": _AI_SQL_PROMPT_DEFAULT,  # 系统提示词（persona + SQL 约束），可编辑
     "ai_workflow_prompt": _AI_WF_PROMPT_DEFAULT,  # workflow 生成的系统提示词，可编辑
+    # ——provider=api（直连 HTTP API，接入面更广、省 CLI 开销）。密钥存 keyring，绝不落库
+    "ai_api_base": "https://api.anthropic.com",  # API 根地址（anthropic 或 openai 兼容端点）
+    "ai_api_format": "anthropic",  # 请求/响应格式：anthropic（Messages）/ openai（Chat Completions）
+    "ai_api_key_env": "DBM_AI_API_KEY",  # keyring 无值时兜底读的环境变量名（值不入设置库）
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
@@ -62,7 +66,8 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
     "ai_max_tables": (1, 200),
 }
 
-_AI_PROVIDERS = ("claude", "codex")
+_AI_PROVIDERS = ("claude", "codex", "api")
+_AI_API_FORMATS = ("anthropic", "openai")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_setting (
@@ -135,6 +140,9 @@ def _validate(key: str, raw: object) -> str:
     if key == "ai_provider":
         v = str(raw).strip().lower()
         return v if v in _AI_PROVIDERS else str(default)
+    if key == "ai_api_format":
+        v = str(raw).strip().lower()
+        return v if v in _AI_API_FORMATS else str(default)
     if isinstance(default, bool):  # 注意：bool 必须先于 int 判断（bool 是 int 的子类）
         return "true" if str(raw).lower() in ("true", "1", "on", "yes") else "false"
     if isinstance(default, int):

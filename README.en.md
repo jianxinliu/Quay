@@ -104,6 +104,15 @@ The query console also has a DAG canvas: drag nodes (fetch, filter, JOIN, aggreg
 
 </details>
 
+## AI assistant (optional)
+
+The query console and the DAG canvas have an "✨ AI" entry point: describe what you want in plain language, and the AI generates SQL — or a whole workflow graph — from the table structures you select.
+
+- **Generates only, never executes.** The output is inserted at the editor cursor (or onto the canvas) for you to review; it still goes through the existing write-confirmation / approval flow. The AI process is granted no tools — plain text in, plain text out, no access to the database.
+- **Follow-ups.** After the first result you can keep refining ("group by week", "add a total"), continuing the same conversation without resending the schema; a follow-up SQL can replace the previous one or be appended. If a generated graph fails validation, the error is fed back and the AI repairs it once.
+- **Three backends** (switch in system settings): `claude -p` / `codex exec` drive a local CLI; or **HTTP API** talks directly to an Anthropic / OpenAI-compatible endpoint, with the key stored in the system keyring — never in the database.
+- SQL is auto-formatted with sqlglot; the explanation goes in as a comment above the statement. On by default; can be turned off in settings.
+
 ## How a write gets approved
 
 1. The agent calls `execute` with a write statement. The server assesses the risk, creates a change request, rejects the call, and returns a `change_id` with the risk report.

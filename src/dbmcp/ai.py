@@ -3,22 +3,24 @@
 只生成、不执行——产物回填到编辑器光标处，由人审阅后再走既有的写确认/审批闭环。AI 进程
 不被授予任何工具（禁 MCP、只读沙箱），纯文本进、纯文本出，碰不到数据库。
 
-Provider 可插拔，当前支持两种命令行 AI，上层 service 不感知差异：
+Provider 可插拔，上层 service 不感知差异：
 - claude:  `claude -p <prompt> --output-format json`，从 result 字段取正文
 - codex:   `codex exec ... -o <file> <prompt>`，从 --output-last-message 文件取正文
-后期可再加 api provider（直接 HTTP 调），run_ai 的签名不变。
+- api:     直连 HTTP（Anthropic Messages / OpenAI Chat），密钥从 keyring/env 读；追问用内存会话
 
-prompt 拼装（build_sql_prompt）与进程调用（run_ai）拆开，前者是纯函数、可单测；后者
-用假进程 monkeypatch 测。
+prompt 拼装（build_sql_prompt）与调用（run_ai）拆开，前者是纯函数、可单测；后者用假进程/
+假 httpx monkeypatch 测。
 """
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass
 
 # 会话续接需要稳定的工作目录，且两家 CLI 各用独立目录（共用会让 codex 在 claude 写下的
@@ -61,7 +63,14 @@ class AIError(Exception):
 class AIResult:
     sql: str
     explanation: str  # 空串 = 无解释
-    session_id: str = ""  # 命令行 AI 的会话 id，追问时带回以续接同一会话
+    session_id: str = ""  # AI 会话 id，追问时带回以续接同一会话
+
+
+def _api_kwargs(api: dict | None) -> dict:
+    """把 {base, format, key_env} 归一为 run_ai 的 api_* 关键字（provider≠api 时无副作用）。"""
+    api = api or {}
+    return {"api_base": api.get("base", ""), "api_format": api.get("format", "anthropic"),
+            "api_key_env": api.get("key_env", "")}
 
 
 def build_sql_prompt(
@@ -125,10 +134,12 @@ def generate_sql(
     timeout: int,
     cli_path: str = "",
     session_id: str | None = None,
+    api: dict | None = None,
 ) -> AIResult:
     """拼 prompt → 调 AI → 解析出 {sql, explanation, session_id}。失败抛 AIError。
 
     session_id 非空 = 追问：续接同一会话、只发调整要求（不重发表结构）。
+    api = provider=api 时的 {base, format, key_env}（可选）。
     """
     if session_id:
         prompt = build_followup_prompt(question, explain=explain)
@@ -136,7 +147,7 @@ def generate_sql(
         prompt = build_sql_prompt(system_prompt, dialect, ddls, question,
                                   explain=explain, samples=samples)
     raw, new_sid = run_ai(prompt, provider=provider, model=model, timeout=timeout,
-                          cli_path=cli_path, session_id=session_id)
+                          cli_path=cli_path, session_id=session_id, **_api_kwargs(api))
     result = parse_ai_output(raw, explain=explain)
     result.session_id = new_sid
     return result
@@ -225,6 +236,7 @@ def generate_workflow(
     cli_path: str = "",
     repair_error: str | None = None,
     session_id: str | None = None,
+    api: dict | None = None,
 ) -> tuple[dict, str]:
     """拼 prompt → 调 AI → 解析出 workflow graph dict。返回 (graph, session_id)。失败抛 AIError。
 
@@ -235,7 +247,7 @@ def generate_workflow(
     else:
         prompt = build_workflow_prompt(system_prompt, dialect, connections, ddls, question)
     raw, new_sid = run_ai(prompt, provider=provider, model=model, timeout=timeout,
-                          cli_path=cli_path, session_id=session_id)
+                          cli_path=cli_path, session_id=session_id, **_api_kwargs(api))
     graph = _parse_workflow_output(raw)
     if not isinstance(graph, dict) or "nodes" not in graph:
         raise AIError(f"AI 未按格式输出流程图：{raw.strip()[:200]}")
@@ -250,15 +262,88 @@ def _parse_workflow_output(text: str) -> object:
 # ---------- provider 调用 ----------
 
 
+# provider=api 的会话存 messages（内存、有界）；追问带回 session_id 续接同一对话。
+_API_SESSIONS: "collections.OrderedDict[str, list[dict]]" = collections.OrderedDict()
+_API_SESSIONS_MAX = 100
+
+AI_API_KEY_ACCOUNT = "ai_api_key"  # keyring 里存 API key 的 account（service=db-manage-mcp）
+
+
 def run_ai(prompt: str, *, provider: str, model: str, timeout: int,
-           cli_path: str = "", session_id: str | None = None) -> tuple[str, str]:
-    """按 provider 调命令行 AI，返回 (原始正文, 会话 id)。session_id 非空 = 续接会话。失败抛 AIError。"""
+           cli_path: str = "", session_id: str | None = None,
+           api_base: str = "", api_format: str = "anthropic", api_key_env: str = "") -> tuple[str, str]:
+    """按 provider 调 AI，返回 (原始正文, 会话 id)。session_id 非空 = 续接会话。失败抛 AIError。"""
+    if provider == "api":
+        return _run_api(prompt, model=model, timeout=timeout, session_id=session_id,
+                        base=api_base, fmt=api_format, key_env=api_key_env)
     cli = cli_path.strip() or _DEFAULT_CLI.get(provider, "")
     if provider == "claude":
         return _run_claude(prompt, model=model, timeout=timeout, cli=cli, session_id=session_id)
     if provider == "codex":
         return _run_codex(prompt, model=model, timeout=timeout, cli=cli, session_id=session_id)
-    raise AIError(f"不支持的 AI provider：{provider!r}（当前支持 claude / codex）")
+    raise AIError(f"不支持的 AI provider：{provider!r}（当前支持 claude / codex / api）")
+
+
+def _resolve_api_key(key_env: str) -> str:
+    """取 API key：优先系统钥匙串（后台页面存的），回退环境变量。绝不打印/落库。"""
+    try:
+        import keyring  # noqa: PLC0415
+        from .secrets import KEYRING_SERVICE  # noqa: PLC0415
+        v = keyring.get_password(KEYRING_SERVICE, AI_API_KEY_ACCOUNT)
+        if v:
+            return v
+    except Exception:  # 无 keyring 后端/未安装 → 回退 env
+        pass
+    return os.environ.get((key_env or "DBM_AI_API_KEY").strip(), "")
+
+
+def _run_api(prompt: str, *, model: str, timeout: int, session_id: str | None,
+             base: str, fmt: str, key_env: str) -> tuple[str, str]:
+    """直连 HTTP API（Anthropic Messages / OpenAI Chat）。密钥从 keyring/env 读，绝不落库/日志。
+
+    追问续接：内存里按 session_id 存整段对话 messages，续接时追加新一轮再整体发过去。
+    """
+    import httpx  # 惰性导入
+
+    key = _resolve_api_key(key_env)
+    if not key:
+        raise AIError(f"未配置 API key：请在后台系统设置填写并保存，或设置环境变量 {key_env or 'DBM_AI_API_KEY'}")
+    if session_id and session_id in _API_SESSIONS:
+        messages = _API_SESSIONS[session_id]
+    else:
+        messages, session_id = [], uuid.uuid4().hex
+    messages = list(messages) + [{"role": "user", "content": prompt}]
+
+    base = (base or "https://api.anthropic.com").rstrip("/")
+    try:
+        if fmt == "openai":
+            url = base + "/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
+            body = {"model": model or "gpt-4o", "messages": messages}
+        else:  # anthropic
+            url = base + "/v1/messages"
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
+                       "content-type": "application/json"}
+            body = {"model": model or "claude-sonnet-5", "max_tokens": 4096, "messages": messages}
+        resp = httpx.post(url, json=body, headers=headers, timeout=timeout)
+    except httpx.HTTPError as e:
+        raise AIError(f"调用 API 失败：{e}") from e
+    if resp.status_code != 200:
+        raise AIError(f"API 返回 {resp.status_code}：{resp.text[:300]}")
+    data = resp.json()
+    if fmt == "openai":
+        text = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    else:
+        text = "".join(b.get("text", "") for b in (data.get("content") or [])
+                       if b.get("type") == "text").strip()
+    if not text:
+        raise AIError(f"API 未返回文本：{json.dumps(data)[:300]}")
+    # 存回会话（新建列表，不改动已发出的 messages）+ 移到末尾 + 限量淘汰
+    _API_SESSIONS[session_id] = [*messages, {"role": "assistant", "content": text}]
+    _API_SESSIONS.move_to_end(session_id)
+    while len(_API_SESSIONS) > _API_SESSIONS_MAX:
+        _API_SESSIONS.popitem(last=False)
+    return text, session_id
 
 
 def _run_subprocess(cmd: list[str], *, timeout: int, cli: str, cwd: str) -> subprocess.CompletedProcess:

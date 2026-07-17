@@ -667,8 +667,11 @@ class TestConnectionAdminUI:
 
 
 def test_ai_route_gated_when_disabled(client):
-    """AI 未开启时 /admin/sql/ai 直接 403（门禁），不触达 provider。"""
-    tc, _ = client
+    """AI 关闭时 /admin/sql/ai 直接 403（门禁），不触达 provider。"""
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "false"})  # 默认已改为开，显式关
     r = tc.post("/admin/sql/ai", data={"conn": "demo/main", "question": "统计用户数"})
     assert r.status_code == 403
     assert r.json()["ok"] is False
@@ -701,11 +704,12 @@ def test_workflow_ai_gated_and_generates(client, monkeypatch):
     from dbmcp import ai
     from dbmcp.settings import SettingsStore
     tc, svc = client
-    # 未开启 → 403
+    svc.settings = SettingsStore(":memory:")
+    # 关闭 → 403（默认已改为开，显式关来测门禁）
+    svc.save_settings({"ai_enabled": "false"})
     r = tc.post("/admin/workflows/ai", data={"conn": "demo/main", "question": "聚合"})
     assert r.status_code == 403
     # 开启 + 假 AI 返回合法 graph
-    svc.settings = SettingsStore(":memory:")
     svc.save_settings({"ai_enabled": "true"})
     good = {"nodes": [
         {"id": "a", "type": "source", "name": "src", "cfg": {"conn": "demo/main", "sql": "SELECT id FROM users"}},

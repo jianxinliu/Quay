@@ -149,6 +149,95 @@ def test_run_ai_unknown_provider_raises():
         ai.run_ai("p", provider="bogus", model="", timeout=10)
 
 
+# ---------- provider=api（直连 HTTP，mock httpx；key 优先 keyring）----------
+
+class _FakeResp:
+    def __init__(self, status, payload):
+        self.status_code, self._p, self.text = status, payload, json.dumps(payload)
+
+    def json(self):
+        return self._p
+
+
+def _fake_httpx(monkeypatch, *, status=200, payload=None, record=None):
+    import httpx
+    ai._API_SESSIONS.clear()
+
+    def post(url, json=None, headers=None, timeout=None):  # noqa: A002
+        if record is not None:
+            record.append({"url": url, "headers": headers, "body": json})
+        return _FakeResp(status, payload or {})
+    monkeypatch.setattr(httpx, "post", post)
+
+
+def _stub_key(monkeypatch, value="sk-test"):
+    """让 _resolve_api_key 返回固定 key（绕过真实 keyring/env）。"""
+    monkeypatch.setattr(ai, "_resolve_api_key", lambda key_env: value)
+
+
+def test_run_api_anthropic_format(monkeypatch):
+    rec = []
+    _fake_httpx(monkeypatch, payload={"content": [{"type": "text", "text": "SELECT 1"}]}, record=rec)
+    _stub_key(monkeypatch, "sk-anthropic")
+    text, sid = ai.run_ai("hi", provider="api", model="claude-sonnet-5", timeout=10,
+                          api_format="anthropic", api_base="https://api.anthropic.com")
+    assert text == "SELECT 1" and sid
+    assert rec[0]["url"].endswith("/v1/messages")
+    assert rec[0]["headers"]["x-api-key"] == "sk-anthropic"
+    assert rec[0]["body"]["model"] == "claude-sonnet-5" and "max_tokens" in rec[0]["body"]
+
+
+def test_run_api_openai_format(monkeypatch):
+    rec = []
+    _fake_httpx(monkeypatch, payload={"choices": [{"message": {"content": "SELECT 2"}}]}, record=rec)
+    _stub_key(monkeypatch, "sk-oai")
+    text, _ = ai.run_ai("hi", provider="api", model="gpt-4o", timeout=10,
+                        api_format="openai", api_base="https://api.openai.com")
+    assert text == "SELECT 2"
+    assert rec[0]["url"].endswith("/v1/chat/completions")
+    assert rec[0]["headers"]["Authorization"] == "Bearer sk-oai"
+
+
+def test_run_api_missing_key_raises(monkeypatch):
+    _fake_httpx(monkeypatch, payload={})
+    _stub_key(monkeypatch, "")  # 无 keyring 也无 env
+    with pytest.raises(ai.AIError, match="API key"):
+        ai.run_ai("hi", provider="api", model="", timeout=10)
+
+
+def test_run_api_non_200_raises(monkeypatch):
+    _fake_httpx(monkeypatch, status=401, payload={"error": "bad key"})
+    _stub_key(monkeypatch)
+    with pytest.raises(ai.AIError, match="401"):
+        ai.run_ai("hi", provider="api", model="", timeout=10)
+
+
+def test_run_api_session_continuity(monkeypatch):
+    rec = []
+    _fake_httpx(monkeypatch, payload={"content": [{"type": "text", "text": "ok"}]}, record=rec)
+    _stub_key(monkeypatch)
+    _, sid = ai.run_ai("first", provider="api", model="m", timeout=10)
+    assert len(rec[0]["body"]["messages"]) == 1        # 首轮只有一条 user
+    ai.run_ai("second", provider="api", model="m", timeout=10, session_id=sid)
+    msgs = rec[1]["body"]["messages"]
+    assert len(msgs) == 3                              # user1 + assistant1 + user2
+    assert msgs[0]["content"] == "first" and msgs[-1]["content"] == "second"
+
+
+def test_resolve_api_key_prefers_keyring(monkeypatch):
+    import keyring
+    monkeypatch.setattr(keyring, "get_password", lambda svc, acct: "from-keyring")
+    monkeypatch.setenv("MY_KEY", "from-env")
+    assert ai._resolve_api_key("MY_KEY") == "from-keyring"  # keyring 优先
+
+
+def test_resolve_api_key_falls_back_to_env(monkeypatch):
+    import keyring
+    monkeypatch.setattr(keyring, "get_password", lambda svc, acct: None)
+    monkeypatch.setenv("MY_KEY", "from-env")
+    assert ai._resolve_api_key("MY_KEY") == "from-env"
+
+
 # ---------- generate_sql 路由：首轮发 DDL，追问不发 ----------
 
 def test_generate_sql_first_turn_sends_ddl(monkeypatch):

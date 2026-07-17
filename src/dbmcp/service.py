@@ -59,6 +59,13 @@ def _rows_to_text(columns: list[str], rows: list[list], max_rows: int = 5) -> st
     return "\n".join(lines)
 
 
+def _ai_api_cfg(s: dict) -> dict:
+    """从设置里取 provider=api 的连接配置（base/format/key_env）。"""
+    return {"base": str(s.get("ai_api_base") or ""),
+            "format": str(s.get("ai_api_format") or "anthropic"),
+            "key_env": str(s.get("ai_api_key_env") or "")}
+
+
 def _layout_graph(graph: dict) -> None:
     """给 AI 生成的节点按拓扑层级赋 x/y（AI 不给坐标），使画布排版可读。原地修改。"""
     nodes = graph.get("nodes") or []
@@ -1097,7 +1104,7 @@ class DbmService:
                 model=str(s.get("ai_model") or ""),
                 timeout=int(s.get("ai_timeout_s") or 60),
                 cli_path=str(s.get("ai_cli_path") or ""),
-                session_id=session_id)
+                session_id=session_id, api=_ai_api_cfg(s))
             if not result.sql.strip():
                 raise QueryRejected("AI 未能生成 SQL，请补充需求描述后重试")
             return {"sql": result.sql, "explanation": result.explanation,
@@ -1153,7 +1160,7 @@ class DbmService:
                       provider=str(s.get("ai_provider") or "claude"),
                       model=str(s.get("ai_model") or ""),
                       timeout=int(s.get("ai_timeout_s") or 60),
-                      cli_path=str(s.get("ai_cli_path") or ""))
+                      cli_path=str(s.get("ai_cli_path") or ""), api=_ai_api_cfg(s))
             graph, sid = ai.generate_workflow(**kw)
             try:
                 compile_graph(graph)

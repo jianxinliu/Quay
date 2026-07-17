@@ -348,6 +348,7 @@ class TestAiGenerateSql:
         service.save_settings({"ai_enabled": "true", **over})
 
     def test_disabled_rejects(self, service):
+        self._enable_ai(service, ai_enabled="false")  # 默认已改为开，显式关来测门禁
         with pytest.raises(QueryRejected, match="未开启"):
             service.ai_generate_sql("demo", "main", "统计用户数", CALLER)
 
@@ -432,6 +433,7 @@ class TestAiGenerateWorkflow:
                        "cfg": {"conn": "demo/main", "sql": "SELECT 1"}}], "edges": []}
 
     def test_disabled_rejects(self, service):
+        self._enable_ai(service, ai_enabled="false")  # 默认已改为开，显式关来测门禁
         with pytest.raises(QueryRejected, match="未开启"):
             service.ai_generate_workflow("demo", "main", "聚合分析", CALLER)
 
