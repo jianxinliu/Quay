@@ -379,3 +379,64 @@ class TestAiGenerateSql:
         monkeypatch.setattr(ai, "generate_sql", boom)
         with pytest.raises(QueryRejected, match="403"):
             service.ai_generate_sql("demo", "main", "q", CALLER, tables=["users"])
+
+
+class TestAiGenerateWorkflow:
+    """AI 生成 workflow：门禁、compile 校验、编译失败重修一次、审计、拓扑布局。"""
+
+    def _enable_ai(self, service, **over):
+        from dbmcp.settings import SettingsStore
+        service.settings = SettingsStore(":memory:")
+        service.save_settings({"ai_enabled": "true", **over})
+
+    _GOOD = {"nodes": [
+        {"id": "a", "type": "source", "name": "users_src",
+         "cfg": {"conn": "demo/main", "sql": "SELECT id, name FROM users"}},
+        {"id": "b", "type": "output", "name": "result", "cfg": {"limit": 10}}],
+        "edges": [{"from": "a", "to": "b", "port": "in"}]}
+    _BAD = {"nodes": [{"id": "a", "type": "source", "name": "bad name",
+                       "cfg": {"conn": "demo/main", "sql": "SELECT 1"}}], "edges": []}
+
+    def test_disabled_rejects(self, service):
+        with pytest.raises(QueryRejected, match="未开启"):
+            service.ai_generate_workflow("demo", "main", "聚合分析", CALLER)
+
+    def test_happy_path_compiles_and_layouts(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+        monkeypatch.setattr(ai, "generate_workflow",
+                            lambda **kw: (dict(self._GOOD), "sid-1"))
+        out = service.ai_generate_workflow("demo", "main", "把用户输出前10", CALLER,
+                                           tables=["users"])
+        g = out["graph"]
+        assert [n["name"] for n in g["nodes"]] == ["users_src", "result"]
+        # 拓扑布局赋了坐标：source 在第 0 层、output 在第 1 层
+        xs = {n["name"]: n["x"] for n in g["nodes"]}
+        assert xs["users_src"] < xs["result"]
+        recs = service.store.recent(filters={"tool": "ai_generate_workflow"})
+        assert recs and recs[0]["status"] == "ok"
+
+    def test_repair_once_on_compile_error(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+        calls = {"n": 0}
+
+        def fake(**kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                assert kw.get("repair_error") is None
+                return dict(self._BAD), "sid-1"      # 首轮：非法节点名 → compile 失败
+            assert kw.get("repair_error") and kw.get("session_id") == "sid-1"
+            return dict(self._GOOD), "sid-1"         # 重修：合法
+        monkeypatch.setattr(ai, "generate_workflow", fake)
+        out = service.ai_generate_workflow("demo", "main", "q", CALLER, tables=["users"])
+        assert calls["n"] == 2                        # 恰好重修一次
+        assert any(n["name"] == "result" for n in out["graph"]["nodes"])
+
+    def test_repair_still_invalid_rejects(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+        monkeypatch.setattr(ai, "generate_workflow",
+                            lambda **kw: (dict(self._BAD), "sid-1"))  # 两次都非法
+        with pytest.raises(QueryRejected, match="仍不合法"):
+            service.ai_generate_workflow("demo", "main", "q", CALLER, tables=["users"])

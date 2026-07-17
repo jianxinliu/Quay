@@ -762,9 +762,13 @@ def _settings_ai_body(s: dict) -> str:
                        "单次生成的最长等待时间，10–600 之间。")
         + _num_setting("最大表数", "ai_max_tables", s, 40,
                        "「整库」模式下最多把多少张表的结构发给 AI，超出会要求你勾选具体表（1–200）。")
-        + "<div style='margin-bottom:16px'><label>系统提示词</label>"
-        + f"<textarea name='ai_sql_prompt' rows='12' style='width:100%'>{prompt}</textarea>"
-        + "<div class='muted' style='margin-top:4px'>发给 AI 的系统提示（角色设定 + SQL 约束）。"
+        + "<div style='margin-bottom:16px'><label>SQL 生成系统提示词</label>"
+        + f"<textarea name='ai_sql_prompt' rows='10' style='width:100%'>{prompt}</textarea>"
+        + "<div class='muted' style='margin-top:4px'>生成 SQL 的系统提示（角色设定 + SQL 约束）。"
+        + "清空并保存即恢复默认。</div></div>"
+        + "<div style='margin-bottom:16px'><label>流程生成系统提示词</label>"
+        + f"<textarea name='ai_workflow_prompt' rows='6' style='width:100%'>{_esc(s.get('ai_workflow_prompt', ''))}</textarea>"
+        + "<div class='muted' style='margin-top:4px'>生成可视化流程（DAG 画布）的系统提示。"
         + "清空并保存即恢复默认。</div></div>")
 
 
@@ -1780,6 +1784,31 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True})
+
+    @mcp.custom_route("/admin/workflows/ai", methods=["POST"])
+    @guard
+    async def _wf_ai(req: Request) -> JSONResponse:
+        """让 AI 按连接/表结构 + 需求生成一张 workflow DAG（compile 校验+重修）。回前端载到画布，不执行。"""
+        from .service import QueryRejected
+        if not service.get_settings().get("ai_enabled"):
+            return JSONResponse({"ok": False, "error": "AI 辅助未开启"}, status_code=403)
+        f = await req.form()
+        question = str(f.get("question") or "")
+        schema = str(f.get("schema") or "").strip() or None
+        try:
+            tables = json.loads(str(f.get("tables") or "[]"))
+            tables = [str(t).strip() for t in tables if str(t).strip()] or None
+        except (ValueError, TypeError):
+            tables = None
+        caller = _caller(req)
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            out = await anyio.to_thread.run_sync(
+                lambda: service.ai_generate_workflow(
+                    project, connection, question, caller, schema=schema, tables=tables))
+        except (QueryRejected, KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True, **out})
 
     @mcp.custom_route("/admin/workflows/run", methods=["POST"])
     @guard

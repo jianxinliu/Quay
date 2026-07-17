@@ -430,6 +430,7 @@
         linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
         aiEnabled: false,       // 系统设置：AI 辅助写 SQL 是否开启（决定「✨ AI」按钮是否出现）
         aiPanel: null,          // AI 生成面板：{question, explain, samples, tables, picked, filter, loading, running, error}
+        wfAi: null,             // AI 生成流程面板：{question, conn, tables, picked, filter, loading, running, error, pos}
       };
     },
     computed: {
@@ -1197,6 +1198,62 @@
         }).catch(function (e) { if (self.aiPanel) { p.running = false; p.error = String(e); } });
       },
 
+      // ---------- AI 生成流程（DAG 画布，只生成不执行） ----------
+      openWfAi: function () {
+        var conn = this.realConnOptions[0] ? this.realConnOptions[0].value : "";
+        this.wfAi = { question: "", conn: conn, tables: [], picked: {}, filter: "",
+                      loading: !!conn, running: false, error: "", pos: { left: 60, top: 70 } };
+        if (conn) this.wfAiLoadTables();
+      },
+      wfAiSetConn: function (v) {
+        if (!this.wfAi) return;
+        this.wfAi.conn = v; this.wfAi.picked = {}; this.wfAi.tables = []; this.wfAi.loading = true;
+        this.wfAiLoadTables();
+      },
+      wfAiLoadTables: function () {
+        var self = this, w = this.wfAi; if (!w || !w.conn) return;
+        apiGet("/admin/sql/tables?conn=" + encodeURIComponent(w.conn)).then(function (d) {
+          if (!self.wfAi) return;
+          self.wfAi.loading = false;
+          if (d && d.ok) self.wfAi.tables = d.tables || [];
+          else self.wfAi.error = (d && d.error) || "无法加载表列表";
+        }).catch(function (e) { if (self.wfAi) { self.wfAi.loading = false; self.wfAi.error = String(e); } });
+      },
+      wfAiTogglePick: function (name) {
+        var w = this.wfAi; if (!w) return;
+        if (w.picked[name]) delete w.picked[name]; else w.picked[name] = true;
+      },
+      wfAiVisibleTables: function () {
+        var w = this.wfAi; if (!w) return [];
+        var f = (w.filter || "").toLowerCase().trim();
+        return f ? w.tables.filter(function (t) { return t.toLowerCase().indexOf(f) >= 0; }) : w.tables;
+      },
+      wfAiDragStart: function (e) {
+        var w = this.wfAi; if (!w) return;
+        var sx = e.clientX, sy = e.clientY, sl = w.pos.left, st = w.pos.top;
+        function mv(ev) { w.pos.left = Math.max(0, sl + ev.clientX - sx); w.pos.top = Math.max(0, st + ev.clientY - sy); }
+        function up() { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); }
+        window.addEventListener("mousemove", mv); window.addEventListener("mouseup", up);
+      },
+      wfAiGenerate: function () {
+        var self = this, w = this.wfAi, t = this.activeTab;
+        if (!w || !t || w.running) return;
+        if (!(w.question || "").trim()) { w.error = "请描述你想做的流程"; return; }
+        if (!w.conn) { w.error = "请选择取数连接"; return; }
+        w.running = true; w.error = "";
+        apiPost("/admin/workflows/ai", { conn: w.conn, question: w.question,
+                                         tables: JSON.stringify(Object.keys(w.picked)) }).then(function (d) {
+          if (!self.wfAi) return;
+          w.running = false;
+          if (!d || !d.ok) { w.error = (d && d.error) || "生成失败"; return; }
+          t.graph = { nodes: (d.graph && d.graph.nodes) || [], edges: (d.graph && d.graph.edges) || [] };
+          t.sel = null; t.nodeStatus = {};
+          self.wfAi = null;
+          self.persist();
+          self.flash("已生成流程，请审阅后点「运行流程」");
+        }).catch(function (e) { if (self.wfAi) { w.running = false; w.error = String(e); } });
+      },
+
       // ---------- 表右键菜单 / 批量 DROP ----------
       openCtx: function (e, t, db) {
         var k = this.mk(t, db);
@@ -1245,18 +1302,13 @@
       confirmDrop: function () {
         var self = this, plan = this.dropPlan, tab = this.activeTab;
         if (!plan || plan.running || !tab) return;
-        // C3：prod 写须连接名匹配（后端强校验，前端先拦一道）
-        var ctext = this.isProd ? ((plan.ctext || "").trim() || null) : null;
-        if (this.isProd && ctext !== this.connName) {
-          this.flash("请输入连接名「" + this.connName + "」以确认生产环境 DROP"); return;
-        }
         plan.running = true; plan.results = [];
         // 逐条执行（每条经 confirm=1，由 writer 执行并落审计 admin_execute）
         var chain = Promise.resolve();
         plan.items.forEach(function (item) {
           chain = chain.then(function () {
             var q = self.qn(item);
-            return apiPost("/admin/sql/run", { conn: tab.conn, sql: "DROP TABLE " + q, confirm: "1", confirm_text: ctext })
+            return apiPost("/admin/sql/run", { conn: tab.conn, sql: "DROP TABLE " + q, confirm: "1" })
               .then(function (d) {
                 plan.results.push({ q: q, ok: !!(d.ok && d.kind === "write"), error: d.error || "" });
               })
@@ -1807,7 +1859,7 @@
         // 同一 tab 已有查询在执行 → 直接拒绝（不排队、不并发），提示先取消
         if (t.running) { this.flash("当前查询仍在执行，请先取消或等待完成"); return; }
         t.isPaging = !!isPage;  // 翻页更新当前结果 tab；否则新执行=新结果 tab
-        // 确认执行：捕获确认元数据（指纹 H1 / prod 连接名 C3），下面 t.confirm 会被清空
+        // 确认执行：捕获确认元数据（指纹 H1），下面 t.confirm 会被清空
         var confData = confirm ? t.confirm : null;
         var sql;
         if (sqlOverride != null) sql = sqlOverride;
@@ -1846,7 +1898,6 @@
         apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
                                           page: page, schema: t.schema || null,
                                           parallel: t.type === "data" ? "1" : null,
-                                          confirm_text: confData ? ((confData.ctext || "").trim() || null) : null,
                                           expect_fingerprint: confData ? (confData.fingerprint || null) : null })
           .then(function (d) {
             // 连接忙被拒绝 / 其它提交错误 → 作为一个「出错结果页」呈现（不是顶部横幅）
@@ -1912,10 +1963,9 @@
           }
           else if (r.kind === "confirm") {
             self.setExecGlyph(t2, "");  // 待人工确认，非终态
-            // 存下指纹（H1 确认时回传绑定）+ prod 标记与待输入的连接名（C3 二次闸门）
+            // 存下指纹（H1 确认时回传绑定）+ prod 标记（仅用于红色视觉警示）
             t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind,
-                           fingerprint: r.fingerprint || "", prod: !!r.prod,
-                           expectText: r.expect_text || "", ctext: "" };
+                           fingerprint: r.fingerprint || "", prod: !!r.prod };
           }
           else if (r.kind === "write") {
             self.setExecGlyph(t2, "ok");
@@ -2000,12 +2050,7 @@
       },
       confirmRun: function () {
         var t = this.activeTab; if (!t || !t.confirm) return;
-        var c = t.confirm;
-        // C3：prod 写须再次输入连接名匹配（后端也会强校验，这里先拦一道给出清晰提示）
-        if (c.prod && (c.ctext || "").trim() !== (c.expectText || this.connName)) {
-          this.flash("请输入连接名「" + (c.expectText || this.connName) + "」以确认生产环境写操作"); return;
-        }
-        this.run(true);  // run() 会捕获 t.confirm 后再清空，指纹/连接名随请求带出
+        this.run(true);  // run() 会捕获 t.confirm 后再清空，指纹随请求带出
       },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
       applyWhere: function () { this.run(false, 0); },
@@ -2040,7 +2085,34 @@
         this.sug.open = false;
         this.$nextTick(function () { if (el) { el.focus(); el.setSelectionRange(before.length, before.length); } });
       },
+      // WHERE / ORDER BY 输入框的引号/括号自动闭合（对齐编辑器体验）；处理了返回 true
+      acHandle: function (which, e) {
+        if (e.ctrlKey || e.metaKey || e.altKey) return false;
+        var PAIR = { "(": ")", "[": "]", "{": "}", "'": "'", '"': '"', "`": "`" };
+        var el = e.target, val = el.value, s = el.selectionStart, ep = el.selectionEnd, k = e.key, self = this;
+        var setVal = function (nv, caret) {
+          if (which === "where") self.activeTab.where = nv; else self.activeTab.orderBy = nv;
+          self.$nextTick(function () { el.value = nv; el.setSelectionRange(caret, caret); });
+        };
+        // 退格夹在空成对符号中间 → 连右符号一起删
+        if (k === "Backspace" && s === ep && s > 0 && PAIR[val[s - 1]] === val[s]) {
+          e.preventDefault(); setVal(val.slice(0, s - 1) + val.slice(s + 1), s - 1); return true;
+        }
+        if (k.length !== 1) return false;
+        // 光标后正好是同一个右符号 → 只跳过、不重复插入
+        if (s === ep && val[s] === k && (k === ")" || k === "]" || k === "}" || k === "'" || k === '"' || k === "`")) {
+          e.preventDefault(); el.setSelectionRange(s + 1, s + 1); return true;
+        }
+        if (PAIR[k]) {
+          e.preventDefault();
+          var sel = val.slice(s, ep);   // 有选中则包裹，无选中则插入空成对符
+          setVal(val.slice(0, s) + k + sel + PAIR[k] + val.slice(ep), s + 1 + sel.length);
+          return true;
+        }
+        return false;
+      },
       filterKey: function (which, e) {
+        if (this.acHandle(which, e)) { this.sug.open = false; return; }
         if (this.sug.open && this.sug.which === which) {
           if (e.key === "ArrowDown") { e.preventDefault(); this.sug.sel = Math.min(this.sug.sel + 1, this.sug.items.length - 1); return; }
           if (e.key === "ArrowUp") { e.preventDefault(); this.sug.sel = Math.max(this.sug.sel - 1, 0); return; }
@@ -2082,6 +2154,15 @@
         if (typeof original === "number" && v !== "" && !isNaN(+v)) return "" + (+v);
         return "'" + String(v).replace(/'/g, "''") + "'";
       },
+      // 按方言给标识符（表名/列名）加引号 —— 否则保留字或特殊字符的列名（如 key/order/desc）会 SQL 语法错误
+      qid: function (name) {
+        var m = this.connMeta, eng = m ? m.engine : "";
+        if (eng === "mysql") return "`" + String(name).replace(/`/g, "``") + "`";
+        return '"' + String(name).replace(/"/g, '""') + '"';   // postgres / sqlite / duckdb
+      },
+      qtable: function (t) {
+        return t.schema ? this.qid(t.schema) + "." + this.qid(t.table) : this.qid(t.table);
+      },
       startEdit: function (ri, ci) {
         var t = this.activeTab;
         if (!t || t.type !== "data" || !t.result) return;
@@ -2106,28 +2187,6 @@
       },
 
       cancelEdit: function () { if (this.activeTab) this.activeTab.edit = null; },
-      // 生成按主键定位的单单元格 UPDATE；失败返回 null（原因已 flash）
-      makeUpdateSql: function (t, ri, ci, newRaw) {
-        var k = this.mk(t.table, t.schema);
-        var meta = this.tableMeta[k];
-        if (!meta) { this.fetchMeta(t.table, t.schema); this.flash("表结构加载中，请稍后再试"); return null; }
-        var pk = meta.primary_key || [];
-        if (!pk.length) { this.flash("该表无主键，无法定位行进行编辑"); return null; }
-        var cols = t.result.columns, row = t.result.rows[ri];
-        var self = this;
-        var conds = pk.map(function (p) {
-          var idx = cols.indexOf(p);
-          if (idx < 0) return null;
-          var pv = row[idx];
-          return p + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
-        });
-        if (conds.some(function (c) { return c == null; })) {
-          this.flash("结果集缺少主键列，无法定位行"); return null;
-        }
-        var q = t.schema ? t.schema + "." + t.table : t.table;
-        return "UPDATE " + q + " SET " + cols[ci] + " = " + this.sqlLit(newRaw, row[ci]) +
-               " WHERE " + conds.join(" AND ");
-      },
       commitEdit: function () {
         var t = this.activeTab;
         if (!t || !t.edit || !t.result) return;
@@ -2316,20 +2375,20 @@
         var conds = pk.map(function (p) {
           var idx = cols.indexOf(p); if (idx < 0) { miss = true; return null; }
           var pv = row[idx];
-          return p + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
+          return self.qid(p) + (pv == null ? " IS NULL" : " = " + self.sqlLit(self.cellText(pv), pv));
         });
         if (miss) return { err: "结果集缺少主键列，无法定位行" };
         return { conds: conds };
       },
       // 汇总所有暂存改动为 SQL 语句数组（INSERT/UPDATE/DELETE）
       buildPendingStatements: function (t) {
-        var q = t.schema ? t.schema + "." + t.table : t.table, cols = t.result.columns, self = this;
+        var q = this.qtable(t), cols = t.result.columns, self = this;
         var stmts = [];
         (t.adds || []).forEach(function (add) {
           var c = [], v = [];
           for (var i = 0; i < cols.length; i++) {
             var raw = add.values[i]; if (raw === "" || raw == null) continue;
-            c.push(cols[i]); v.push(self.sqlLit(raw, null));
+            c.push(self.qid(cols[i])); v.push(self.sqlLit(raw, null));
           }
           if (c.length) stmts.push("INSERT INTO " + q + " (" + c.join(", ") + ") VALUES (" + v.join(", ") + ")");
         });
@@ -2340,7 +2399,7 @@
         for (var ri in byRow) {
           var pc = this.pkConds(t, ri); if (pc.err) return { err: pc.err };
           var row = t.result.rows[ri];
-          var sets = byRow[ri].map(function (e) { return cols[e.ci] + " = " + self.sqlLit(e.val, row[e.ci]); });
+          var sets = byRow[ri].map(function (e) { return self.qid(cols[e.ci]) + " = " + self.sqlLit(e.val, row[e.ci]); });
           stmts.push("UPDATE " + q + " SET " + sets.join(", ") + " WHERE " + pc.conds.join(" AND "));
         }
         var delRis = Object.keys(t.dels || {});
@@ -2357,8 +2416,7 @@
         var res = this.buildPendingStatements(t);
         if (res.err) { this.flash(res.err); return; }
         if (!res.statements.length) { this.flash("无有效改动（新增行至少填一列）"); return; }
-        // prod 写强制走 SQL 预览卡片，以便收集连接名（C3 二次闸门）
-        if (mode === "sql" || this.isProd) t.submit = { statements: res.statements, sql: res.statements.join(";\n") + ";", ctext: "" };
+        if (mode === "sql") t.submit = { statements: res.statements, sql: res.statements.join(";\n") + ";" };
         else this.doSubmit(res.statements);
       },
       cancelSubmit: function () { if (this.activeTab) this.activeTab.submit = null; },
@@ -2366,16 +2424,11 @@
         var t = this.activeTab; if (!t) return;
         var stmts = statements || (t.submit && t.submit.statements);
         if (!stmts || !stmts.length) return;
-        // C3：prod 写须连接名匹配（后端强校验，前端先拦一道）
-        var ctext = this.isProd ? ((t.submit && t.submit.ctext || "").trim() || null) : null;
-        if (this.isProd && ctext !== this.connName) {
-          this.flash("请输入连接名「" + this.connName + "」以确认生产环境写操作"); return;
-        }
         var self = this; t.submit = null; t.submitting = true; t.err = null;
         var chain = Promise.resolve(), fails = [], okc = 0;
         stmts.forEach(function (sql) {
           chain = chain.then(function () {
-            return apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: "1", confirm_text: ctext }).then(function (d) {
+            return apiPost("/admin/sql/run", { conn: t.conn, sql: sql, confirm: "1" }).then(function (d) {
               if (d && d.ok) okc++; else fails.push((d && d.error) || ("失败：" + sql));
             }).catch(function (e) { fails.push("" + e); });
           });
@@ -2983,6 +3036,18 @@
       // ---------- Monaco ----------
       initEditor: function () {
         var self = this, monaco = window.monaco;
+        // 显式给 sql 语言配上自动闭合/包裹对：不依赖懒加载的 basic-languages/sql 配置
+        monaco.languages.setLanguageConfiguration("sql", {
+          autoClosingPairs: [
+            { open: "(", close: ")" }, { open: "[", close: "]" }, { open: "{", close: "}" },
+            { open: "'", close: "'" }, { open: '"', close: '"' }, { open: "`", close: "`" },
+          ],
+          surroundingPairs: [
+            { open: "(", close: ")" }, { open: "[", close: "]" }, { open: "{", close: "}" },
+            { open: "'", close: "'" }, { open: '"', close: '"' }, { open: "`", close: "`" },
+          ],
+          brackets: [["(", ")"], ["[", "]"], ["{", "}"]],
+        });
         this.tabs.forEach(function (t) {
           if (!models.has(t.id)) models.set(t.id, monaco.editor.createModel(t.sql || "", "sql"));
         });
@@ -2995,6 +3060,8 @@
           glyphMargin: true,   // 书签图标显示在行号左侧的字形边栏
           fontFamily: "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace",
           renderWhitespace: "selection",
+          // 引号/括号自动闭合 + 选中后包裹（always 不依赖懒加载的 SQL 语言配置）
+          autoClosingBrackets: "always", autoClosingQuotes: "always", autoSurround: "languageDefined",
           readOnly: !!this.activeTab && this.activeTab.type === "ddl",
           // hover/补全等浮层渲染到 body 层的固定容器：不再被编辑器容器裁切，
           // Monaco 会按真实可视空间决定弹在光标上方还是下方（顶部空间不够就弹下面）
@@ -3417,13 +3484,9 @@
       <div v-if="dropPlan.results" class="res">
         <div v-for="r in dropPlan.results" :key="r.q" :class="r.ok?'okline':'errline'">{{ r.ok?'✓':'✗' }} {{ r.q }} <span v-if="r.error">— {{ r.error }}</span></div>
       </div>
-      <div v-if="!dropPlan.results && isProd" class="dg-prod-gate">
-        ⚠ 生产环境 —— 请输入连接名 <b>{{ connName }}</b> 以确认：
-        <input v-model="dropPlan.ctext" class="dg-imp-in" style="width:180px" placeholder="连接名">
-      </div>
       <div class="acts">
         <template v-if="!dropPlan.results">
-          <button class="dg-btn danger" :disabled="dropPlan.running || (isProd && (dropPlan.ctext||'').trim() !== connName)" @click="confirmDrop">{{ dropPlan.running ? "执行中…" : "确认 DROP" }}</button>
+          <button class="dg-btn danger" :disabled="dropPlan.running" @click="confirmDrop">{{ dropPlan.running ? "执行中…" : "确认 DROP" }}</button>
           <button class="dg-btn" :disabled="dropPlan.running" @click="dropPlan=null">取消</button>
         </template>
         <button v-else class="dg-btn" @click="dropPlan=null">关闭</button>
@@ -3536,7 +3599,38 @@
         <button class="dg-btn" @click="flowAddNode('aggregate')">＋聚合</button>
         <button class="dg-btn" @click="flowAddNode('sql')" title="自由 SQL（直接引用上游节点名）">＋SQL</button>
         <button class="dg-btn" @click="flowAddNode('output')">＋输出</button>
+        <button v-if="aiEnabled" class="dg-btn" style="border-color:var(--dg-accent);color:var(--dg-text)"
+                @click="openWfAi" title="用 AI 按需求生成整张流程图（载到画布，不执行）">✨ AI 生成流程</button>
         <span class="hint" style="margin-left:auto">拖节点右缘圆点 → 下一节点左缘连线 · 点 ✕ 删连线 · 工作区 {{ (activeTab.conn||'').split('/')[1] }}</span>
+      </div>
+      <div v-if="wfAi" class="dg-ai-pop" :style="{left: wfAi.pos.left + 'px', top: wfAi.pos.top + 'px'}">
+        <div class="dg-ai-head" @mousedown="wfAiDragStart"><span class="t">✨ AI 生成流程</span>
+          <span class="x" @mousedown.stop @click="wfAi=null" title="关闭">✕</span></div>
+        <div class="dg-ai-empty" style="margin-bottom:4px">描述你要做的分析，AI 生成整张 DAG（校验通过后载到画布，不执行）。会覆盖当前画布。</div>
+        <textarea class="dg-ai-q" v-model="wfAi.question" rows="2" spellcheck="false"
+                  placeholder="例如：从订单表按用户聚合总消费额，关联用户表取城市，输出消费前 20 名"
+                  @keydown.meta.enter.stop="wfAiGenerate" @keydown.ctrl.enter.stop="wfAiGenerate"></textarea>
+        <div class="dg-ai-scope">
+          <div class="dg-ai-scope-hd"><span>取数连接</span></div>
+          <dg-select :model-value="wfAi.conn" :options="realConnOptions" placeholder="选择连接…"
+                     @update:model-value="wfAiSetConn"/>
+        </div>
+        <div class="dg-ai-scope">
+          <div class="dg-ai-scope-hd"><span>表 · 已选 {{ wfAi.picked ? Object.keys(wfAi.picked).length : 0 }}（不选=整库）</span>
+            <input v-model="wfAi.filter" placeholder="筛选…" class="dg-ai-filter"></div>
+          <div v-if="wfAi.loading" class="dg-ai-empty">加载表…</div>
+          <div v-else-if="wfAi.tables.length" class="dg-ai-tables">
+            <label v-for="tb in wfAiVisibleTables()" :key="tb" class="dg-ai-tbl">
+              <input type="checkbox" :checked="!!wfAi.picked[tb]" @change="wfAiTogglePick(tb)"> {{ tb }}
+            </label>
+          </div>
+          <div v-else class="dg-ai-empty">（选个连接以列表；也可不选表按整库生成）</div>
+        </div>
+        <div v-if="wfAi.error" class="dg-ai-err">{{ wfAi.error }}</div>
+        <div class="dg-ai-foot"><span class="sp"></span>
+          <button class="dg-btn run" :disabled="wfAi.running" @click="wfAiGenerate">{{ wfAi.running ? "生成中…（约 10–60s）" : "生成 ⌘↵" }}</button>
+          <button class="dg-btn" :disabled="wfAi.running" @click="wfAi=null">取消</button>
+        </div>
       </div>
       <div class="dg-flow-body">
         <div class="dg-flow-canvas" ref="flowCanvas">
@@ -3691,14 +3785,8 @@
           <div style="font-size:12px;color:var(--dg-muted)">将用 writer 账号<b>直接执行</b>并记入审计（后台旁路，不进审批单）。</div>
           <div class="kv"><span>影响表：{{ (activeTab.confirm.risk.tables||[]).join(", ")||"—" }}</span><span>表行量级：{{ numOr(activeTab.confirm.risk.row_estimate) }}</span><span>含 WHERE：{{ boolText(activeTab.confirm.risk.has_where) }}</span><span>命中索引：{{ boolText(activeTab.confirm.risk.uses_index) }}</span></div>
           <div class="reasons" v-for="r in (activeTab.confirm.risk.reasons||[])" :key="r">• {{ r }}</div>
-          <div v-if="activeTab.confirm.prod" class="dg-prod-gate">
-            ⚠ 生产环境写操作 —— 请输入连接名
-            <b>{{ activeTab.confirm.expectText || connName }}</b> 以确认：
-            <input v-model="activeTab.confirm.ctext" class="dg-imp-in" style="width:180px"
-                   placeholder="连接名" @keydown.enter="confirmRun">
-          </div>
+          <div v-if="activeTab.confirm.prod" class="dg-prod-warn">⚠ 生产环境写操作 —— 将直接影响线上数据，请确认无误。</div>
           <div class="acts"><button class="dg-btn ok"
-            :disabled="activeTab.confirm.prod && (activeTab.confirm.ctext||'').trim() !== (activeTab.confirm.expectText || connName)"
             @click="confirmRun">确认执行</button><button class="dg-btn" @click="cancelConfirm">取消</button></div>
         </div>
         <div v-if="activeTab.wfSteps && activeTab.wfSteps.length" class="dg-wfsteps">
@@ -3716,12 +3804,8 @@
           <h4>确认提交 · {{ activeTab.submit.statements.length }} 条语句</h4>
           <div style="font-size:12px;color:var(--dg-muted)">将由 writer 账号依次执行并记入审计（后台旁路，不进审批单）。</div>
           <pre class="dg-submit-sql">{{ activeTab.submit.sql }}</pre>
-          <div v-if="isProd" class="dg-prod-gate">
-            ⚠ 生产环境 —— 请输入连接名 <b>{{ connName }}</b> 以确认：
-            <input v-model="activeTab.submit.ctext" class="dg-imp-in" style="width:180px" placeholder="连接名">
-          </div>
+          <div v-if="isProd" class="dg-prod-warn">⚠ 生产环境 —— 将直接影响线上数据，请确认无误。</div>
           <div class="acts"><button class="dg-btn ok"
-            :disabled="isProd && (activeTab.submit.ctext||'').trim() !== connName"
             @click="doSubmit()">确认提交（writer 执行）</button>
             <button class="dg-btn" @click="cancelSubmit">取消</button></div>
         </div>

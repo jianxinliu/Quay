@@ -142,6 +142,111 @@ def generate_sql(
     return result
 
 
+# ---------- workflow（DAG 画布）生成 ----------
+
+# 教 AI 画布 DAG 的 JSON 结构与节点契约（对齐 workflows.compile_graph）。
+WORKFLOW_FORMAT_DOC = """\
+Workflow 是一张有向无环图（DAG），在 DuckDB 分析工作区里从各数据库连接取数、逐步加工。
+输出一个 JSON 对象：{"nodes":[...],"edges":[...]}。
+
+节点 node = {"id":"唯一短id","type":"类型","name":"节点名","cfg":{...}}
+- name 必须字母开头、仅含字母/数字/下划线（会作为中间视图名，下游用 name 引用它）
+- 不要写 x/y 坐标（由系统自动排版）
+type 及其 cfg：
+- source   取数（无输入）      cfg:{"conn":"project/connection","sql":"SELECT ...","limit":可选整数}
+- filter   过滤（1 输入 in）    cfg:{"where":"amount > 0"}         → SELECT * FROM 上游 WHERE ...
+- join     连接（2 输入 left/right）cfg:{"kind":"INNER|LEFT|RIGHT|FULL","on":"l.id = r.uid","select":"l.*, r.name"}  左表别名 l、右表别名 r
+- aggregate 聚合（1 输入 in）   cfg:{"group":"city","aggs":"count(*) AS n, sum(amount) AS total"}
+- sql      自由 SQL（任意输入） cfg:{"sql":"SELECT ... FROM 上游节点name ..."}   直接用上游节点的 name 当表名
+- output   输出（1 输入 in，最多一个，终点）cfg:{"order_by":"total DESC","limit":100}
+
+边 edge = {"from":"上游node.id","to":"下游node.id","port":"in|left|right"}
+- 普通节点用 port "in"；join 的两个输入分别用 "left" 和 "right"
+- from/to 用节点的 id（不是 name）；下游 SQL 里引用上游时用 name
+
+规则：source 的 conn 必须是给定「可用连接」里的某个值；只用给定表结构里真实存在的表和列；图必须无环。
+
+示例（把一个库的订单按用户聚合再排序）：
+{"nodes":[
+  {"id":"a","type":"source","name":"orders","cfg":{"conn":"demo/main","sql":"SELECT user_id, amount FROM orders","limit":100000}},
+  {"id":"b","type":"aggregate","name":"by_user","cfg":{"group":"user_id","aggs":"sum(amount) AS total"}},
+  {"id":"c","type":"output","name":"result","cfg":{"order_by":"total DESC","limit":50}}
+ ],
+ "edges":[{"from":"a","to":"b","port":"in"},{"from":"b","to":"c","port":"in"}]}"""
+
+DEFAULT_WORKFLOW_PROMPT = (
+    "你是数据分析流程设计专家。根据可用连接、表结构和用户需求，设计一张 Workflow DAG。"
+    "尽量用少而清晰的节点表达需求；取数节点的 SQL 只取需要的列并带合理 LIMIT。"
+)
+
+_WF_CONTRACT = "只输出该 JSON 对象，不要 markdown 代码围栏、不要额外解释。"
+
+
+def build_workflow_prompt(
+    system_prompt: str,
+    dialect: str,
+    connections: list[str],
+    ddls: list[tuple[str, str]],
+    question: str,
+) -> str:
+    """拼出让 AI 生成 workflow DAG 的完整 prompt（纯函数）。"""
+    parts = [(system_prompt or DEFAULT_WORKFLOW_PROMPT).strip(), "", WORKFLOW_FORMAT_DOC, ""]
+    parts.append(f"取数节点里 SQL 的数据库方言：{dialect}")
+    parts.append("可用连接（source 的 conn 只能从中选）：")
+    parts.append("、".join(connections) if connections else "（无）")
+    parts.append("")
+    parts.append("=== 相关表结构 ===")
+    for name, ddl in ddls:
+        parts.append((ddl or "").strip())
+        parts.append("")
+    parts.append("=== 需求 ===")
+    parts.append((question or "").strip())
+    parts.append("")
+    parts.append(_WF_CONTRACT)
+    return "\n".join(parts)
+
+
+def build_workflow_repair_prompt(error: str) -> str:
+    """重修 prompt（续接会话）：把编译错误回喂给 AI，让它改好重出完整 JSON。"""
+    return ("上一版流程图校验没通过，错误：\n" + (error or "").strip()
+            + "\n\n请修正后重新输出**完整**的 JSON 对象（nodes+edges）。" + _WF_CONTRACT)
+
+
+def generate_workflow(
+    *,
+    system_prompt: str,
+    dialect: str,
+    connections: list[str],
+    ddls: list[tuple[str, str]],
+    question: str,
+    provider: str,
+    model: str,
+    timeout: int,
+    cli_path: str = "",
+    repair_error: str | None = None,
+    session_id: str | None = None,
+) -> tuple[dict, str]:
+    """拼 prompt → 调 AI → 解析出 workflow graph dict。返回 (graph, session_id)。失败抛 AIError。
+
+    repair_error 非空 = 重修：续接会话、只回喂编译错误（不重发表结构）。
+    """
+    if repair_error and session_id:
+        prompt = build_workflow_repair_prompt(repair_error)
+    else:
+        prompt = build_workflow_prompt(system_prompt, dialect, connections, ddls, question)
+    raw, new_sid = run_ai(prompt, provider=provider, model=model, timeout=timeout,
+                          cli_path=cli_path, session_id=session_id)
+    graph = _parse_workflow_output(raw)
+    if not isinstance(graph, dict) or "nodes" not in graph:
+        raise AIError(f"AI 未按格式输出流程图：{raw.strip()[:200]}")
+    graph.setdefault("edges", [])
+    return graph, new_sid
+
+
+def _parse_workflow_output(text: str) -> object:
+    return _try_json(_strip_fences((text or "").strip()))
+
+
 # ---------- provider 调用 ----------
 
 

@@ -694,3 +694,28 @@ def test_ai_route_generates_when_enabled(client, monkeypatch):
     assert "COUNT(*)" in d["sql"].upper() and "USERS" in d["sql"].upper()
     assert d["explanation"] == "走全表"
     assert d["session_id"] == "sid-9"
+
+
+def test_workflow_ai_gated_and_generates(client, monkeypatch):
+    """流程 AI 路由：未开启 403；开启后返回校验通过的 graph（假 ai.generate_workflow）。"""
+    from dbmcp import ai
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    # 未开启 → 403
+    r = tc.post("/admin/workflows/ai", data={"conn": "demo/main", "question": "聚合"})
+    assert r.status_code == 403
+    # 开启 + 假 AI 返回合法 graph
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    good = {"nodes": [
+        {"id": "a", "type": "source", "name": "src", "cfg": {"conn": "demo/main", "sql": "SELECT id FROM users"}},
+        {"id": "b", "type": "output", "name": "out", "cfg": {"limit": 5}}],
+        "edges": [{"from": "a", "to": "b", "port": "in"}]}
+    monkeypatch.setattr(ai, "generate_workflow", lambda **kw: (dict(good), "sid"))
+    r2 = tc.post("/admin/workflows/ai",
+                 data={"conn": "demo/main", "question": "输出用户", "tables": '["users"]'})
+    assert r2.status_code == 200
+    d = r2.json()
+    assert d["ok"] is True
+    assert [n["name"] for n in d["graph"]["nodes"]] == ["src", "out"]
+    assert all("x" in n and "y" in n for n in d["graph"]["nodes"])  # 已排版

@@ -59,6 +59,34 @@ def _rows_to_text(columns: list[str], rows: list[list], max_rows: int = 5) -> st
     return "\n".join(lines)
 
 
+def _layout_graph(graph: dict) -> None:
+    """给 AI 生成的节点按拓扑层级赋 x/y（AI 不给坐标），使画布排版可读。原地修改。"""
+    nodes = graph.get("nodes") or []
+    ids = {n.get("id") for n in nodes}
+    preds: dict = {n.get("id"): [] for n in nodes}
+    for e in graph.get("edges") or []:
+        if e.get("from") in ids and e.get("to") in ids:
+            preds[e["to"]].append(e["from"])
+    level: dict = {}
+
+    def _lvl(nid: str, seen: frozenset) -> int:
+        if nid in level:
+            return level[nid]
+        ps = [p for p in preds.get(nid, []) if p not in seen]
+        level[nid] = 0 if not ps else 1 + max(_lvl(p, seen | {nid}) for p in ps)
+        return level[nid]
+
+    for n in nodes:
+        _lvl(n.get("id"), frozenset())
+    per_level: dict = {}
+    for n in nodes:
+        lv = level.get(n.get("id"), 0)
+        row = per_level.get(lv, 0)
+        per_level[lv] = row + 1
+        n["x"] = 30 + lv * 200
+        n["y"] = 30 + row * 100
+
+
 @dataclass
 class CallerInfo:
     agent: str = "unknown"
@@ -219,10 +247,9 @@ class DbmService:
           **不执行**。
         - 写语句 + confirm=True：经人工二次确认，直接用 writer 账号执行并落审计。
           这是后台专属旁路（不进审批单）；红线「拒绝—重提」只约束 agent 的 execute。
-          两道二次闸门：
-            · **H1 指纹绑定**：确认时若带回 expect_fingerprint，须与当前 SQL 的指纹一致，
-              否则拒绝——防「看 A 批 B」（确认前后 SQL 被改）。
-            · **C3 prod 写闸门**：生产环境写操作除风险确认外，还须 confirm_text 匹配连接名。
+          二次闸门 H1 指纹绑定：确认时若带回 expect_fingerprint，须与当前 SQL 的指纹一致，
+          否则拒绝——防「看 A 批 B」（确认前后 SQL 被改）。
+          注：prod 写操作只需人工二次确认（不再要求输入连接名），便利优先；红框/红条视觉警示仍在。
         - schema：执行 schema 上下文（右上角选择），未限定表名的 SQL 在该库下执行。
         """
         cfg = self.config.get_connection(project, connection)
@@ -280,13 +307,6 @@ class DbmService:
             rec.detail = "确认指纹与提交 SQL 不一致，已拒绝执行（H1）"
             self.store.record(rec)
             raise QueryRejected("SQL 在确认前后发生了变化（指纹不一致），已拒绝执行，请重新确认。")
-        # C3：prod 写操作须额外输入连接名匹配，作为第二道人工闸门
-        if is_prod and (confirm_text or "").strip() != connection:
-            rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
-            rec.status = "rejected"
-            rec.detail = "prod 写操作二次闸门：连接名未匹配，已拒绝执行（C3）"
-            self.store.record(rec)
-            raise QueryRejected(f"生产环境写操作需再次输入连接名「{connection}」确认后才能执行。")
 
         rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
         if schema:
@@ -1084,6 +1104,68 @@ class DbmService:
         tool = "ai_followup_sql" if session_id else "ai_generate_sql"
         try:
             return self._audited(project, connection, cfg, tool,
+                                 question[:2000], caller, _run)
+        except ai.AIError as e:
+            raise QueryRejected(str(e)) from e
+
+    def ai_generate_workflow(
+        self, project: str, connection: str, question: str, caller: CallerInfo,
+        *, schema: str | None = None, tables: list[str] | None = None,
+    ) -> dict:
+        """让命令行 AI 按连接/表结构 + 需求设计一张 workflow DAG（画布图）。
+
+        产物用 compile_graph 校验，编译失败把错误回喂给 AI 重修一次；仍失败则报错。
+        返回 {graph:{nodes,edges}}（节点已排版赋 x/y），前端载到画布待人审阅、不自动执行。
+        """
+        from . import ai
+        from .workflows import WorkflowError, compile_graph
+
+        s = self.get_settings()
+        if not s.get("ai_enabled"):
+            raise QueryRejected("AI 辅助未开启，请在系统设置中开启")
+        question = (question or "").strip()
+        if not question:
+            raise QueryRejected("请描述你想做的分析流程")
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine not in ("mysql", "postgres", "sqlite"):
+            raise QueryRejected(f"连接引擎 {cfg.engine} 暂不支持 AI 生成流程")
+        engine = self.pool.get(project, connection, cfg)
+        max_tables = int(s.get("ai_max_tables") or 40)
+        # 可用连接（供 source 节点选，排除 redis）
+        conns = [f"{p}/{c}" for p, proj in sorted(self.config.projects.items())
+                 for c, cc in sorted(proj.connections.items()) if cc.engine != "redis"]
+
+        def _run() -> dict:
+            names = list(tables or [])
+            if not names:
+                names = engines.list_tables(engine, schema)
+            if len(names) > max_tables:
+                raise QueryRejected(
+                    f"待发送的表有 {len(names)} 张，超过上限 {max_tables}；请勾选具体的表")
+            ddls: list[tuple[str, str]] = []
+            for t in names:
+                tbl_schema, tbl = (t.split(".", 1) if "." in t else (schema, t))
+                ddls.append((tbl, engines.get_table_ddl(engine, cfg.engine, tbl, tbl_schema)))
+            kw = dict(system_prompt=str(s.get("ai_workflow_prompt") or ai.DEFAULT_WORKFLOW_PROMPT),
+                      dialect=cfg.engine, connections=conns, ddls=ddls, question=question,
+                      provider=str(s.get("ai_provider") or "claude"),
+                      model=str(s.get("ai_model") or ""),
+                      timeout=int(s.get("ai_timeout_s") or 60),
+                      cli_path=str(s.get("ai_cli_path") or ""))
+            graph, sid = ai.generate_workflow(**kw)
+            try:
+                compile_graph(graph)
+            except WorkflowError as e:  # 回喂错误、续接会话重修一次
+                graph, sid = ai.generate_workflow(**kw, repair_error=str(e), session_id=sid)
+                try:
+                    compile_graph(graph)
+                except WorkflowError as e2:
+                    raise QueryRejected(f"AI 生成的流程仍不合法：{e2}") from e2
+            _layout_graph(graph)
+            return {"graph": graph}
+
+        try:
+            return self._audited(project, connection, cfg, "ai_generate_workflow",
                                  question[:2000], caller, _run)
         except ai.AIError as e:
             raise QueryRejected(str(e)) from e

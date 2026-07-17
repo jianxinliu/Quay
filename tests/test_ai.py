@@ -169,6 +169,54 @@ def test_generate_sql_first_turn_sends_ddl(monkeypatch):
     assert r.session_id == "new-sid"
 
 
+# ---------- workflow（DAG）生成 ----------
+
+def test_build_workflow_prompt_has_format_conns_ddl_question():
+    p = ai.build_workflow_prompt("sys", "mysql", ["demo/main", "demo/other"],
+                                 [("orders", "CREATE TABLE orders(id INT)")], "按用户聚合")
+    assert "nodes" in p and "edges" in p           # 格式文档
+    assert "demo/main" in p and "demo/other" in p  # 可用连接
+    assert "CREATE TABLE orders" in p              # 表结构
+    assert "按用户聚合" in p                         # 需求
+
+
+def test_build_workflow_repair_prompt_carries_error():
+    p = ai.build_workflow_repair_prompt("节点名 'x y' 不合法")
+    assert "x y" in p and "完整" in p
+
+
+def test_generate_workflow_parses_graph(monkeypatch):
+    graph = {"nodes": [{"id": "a", "type": "source", "name": "o", "cfg": {}}], "edges": []}
+    monkeypatch.setattr(ai, "run_ai", lambda *a, **k: (json.dumps(graph), "sid-w"))
+    g, sid = ai.generate_workflow(system_prompt="s", dialect="mysql", connections=["demo/main"],
+                                  ddls=[], question="q", provider="claude", model="", timeout=10)
+    assert g["nodes"][0]["name"] == "o"
+    assert g.get("edges") == []
+    assert sid == "sid-w"
+
+
+def test_generate_workflow_repair_uses_error_and_session(monkeypatch):
+    seen = {}
+
+    def fake_run_ai(prompt, **kw):  # noqa: ANN001
+        seen["prompt"] = prompt
+        seen["session_id"] = kw.get("session_id")
+        return json.dumps({"nodes": [], "edges": []}), "sid2"
+    monkeypatch.setattr(ai, "run_ai", fake_run_ai)
+    ai.generate_workflow(system_prompt="s", dialect="mysql", connections=[], ddls=[],
+                         question="q", provider="claude", model="", timeout=10,
+                         repair_error="环检测失败", session_id="sid1")
+    assert "环检测失败" in seen["prompt"]
+    assert seen["session_id"] == "sid1"
+
+
+def test_generate_workflow_bad_output_raises(monkeypatch):
+    monkeypatch.setattr(ai, "run_ai", lambda *a, **k: ("这不是 JSON", ""))
+    with pytest.raises(ai.AIError, match="未按格式"):
+        ai.generate_workflow(system_prompt="s", dialect="mysql", connections=[], ddls=[],
+                             question="q", provider="claude", model="", timeout=10)
+
+
 def test_generate_sql_followup_omits_ddl(monkeypatch):
     captured = {}
 

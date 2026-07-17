@@ -103,39 +103,18 @@ class TestProdWriteGate:
         finally:
             svc.close()
 
-    def test_prod_write_without_confirm_text_rejected(self, tmp_path):
+    def test_prod_write_confirm_executes_without_connection_name(self, tmp_path):
+        # 便利优先：prod 写只需人工二次确认（confirm=True），不再要求输入连接名
         svc = _make_service(tmp_path, "prod")
         try:
-            with pytest.raises(QueryRejected):
-                svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True)
-            # 数据未变
-            out = svc.admin_run_sql("demo", "main", "SELECT age FROM users WHERE id=1", CALLER)
-            assert out["rows"][0][0] == 30
-        finally:
-            svc.close()
-
-    def test_prod_write_wrong_confirm_text_rejected(self, tmp_path):
-        svc = _make_service(tmp_path, "prod")
-        try:
-            with pytest.raises(QueryRejected):
-                svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True,
-                                  confirm_text="wrong")
-        finally:
-            svc.close()
-
-    def test_prod_write_correct_confirm_text_executes(self, tmp_path):
-        svc = _make_service(tmp_path, "prod")
-        try:
-            r = svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True,
-                                  confirm_text="main")
+            r = svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True)
             assert r["kind"] == "write"
             out = svc.admin_run_sql("demo", "main", "SELECT age FROM users WHERE id=1", CALLER)
             assert out["rows"][0][0] == 99
         finally:
             svc.close()
 
-    def test_local_write_needs_no_confirm_text(self, tmp_path):
-        # 非 prod：只需一次确认，不要求连接名
+    def test_local_write_confirm_executes(self, tmp_path):
         svc = _make_service(tmp_path, "local")
         try:
             r = svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True)
@@ -166,17 +145,18 @@ class TestConfirmFingerprintBinding:
         finally:
             svc.close()
 
-    def test_prod_fingerprint_and_confirm_text_both_required(self, tmp_path):
+    def test_prod_fingerprint_binding_still_enforced(self, tmp_path):
+        # 移除连接名闸门后，H1 指纹绑定在 prod 上仍然生效
         svc = _make_service(tmp_path, "prod")
         try:
             fp = fingerprint(WRITE_SQL, "sqlite")
-            # 指纹对但连接名错 → 仍拒
+            # 指纹不一致 → 拒
             with pytest.raises(QueryRejected):
                 svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True,
-                                  confirm_text="wrong", expect_fingerprint=fp)
-            # 两者都对 → 执行
+                                  expect_fingerprint="deadbeef")
+            # 指纹一致 → 执行
             r = svc.admin_run_sql("demo", "main", WRITE_SQL, CALLER, confirm=True,
-                                  confirm_text="main", expect_fingerprint=fp)
+                                  expect_fingerprint=fp)
             assert r["kind"] == "write"
         finally:
             svc.close()

@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from .ai import DEFAULT_SQL_PROMPT as _AI_SQL_PROMPT_DEFAULT
+from .ai import DEFAULT_WORKFLOW_PROMPT as _AI_WF_PROMPT_DEFAULT
 
 # 已知设置项及默认值。get_all 始终返回全部键（缺失回落默认），前端无需兜底。
 DEFAULTS: dict[str, object] = {
@@ -43,6 +44,7 @@ DEFAULTS: dict[str, object] = {
     "ai_timeout_s": 60,            # 单次生成超时（秒）
     "ai_max_tables": 40,           # 「整库」模式喂给 AI 的最大表数（超出要求收窄）
     "ai_sql_prompt": _AI_SQL_PROMPT_DEFAULT,  # 系统提示词（persona + SQL 约束），可编辑
+    "ai_workflow_prompt": _AI_WF_PROMPT_DEFAULT,  # workflow 生成的系统提示词，可编辑
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
