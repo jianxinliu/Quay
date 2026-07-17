@@ -158,13 +158,15 @@ class DbmService:
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
         caller: CallerInfo, max_rows: int, schema: str | None = None,
         on_start=None,  # noqa: ANN001
-        max_cell_chars: int | None = None,
+        max_cell_chars: int | None = None, mask: bool = True,
     ) -> dict:
         """执行一条已判定只读的 SQL：跑 reader、落审计、脱敏，返回结果 dict。
 
         max_rows 由调用方决定（query 用连接策略；查询台分页用 page_size+1 以探测下一页），
         与 truncated 检测解耦，便于复用。schema 为查询台的执行 schema 上下文。
         max_cell_chars 缺省用连接策略（查询台可传系统设置的 sql_max_cell_chars 覆盖）。
+        mask=True 对敏感列脱敏（agent 路径的红线：密码不出现在工具返回值中）；已认证的后台
+        查询台/导出传 mask=False——人就是要看真实数据，脱敏反而碍事。
         """
         rec = self._base_record(project, connection, cfg, "query", sql, caller)
         if schema:
@@ -194,7 +196,7 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
-        rows, masked = apply_mask(result.columns, result.rows, cfg.policy)
+        rows, masked = apply_mask(result.columns, result.rows, cfg.policy) if mask else (result.rows, [])
         out = {
             "columns": result.columns,
             "rows": rows,
@@ -272,7 +274,7 @@ class DbmService:
             if paginated:
                 # 取 size+1 行探测是否有下一页；不受连接 max_rows 二次截断影响
                 out = self._read(project, connection, cfg, paged_sql, caller, size + 1,
-                                 schema=schema, on_start=on_start, max_cell_chars=eff_cell)
+                                 schema=schema, on_start=on_start, max_cell_chars=eff_cell, mask=False)
                 rows = out["rows"]
                 out["has_next"] = len(rows) > size
                 out["rows"] = rows[:size]
@@ -283,7 +285,7 @@ class DbmService:
             # 自带 LIMIT / 非 SELECT：不分页，受系统设置的结果行上限 sql_max_rows 兜底
             eff_max_rows = int(self._setting("sql_max_rows") or cfg.policy.max_rows)
             out = self._read(project, connection, cfg, sql, caller, eff_max_rows,
-                             schema=schema, on_start=on_start, max_cell_chars=eff_cell)
+                             schema=schema, on_start=on_start, max_cell_chars=eff_cell, mask=False)
             out["paginated"] = False
             return {"kind": "read", **out}
 
@@ -380,7 +382,7 @@ class DbmService:
             raise QueryRejected("导出仅支持只读查询（SELECT/SHOW/...）的结果")
         run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
         result = self._read(project, connection, cfg, run_sql, caller,
-                            cfg.policy.max_rows, schema=schema)
+                            cfg.policy.max_rows, schema=schema, mask=False)
         return export_result(result["columns"], result["rows"], fmt)
 
     def admin_query_history(self, project: str, connection: str, limit: int = 30) -> list[dict]:
