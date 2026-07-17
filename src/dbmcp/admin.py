@@ -402,21 +402,27 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
   <div><label>引擎</label><br><select name="engine" style="padding:6px">{engines_opts}</select></div>
   <div><label>环境</label><br><select name="environment" style="padding:6px">{envs_opts}</select></div>
  </div>
- <div class="row">
+ <div class="row cf-hostport">
   <div>{_field("host", "host", cfg.host if cfg else "", ph="127.0.0.1")}</div>
   <div>{_field("port", "port", cfg.port if cfg else "", ph="3306", typ="number", width="120px")}</div>
-  <div>{_field("database（可留空）", "database", cfg.database if cfg else "")}</div>
  </div>
- <div class="muted" style="margin:-2px 0 6px">database 留空：MySQL/PG 连到实例但不绑定默认库，查询需用「库名.表名」全限定；SQLite 必填（文件路径）；Redis 为 db 编号（默认 0）。</div>
  <div class="row">
-  <div>{_field("只读账号 user", "user", cfg.user if cfg else "")}</div>
-  <div>{_field("密码", "password", "", ph=pw_ph, typ="password")}</div>
+  <div>{_field("database", "database", cfg.database if cfg else "")}</div>
  </div>
- <div class="muted" style="margin:-2px 0 6px">主账号应为<b>最小权限的只读账号</b>；保存时会自动校验，检测到写权限/超级用户会被拦截。写操作用下方 writer 账号。</div>
- <div class="row">
+ <div class="muted cf-db-mysql" style="margin:-2px 0 6px">留空：连到实例但不绑定默认库，查询需用「库名.表名」全限定。</div>
+ <div class="muted cf-db-sqlite" style="margin:-2px 0 6px"><b>必填</b>：SQLite 文件路径（如 /path/to/db.sqlite3）或 <code>:memory:</code>。</div>
+ <div class="muted cf-db-redis" style="margin:-2px 0 6px">Redis 逻辑库 db 编号（默认 0）。</div>
+ <div class="row cf-cred">
+  <div class="cf-cred-user">{_field("只读账号 user", "user", cfg.user if cfg else "")}</div>
+  <div class="cf-cred-pw">{_field("密码", "password", "", ph=pw_ph, typ="password")}</div>
+ </div>
+ <div class="muted cf-cred-note" style="margin:-2px 0 6px">主账号应为<b>最小权限的只读账号</b>；保存时会自动校验，检测到写权限/超级用户会被拦截。写操作用下方 writer 账号。</div>
+ <div class="muted cf-redis-pw-note" style="margin:-2px 0 6px">Redis 无 user，密码即 requirepass；无认证则留空。</div>
+ <div class="row cf-writer">
   <div>{_field("writer user（可选，写操作用）", "writer_user", writer_user)}</div>
   <div>{_field("writer password", "writer_password", "", ph=pw_ph, typ="password")}</div>
  </div>
+ <div class="cf-ssh">
  <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
  <label>SSH 跳板链（按序，最后一跳落地转发到数据库）</label>
  <div class="muted" style="margin:2px 0 8px">每跳可引用一条已保存的 SSH 配置（主机/用户/私钥都从配置来，跳板处可留空覆盖），或填内联主机+私钥；不同跳板可用不同配置。无跳板＝直连。
@@ -427,10 +433,11 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
  <div class="row">
   <div>{_field("其它 ssh 选项（空格分隔，作用于最终目标）", "ssh_options_extra", ssh_extra, ph="-o ConnectTimeout=5", width="360px")}</div>
  </div>
+ </div>
  <div class="row">
   <div>{_field("max_rows", "max_rows", cfg.policy.max_rows if cfg else 500, typ="number", width="120px")}</div>
-  <div>{_field("读超时(秒)", "statement_timeout_s", cfg.policy.statement_timeout_s if cfg else 30, typ="number", width="120px")}</div>
-  <div>{_field("写超时(秒)", "write_timeout_s", cfg.policy.write_timeout_s if cfg else 600, typ="number", width="120px")}</div>
+  <div class="cf-timeouts">{_field("读超时(秒)", "statement_timeout_s", cfg.policy.statement_timeout_s if cfg else 30, typ="number", width="120px")}</div>
+  <div class="cf-timeouts">{_field("写超时(秒)", "write_timeout_s", cfg.policy.write_timeout_s if cfg else 600, typ="number", width="120px")}</div>
  </div>
  <div class="muted" style="margin:-2px 0 6px">读超时限只读查询（SELECT）；写超时给 writer 账号的大 DELETE/UPDATE 留足时间，避免 socket 提前断开报 2013。跑飞的写可在查询台点「取消」KILL。</div>
  <div class="row">
@@ -488,6 +495,33 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     envSel.addEventListener('change', applyEnvDefault);
     applyEngineDefault(); applyEnvDefault();  // 初始填一次
   }}
+
+  // 按引擎显隐字段（新增/编辑都生效）：sqlite 只要 database；redis 无 user/writer/超时。
+  var engineSelV = form.querySelector('[name=engine]');
+  function setShow(cls, on){{
+    Array.prototype.forEach.call(form.querySelectorAll('.' + cls), function(el){{
+      el.style.display = on ? '' : 'none';
+    }});
+  }}
+  function applyEngineVisibility(){{
+    var e = engineSelV.value;
+    var isSqlite = e === 'sqlite', isRedis = e === 'redis';
+    var isSql = e === 'mysql' || e === 'postgres';
+    setShow('cf-hostport', !isSqlite);
+    setShow('cf-cred', !isSqlite);       // sqlite 无账号
+    setShow('cf-cred-user', isSql);      // redis 无 user（密码即 requirepass）
+    setShow('cf-cred-pw', !isSqlite);
+    setShow('cf-cred-note', isSql);
+    setShow('cf-redis-pw-note', isRedis);
+    setShow('cf-writer', isSql);         // 双账号仅 mysql/pg
+    setShow('cf-ssh', !isSqlite);        // sqlite 本地文件无需隧道
+    setShow('cf-timeouts', isSql);
+    setShow('cf-db-mysql', isSql);
+    setShow('cf-db-sqlite', isSqlite);
+    setShow('cf-db-redis', isRedis);
+  }}
+  engineSelV.addEventListener('change', applyEngineVisibility);
+  applyEngineVisibility();
 
   // 测试按钮：用当前表单值探测，结果 inline 显示，不保存
   var resultBox = document.getElementById('conn-test-result');
