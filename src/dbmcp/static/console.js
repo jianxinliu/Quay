@@ -840,15 +840,40 @@
         var toT = this.tabs.find(function (t) { return t.id === targetId; });
         this.dragId = null;
         if (!fromT || !toT || fromT === toT) return;
-        // 只允许同组（同连接）内重排；跨组拖动忽略，避免把分组顺序打乱
-        if ((fromT.conn || "") !== (toT.conn || "")) return;
+        var cross = (fromT.conn || "") !== (toT.conn || "");
         this.tabs.splice(this.tabs.indexOf(fromT), 1);
         this.tabs.splice(this.tabs.indexOf(toT), 0, fromT);   // 落在目标之前
+        // 跨组拖动 = 把这个 tab 并入目标连接的组（并改到该连接）；同组则只是重排
+        if (cross) this.moveTabToConn(fromT, toT.conn || "");
         this.persist();
       },
-      // 拖动组头 → 调整组（连接）的先后顺序：把整组移到目标组之前
+      // 把某个 tab 并入另一连接的组：改连接、清掉属于旧连接的结果/暂存改动（SQL/类型/表名保留）。
+      // 让「分错组」的 tab 能被拖到正确的组；query tab 顺带获得「同一条 SQL 换库跑」的能力。
+      moveTabToConn: function (tab, val) {
+        if (!tab || (tab.conn || "") === (val || "")) return;
+        tab.conn = val;
+        tab.result = null; tab.ok = null; tab.err = null; tab.confirm = null; tab.explain = null;
+        tab.readSql = null; tab.edits = {}; tab.dels = {}; tab.adds = []; tab.submit = null;
+        var self = this;
+        if (this.activeId === tab.id) this.$nextTick(function () { self.loadTree(); });   // 活动 tab 则刷新左树到新连接
+      },
       onGroupDragStart: function (conn, e) { this.dragId = null; this.dragGroup = conn; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
       onGroupDrop: function (targetConn) {
+        // 拖的是单个 tab 落到组头上 → 把它并入这个连接的组（放到该组末尾）
+        if (this.dragId != null) {
+          var self = this; var fromT = this.tabs.find(function (t) { return t.id === self.dragId; });
+          this.dragId = null;
+          if (fromT && (fromT.conn || "") !== (targetConn || "")) {
+            this.tabs.splice(this.tabs.indexOf(fromT), 1);
+            var lastIdx = -1;
+            this.tabs.forEach(function (t, i) { if ((t.conn || "") === (targetConn || "")) lastIdx = i; });
+            this.tabs.splice(lastIdx + 1, 0, fromT);   // 目标组末尾
+            this.moveTabToConn(fromT, targetConn || "");
+            this.persist();
+          }
+          return;
+        }
+        // 拖的是组头 → 调整组（连接）的先后顺序：把整组移到目标组之前
         var g = this.dragGroup; this.dragGroup = null;
         if (g == null || g === targetConn) return;
         var moved = this.tabs.filter(function (t) { return (t.conn || "") === g; });
