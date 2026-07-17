@@ -416,6 +416,8 @@
         delSnip: null, delWf: null, wfAsk: null,
         history: [], showHistory: false,
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
+        snipAllConns: false,   // 片段列表：默认只显示当前连接的，切「全部」看所有连接
+
         exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
         bmOpen: false, bmTick: 0,   // 书签下拉菜单；bmTick 强制刷新预览文本
         colMenu: { show: false, x: 0, y: 0, ci: -1 },
@@ -488,6 +490,12 @@
           : this.databases;
         var q = this.schemaFilter.trim().toLowerCase();
         return q ? list.filter(function (d) { return d.toLowerCase().indexOf(q) >= 0; }) : list;
+      },
+      // 片段与连接绑定：默认只列当前 tab 连接的片段（避免跨连接错乱）；无连接或「全部」则列全部
+      visibleSnippets: function () {
+        var conn = this.activeTab ? this.activeTab.conn : "";
+        if (this.snipAllConns || !conn) return this.snippets;
+        return this.snippets.filter(function (s) { return s.connection === conn; });
       },
       selCount: function () { return Object.keys(this.selected).length; },
       // 执行计时（客户端秒表，随 clockTick 每 200ms 刷新，平滑准确）——从本 tab 开跑那一刻算起
@@ -1099,6 +1107,7 @@
       openAiPanel: function () {
         var t = this.activeTab; if (!t || !t.conn) { this.flash("请先选择连接"); return; }
         this.aiPanel = { question: "", explain: false, samples: false,
+                         schema: this.aiSchema() || (this.databases.length ? this.databases[0] : ""),
                          tables: [], picked: {}, filter: "", loading: true,
                          running: false, error: "", sessionId: "", turns: [],
                          mode: "replace", lastRange: null, pos: { left: 10, top: 8 } };
@@ -1119,23 +1128,38 @@
         return t.schema || this.schemaDefault[t.conn] || "";
       },
       aiLoadTables: function () {
-        var self = this, t = this.activeTab; if (!t || !this.aiPanel) return;
+        var self = this, p = this.aiPanel, t = this.activeTab; if (!t || !p) return;
+        p.loading = true; p.tables = []; p.error = "";
         var qs = "?conn=" + encodeURIComponent(t.conn);
-        var sc = this.aiSchema(); if (sc) qs += "&schema=" + encodeURIComponent(sc);
+        if (p.schema) qs += "&schema=" + encodeURIComponent(p.schema);
         apiGet("/admin/sql/tables" + qs).then(function (d) {
           if (!self.aiPanel) return;
-          self.aiPanel.loading = false;
-          if (d && d.ok) self.aiPanel.tables = d.tables || [];
-          else self.aiPanel.error = (d && d.error) || "无法加载表列表";
+          p.loading = false;
+          if (d && d.ok) p.tables = d.tables || [];
+          else p.error = (d && d.error) || "无法加载表列表";
         }).catch(function (e) {
-          if (self.aiPanel) { self.aiPanel.loading = false; self.aiPanel.error = String(e); }
+          if (self.aiPanel) { p.loading = false; p.error = String(e); }
         });
+      },
+      // 切换面板浏览的 schema：重拉表列表，但保留已勾选（picked 存的是 schema.table 限定名，跨库累计）
+      aiSetSchema: function (sc) {
+        var p = this.aiPanel; if (!p || p.schema === sc) return;
+        p.schema = sc; p.filter = ""; this.aiLoadTables();
+      },
+      // 当前浏览 schema 下把裸表名限定为 schema.table（无 schema 则原样）
+      aiQual: function (name) {
+        var p = this.aiPanel; return (p && p.schema) ? p.schema + "." + name : name;
       },
       aiTogglePick: function (name) {
         var p = this.aiPanel; if (!p) return;
-        if (p.picked[name]) delete p.picked[name]; else p.picked[name] = true;
+        var q = this.aiQual(name);
+        if (p.picked[q]) delete p.picked[q]; else p.picked[q] = true;
+      },
+      aiTogglePickQual: function (q) {  // 从已选 chip 移除
+        var p = this.aiPanel; if (p && p.picked[q]) delete p.picked[q];
       },
       aiPickCount: function () { return this.aiPanel ? Object.keys(this.aiPanel.picked).length : 0; },
+      aiPickedList: function () { return this.aiPanel ? Object.keys(this.aiPanel.picked) : []; },
       aiVisibleTables: function () {
         var p = this.aiPanel; if (!p) return [];
         var f = (p.filter || "").toLowerCase().trim();
@@ -1199,7 +1223,8 @@
                      explain: p.explain ? "1" : null,
                      include_samples: p.samples ? "1" : null,
                      session_id: p.sessionId || null };
-        var sc = this.aiSchema(); if (sc) body.schema = sc;
+        // picked 已是 schema.table 限定名（跨库累计）；schema 仅作「整库」模式的默认库
+        var sc = p.schema || this.aiSchema(); if (sc) body.schema = sc;
         apiPost("/admin/sql/ai", body).then(function (d) {
           if (!self.aiPanel) return;
           p.running = false;
@@ -3455,15 +3480,16 @@
           <span class="tm">{{ fmtTs(h.ts).slice(5) }}</span>
         </div>
       </div>
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('snip')"><span class="caret">{{ acc.snip ? '▾' : '▸' }}</span><span>片段{{ snippets.length ? "（"+snippets.length+"）" : "" }}</span><span class="acc-acts" @click.stop><span v-if="snippets.length" class="act" @click="downloadAllSnippets" title="全部导出为一个 .sql 文件">⬇</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></span></div>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('snip')"><span class="caret">{{ acc.snip ? '▾' : '▸' }}</span><span>片段{{ visibleSnippets.length ? "（"+visibleSnippets.length+"）" : "" }}</span><span class="acc-acts" @click.stop><span v-if="snippets.length" class="act" @click="downloadAllSnippets" title="全部导出为一个 .sql 文件">⬇</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></span></div>
       <div v-show="acc.snip" class="acc-body cap">
       <div v-if="showSnipForm" class="dg-snipform">
         <input v-model="snipDraft.title" placeholder="标题">
         <textarea v-model="snipDraft.note" rows="2" placeholder="备注（可选）"></textarea>
         <div style="display:flex;gap:6px"><button class="dg-btn run" style="flex:1" @click="saveSnippet">保存</button><button class="dg-btn" @click="showSnipForm=false">取消</button></div>
       </div>
-      <div v-if="!snippets.length" class="dg-empty">（暂无片段）</div>
-      <div v-for="s in snippets" :key="s.id" class="dg-snip" @click="openSnippet(s)">
+      <div v-if="activeTab && activeTab.conn" class="dg-snip-scope"><label><input type="checkbox" v-model="snipAllConns"> 显示全部连接的片段</label></div>
+      <div v-if="!visibleSnippets.length" class="dg-empty">{{ snippets.length ? "（本连接暂无片段，可勾选「全部」查看）" : "（暂无片段）" }}</div>
+      <div v-for="s in visibleSnippets" :key="s.id" class="dg-snip" @click="openSnippet(s)">
         <div class="t"><span>{{ s.title }}</span><span class="snip-acts"><span class="dl" @click.stop="downloadSnippet(s)" title="下载为 .sql">⬇</span><span class="x" :class="{arm: delSnip===s.id}" @click.stop="askDeleteSnippet(s.id)">{{ delSnip===s.id ? "确认?" : "✕" }}</span></span></div>
         <div v-if="s.note" class="n">{{ s.note }}</div>
         <div class="c">{{ s.connection || "—" }} · {{ fmtTs(s.updated_at) }}</div>
@@ -3581,13 +3607,23 @@
               <span>表 · 已选 {{ aiPickCount() }}（不选=整库）</span>
               <input v-model="aiPanel.filter" placeholder="筛选…" class="dg-ai-filter">
             </div>
+            <div v-if="databases.length" class="dg-ai-schema">
+              <span>库</span>
+              <select :value="aiPanel.schema" @change="aiSetSchema($event.target.value)">
+                <option v-for="db in databases" :key="db" :value="db">{{ db }}</option>
+              </select>
+              <span class="hint">可切库跨 schema 勾选</span>
+            </div>
+            <div v-if="aiPickCount()" class="dg-ai-picked">
+              <span v-for="q in aiPickedList()" :key="q" class="chip" @click="aiTogglePickQual(q)" title="点击移除">{{ q }} ✕</span>
+            </div>
             <div v-if="aiPanel.loading" class="dg-ai-empty">加载表…</div>
             <div v-else-if="aiPanel.tables.length" class="dg-ai-tables">
               <label v-for="tb in aiVisibleTables()" :key="tb" class="dg-ai-tbl">
-                <input type="checkbox" :checked="!!aiPanel.picked[tb]" @change="aiTogglePick(tb)"> {{ tb }}
+                <input type="checkbox" :checked="!!aiPanel.picked[aiQual(tb)]" @change="aiTogglePick(tb)"> {{ tb }}
               </label>
             </div>
-            <div v-else class="dg-ai-empty">（无法列表，可整库生成或先选 schema）</div>
+            <div v-else class="dg-ai-empty">（无法列表，可整库生成或切换上面的库）</div>
           </div>
           <div v-if="aiPanel.sessionId" class="dg-ai-mode">
             <span>插入：</span>

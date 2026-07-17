@@ -812,6 +812,10 @@ def _settings_ai_body(s: dict) -> str:
         + _text_setting("兜底环境变量名", "ai_api_key_env", s, "DBM_AI_API_KEY",
                         "钥匙串里没有时，从该环境变量读 key（值不入设置库）。")
         + "</div>"
+        # —— 高级设置：不常调的参数与系统提示词折叠收起，默认只露核心配置 ——
+        + "<details class='ai-adv' style='margin-top:8px'>"
+        + "<summary style='cursor:pointer;color:var(--muted);margin-bottom:12px'>高级设置"
+        + "（超时 / 表数上限 / 系统提示词）</summary>"
         + _num_setting("生成超时（秒）", "ai_timeout_s", s, 60,
                        "单次生成的最长等待时间，10–600 之间。")
         + _num_setting("最大表数", "ai_max_tables", s, 40,
@@ -823,7 +827,8 @@ def _settings_ai_body(s: dict) -> str:
         + "<div style='margin-bottom:16px'><label>流程生成系统提示词</label>"
         + f"<textarea name='ai_workflow_prompt' rows='6' style='width:100%'>{_esc(s.get('ai_workflow_prompt', ''))}</textarea>"
         + "<div class='muted' style='margin-top:4px'>生成可视化流程（DAG 画布）的系统提示。"
-        + "清空并保存即恢复默认。</div></div>") + _AI_PROVIDER_TOGGLE_JS
+        + "清空并保存即恢复默认。</div></div>"
+        + "</details>") + _AI_PROVIDER_TOGGLE_JS
 
 
 def _settings_redis_body(s: dict) -> str:

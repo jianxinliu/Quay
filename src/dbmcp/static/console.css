@@ -137,6 +137,8 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-snip .t .dl:hover { color: var(--dg-accent); }
 .dg-snip .n { font-size: 11px; color: var(--dg-muted); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dg-snip .c { font-size: 10.5px; color: var(--dg-faint); font-family: var(--dg-mono); }
+.dg-snip-scope { padding: 4px 12px 6px; font-size: 11px; color: var(--dg-muted); }
+.dg-snip-scope label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
 .dg-snipform { padding: 8px 12px; border-top: 1px solid var(--dg-border); }
 .dg-snipform input, .dg-snipform textarea {
   width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
@@ -930,6 +932,15 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-ai-tbl { color: var(--dg-text); display: inline-flex; align-items: center; gap: 4px;
   cursor: pointer; white-space: nowrap; }
 .dg-ai-empty { color: var(--dg-muted); padding: 4px 2px; }
+.dg-ai-schema { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; color: var(--dg-muted); font-size: 11px; }
+.dg-ai-schema select { background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-border);
+  border-radius: 4px; padding: 2px 6px; font-size: 11px; max-width: 150px; }
+.dg-ai-schema .hint { color: var(--dg-faint); }
+.dg-ai-picked { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+.dg-ai-picked .chip { font-size: 10.5px; color: var(--dg-accent); background: var(--dg-bg);
+  border: 1px solid var(--dg-border); border-radius: 4px; padding: 1px 6px; cursor: pointer; white-space: nowrap;
+  font-family: var(--dg-mono); }
+.dg-ai-picked .chip:hover { border-color: var(--dg-red); color: var(--dg-red); }
 .dg-ai-mode { margin-top: 6px; color: var(--dg-muted); display: flex; align-items: center; gap: 12px; }
 .dg-ai-mode label { color: var(--dg-text); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .dg-ai-foot { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
