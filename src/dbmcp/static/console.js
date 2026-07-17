@@ -916,18 +916,15 @@
           else if (self.activeTab) self.loadTree();
         });
       },
+      // 选连接 = 切到「该连接的组」：已有该连接的 tab 就激活最近一个，否则在它自己的组里新建空编辑器。
+      // 当前 tab 原地不动、留在自己组里——绝不把它的连接改掉搬进别的组（否则打开新连接会把当前编辑器混进目标组）。
       setConn: function (val) {
-        var t = this.activeTab; if (!t || t.conn === val) return;
-        t.conn = val;
-        // 结果/暂存改动都属于旧连接 → 全清，绝不让线上数据残留在新连接标签下
-        t.result = null; t.ok = null; t.err = null; t.confirm = null; t.explain = null;
-        t.readSql = null; t.edits = {}; t.dels = {}; t.adds = []; t.submit = null;
-        t.schema = this.schemaDefault[val] || "";
-        if (t.type === "data") {   // 数据 tab 的表属于旧连接 → 转成普通查询 tab
-          t.type = "query"; t.table = ""; t.title = "查询 " + t.id;
-          var m = models.get(t.id); if (m) m.setValue("");
-        }
-        this.persist(); this.loadTree();
+        var t = this.activeTab; if (t && t.conn === val) return;
+        var existing = null;
+        for (var i = this.tabs.length - 1; i >= 0; i--)   // 取该连接最近（末尾）的 tab
+          if ((this.tabs[i].conn || "") === val) { existing = this.tabs[i]; break; }
+        if (existing) this.switchTab(existing.id);   // switchTab 会按新连接刷新左树
+        else this.newTab({ conn: val });             // 新 tab 进入该连接自己的组
       },
       setSchema: function (val) {
         var t = this.activeTab; if (!t) return;
