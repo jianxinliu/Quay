@@ -12,7 +12,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-Engine = Literal["mysql", "postgres", "sqlite", "redis"]
+Engine = Literal["mysql", "postgres", "sqlite", "redis", "clickhouse"]
 Environment = Literal["local", "dev", "staging", "prod"]
 
 DEFAULT_MAX_ROWS = 1000
@@ -150,6 +150,11 @@ class ConnectionConfig(BaseModel):
             # Redis 可以无账号（本地无 auth）或仅 requirepass（无 user）
             if self.host is None:
                 raise ValueError("redis 连接缺少必填字段: host")
+        elif self.engine == "clickhouse":
+            # ClickHouse 需要 host + user；password 可空（default 用户常无密码），database 可空（默认 default 库）
+            missing = [f for f in ("host", "user") if getattr(self, f) is None]
+            if missing:
+                raise ValueError(f"clickhouse 连接缺少必填字段: {', '.join(missing)}")
         else:
             missing = [f for f in ("host", "user", "password") if getattr(self, f) is None]
             if missing:

@@ -137,7 +137,8 @@ def _format_sql(sql: str, engine: str) -> str:
     """用 sqlglot 美化 SQL（缩进/关键字对齐）；解析失败则原样返回。"""
     if not sql:
         return ""
-    dialect = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}.get(engine)
+    dialect = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
+               "clickhouse": "clickhouse"}.get(engine)
     try:
         import sqlglot  # noqa: PLC0415
         out = sqlglot.transpile(sql, read=dialect, write=dialect, pretty=True)
@@ -378,7 +379,7 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     ro = "readonly" if is_edit else ""
     engines_opts = "".join(
         f"<option value='{e}'{' selected' if cfg and cfg.engine == e else ''}>{e}</option>"
-        for e in ("mysql", "postgres", "redis", "sqlite")
+        for e in ("mysql", "postgres", "clickhouse", "redis", "sqlite")
     )
     envs_opts = "".join(
         f"<option value='{e}'{' selected' if cfg and cfg.environment == e else ''}>{e}</option>"
@@ -505,18 +506,19 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
   }}
   function applyEngineVisibility(){{
     var e = engineSelV.value;
-    var isSqlite = e === 'sqlite', isRedis = e === 'redis';
+    var isSqlite = e === 'sqlite', isRedis = e === 'redis', isCH = e === 'clickhouse';
     var isSql = e === 'mysql' || e === 'postgres';
+    var hasUser = isSql || isCH;         // 有 user 账号的引擎（clickhouse 需要 user、可空密码）
     setShow('cf-hostport', !isSqlite);
     setShow('cf-cred', !isSqlite);       // sqlite 无账号
-    setShow('cf-cred-user', isSql);      // redis 无 user（密码即 requirepass）
+    setShow('cf-cred-user', hasUser);    // redis 无 user（密码即 requirepass）
     setShow('cf-cred-pw', !isSqlite);
-    setShow('cf-cred-note', isSql);
+    setShow('cf-cred-note', hasUser);
     setShow('cf-redis-pw-note', isRedis);
-    setShow('cf-writer', isSql);         // 双账号仅 mysql/pg
+    setShow('cf-writer', isSql);         // 双账号仅 mysql/pg（clickhouse 本期只读，无 writer）
     setShow('cf-ssh', !isSqlite);        // sqlite 本地文件无需隧道
-    setShow('cf-timeouts', isSql);
-    setShow('cf-db-mysql', isSql);
+    setShow('cf-timeouts', hasUser);
+    setShow('cf-db-mysql', hasUser);     // clickhouse 也用「库名」文本字段（默认 default 库）
     setShow('cf-db-sqlite', isSqlite);
     setShow('cf-db-redis', isRedis);
   }}
@@ -1969,7 +1971,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         f = await req.form()
         sql = str(f.get("sql") or "")
         dialect = str(f.get("dialect") or "mysql")
-        if dialect not in ("mysql", "postgres", "sqlite", "duckdb"):
+        if dialect not in ("mysql", "postgres", "sqlite", "duckdb", "clickhouse"):
             dialect = "mysql"
         return JSONResponse({"ok": True, "errors": _lint_sql(sql, dialect)})
 

@@ -152,7 +152,7 @@ class DbmService:
                 # 无默认库时提示 agent 用全限定表名
                 **({"note": "此连接未绑定默认库，查询/schema 操作请用「库名.表名」全限定，"
                             "list_tables/describe_table 需先用 SHOW DATABASES 选定库"}
-                   if c.engine in ("mysql", "postgres") and not c.database else {}),
+                   if c.engine in ("mysql", "postgres", "clickhouse") and not c.database else {}),
                 # 有意不返回 user/password/writer 等账号信息
             }
             # Redis 有意不返回：agent 碰不到 Redis

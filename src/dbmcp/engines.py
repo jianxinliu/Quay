@@ -1,9 +1,10 @@
-"""SQL 引擎适配：基于 SQLAlchemy Core，统一 MySQL / PostgreSQL / SQLite。
+"""SQL 引擎适配：基于 SQLAlchemy Core，统一 MySQL / PostgreSQL / SQLite / ClickHouse。
 
 数据库层的第二道只读防线（写操作在 M3 走独立的 writer 账号连接）：
-- MySQL:    init_command 设置 SESSION TRANSACTION READ ONLY + max_execution_time
-- Postgres: options 设置 default_transaction_read_only=on + statement_timeout
-- SQLite:   连接建立时 PRAGMA query_only=ON
+- MySQL:      init_command 设置 SESSION TRANSACTION READ ONLY + max_execution_time
+- Postgres:   options 设置 default_transaction_read_only=on + statement_timeout
+- SQLite:     连接建立时 PRAGMA query_only=ON
+- ClickHouse: URL query 参数 readonly=1 + max_execution_time（native 驱动，本期只读分析）
 """
 
 from __future__ import annotations
@@ -142,7 +143,7 @@ def _build_pooled_engine(
 
     # SQLite 无网络，跳板不适用
     if cfg.engine != "sqlite" and cfg.jump_hosts:
-        default_port = 3306 if cfg.engine == "mysql" else 5432
+        default_port = {"mysql": 3306, "postgres": 5432, "clickhouse": 9000}.get(cfg.engine, 3306)
         tunnel = open_tunnel(cfg.host, cfg.port or default_port,
                              cfg.jump_hosts, cfg.ssh_options, identities)
         host, port = "127.0.0.1", tunnel.local_port
@@ -294,10 +295,35 @@ def _create_readonly_engine(
             connect_args={"connect_timeout": 5, "options": options},
         )
 
+    if cfg.engine == "clickhouse":
+        from sqlalchemy.engine import URL
+
+        # 会话设置走 URL query 参数（clickhouse-driver 在建连时应用）：
+        # - readonly=1 是数据库层第二道只读防线——reader 上任何写/DDL 报 Code 164
+        #   「Cannot execute query in readonly mode」。实测 per-query 的 settings dict 不生效，
+        #   只有 URL query 参数才真正落到 system.settings.readonly（须用真实 ClickHouse 才验得出）。
+        # - max_execution_time 服务端语句超时（秒），与 readonly=1 可共存。
+        query = {"max_execution_time": str(stmt_timeout_s)}
+        if readonly:
+            query["readonly"] = "1"
+        url = URL.create(
+            "clickhouse+native",
+            username=user,
+            password=password,
+            host=host,
+            port=port or 9000,
+            database=schema or cfg.database or "default",
+            query=query,
+        )
+        return create_engine(
+            url, pool_pre_ping=True, connect_args={"connect_timeout": 5}
+        )
+
     raise UnsupportedEngineError(f"引擎 {cfg.engine!r} 暂不支持直连查询（Redis 适配在 M4）")
 
 
-_PAGINATE_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}
+_PAGINATE_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
+                      "clickhouse": "clickhouse"}
 
 
 def paginate_sql(sql: str, engine_kind: str, limit: int, offset: int) -> tuple[str, bool, bool]:
@@ -384,6 +410,8 @@ def make_canceller(engine: SAEngine, sa_conn) -> Callable[[], None]:  # noqa: AN
 
         return _cancel_sqlite
 
+    # ClickHouse：KILL QUERY 需要 query_id，而经 SQLAlchemy/clickhouse-driver 执行时拿不到
+    # 稳定的 query_id，故取消为空操作；跑飞的读查询由服务端 max_execution_time 兜底中断。
     return lambda: None
 
 
@@ -462,6 +490,13 @@ def estimate_row_count(engine: SAEngine, engine_kind: str, table: str) -> int | 
                 preparer = engine.dialect.identifier_preparer
                 row = conn.execute(text(f"SELECT count(*) FROM {preparer.quote(table)}")).fetchone()
                 return int(row[0]) if row else None
+            if engine_kind == "clickhouse":
+                row = conn.execute(
+                    text("SELECT total_rows FROM system.tables"
+                         " WHERE database = currentDatabase() AND name = :t"),
+                    {"t": table},
+                ).fetchone()
+                return int(row[0]) if row and row[0] is not None else None
     except Exception:
         return None
     return None
@@ -515,6 +550,11 @@ def search_tables(engine: SAEngine, engine_kind: str, q: str, limit: int = 50) -
         sql = ("SELECT schemaname, tablename FROM pg_catalog.pg_tables"
                " WHERE tablename LIKE :q AND schemaname NOT IN ('pg_catalog','information_schema')"
                " ORDER BY schemaname, tablename LIMIT :n")
+    elif engine_kind == "clickhouse":
+        sql = ("SELECT database, name FROM system.tables"
+               " WHERE name LIKE :q AND database NOT IN"
+               " ('system','information_schema','INFORMATION_SCHEMA')"
+               " ORDER BY database, name LIMIT :n")
     else:  # sqlite
         sql = ("SELECT '' AS s, name FROM sqlite_master WHERE type = 'table'"
                " AND name LIKE :q ORDER BY name LIMIT :n")
@@ -556,6 +596,7 @@ def explain(engine: SAEngine, sql: str, engine_kind: str) -> str | None:
 # 列库/schema 时过滤掉系统库，减少噪音
 _SYSTEM_SCHEMAS = {
     "information_schema", "performance_schema", "mysql", "sys", "pg_catalog", "pg_toast",
+    "system",  # ClickHouse 系统库（information_schema/INFORMATION_SCHEMA 由 .lower() 归一后命中上面）
 }
 
 
@@ -616,6 +657,11 @@ def table_sizes(engine: SAEngine, engine_kind: str, schema: str | None = None) -
                 # dbstat 虚表需编译开启（macOS/多数发行版默认有）；无则走 except 返回空
                 rows = conn.execute(text(
                     "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name")).fetchall()
+            elif engine_kind == "clickhouse":
+                rows = conn.execute(text(
+                    "SELECT table, sum(bytes_on_disk) FROM system.parts"
+                    " WHERE active AND database = coalesce(:s, currentDatabase())"
+                    " GROUP BY table"), {"s": schema}).fetchall()
             else:
                 return {}
         return {str(r[0]): int(r[1] or 0) for r in rows}
@@ -645,6 +691,13 @@ def get_table_ddl(engine: SAEngine, engine_kind: str, table: str, schema: str | 
                 {"t": table},
             ).fetchall()
         return ";\n\n".join(str(r[0]) for r in rows)
+
+    if engine_kind == "clickhouse":
+        # ClickHouse 有 SHOW CREATE TABLE，返回单列 DDL 原文（row[0]，MySQL 是 row[1]）
+        q = (preparer.quote(schema) + "." if schema else "") + preparer.quote(table)
+        with engine.connect() as conn:
+            row = conn.execute(text(f"SHOW CREATE TABLE {q}")).fetchone()
+        return str(row[0]) if row else ""
 
     # PG 等：无 SHOW CREATE TABLE，由反射信息生成近似 DDL（注释标明非服务器原文）
     info = describe_table(engine, table, schema)
