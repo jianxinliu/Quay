@@ -21,11 +21,33 @@ class TestReadonlyAllowed:
             ("EXPLAIN ANALYZE SELECT * FROM users", "postgres"),
             ("WITH t AS (SELECT 1 AS a) SELECT * FROM t", "postgres"),
             ("select id, name from users order by id limit 10", "mysql"),
+            # 集合运算顶层是 SetOperation（非 Select），但只读——不应被误判为写（回归）
+            ("SELECT 1 UNION SELECT 2", "mysql"),
+            ("SELECT a FROM t UNION ALL SELECT b FROM u ORDER BY 1", "mysql"),
+            ("SELECT 1 INTERSECT SELECT 2", "postgres"),
+            ("SELECT 1 EXCEPT SELECT 2", "postgres"),
         ],
     )
     def test_allowed(self, sql, engine):
         verdict = classify(sql, engine)
         assert verdict.readonly, f"{sql!r} 应放行，实际拒绝: {verdict.reason}"
+
+
+class TestSetOperationGuards:
+    """UNION/INTERSECT/EXCEPT 放行，但分支里藏写操作/危险函数/加锁仍须判写。"""
+
+    def test_union_of_selects_readonly(self):
+        assert classify("SELECT 1 UNION ALL SELECT 2", "mysql").readonly
+
+    def test_union_with_unsafe_function_rejected(self):
+        assert not classify("SELECT SLEEP(1) UNION SELECT 2", "mysql").readonly
+
+    def test_union_with_cte_write_rejected(self):
+        sql = "WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x UNION SELECT 1"
+        assert not classify(sql, "postgres").readonly
+
+    def test_union_with_for_update_rejected(self):
+        assert not classify("SELECT 1 UNION SELECT id FROM t FOR UPDATE", "mysql").readonly
 
 
 class TestWritesRejected:

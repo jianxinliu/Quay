@@ -19,8 +19,10 @@ from sqlglot import exp
 
 _DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}
 
-# 只读语句的顶层节点白名单
-_READONLY_ROOTS = (exp.Select, exp.Show, exp.Describe)
+# 只读语句的顶层节点白名单。
+# SetOperation 覆盖 UNION / UNION ALL / INTERSECT / EXCEPT——顶层是集合运算而非 Select，
+# 但本身只读（各分支若含写操作，仍由下面的整树遍历 _WRITE_NODES 兜住）。
+_READONLY_ROOTS = (exp.Select, exp.Show, exp.Describe, exp.SetOperation)
 
 # 树中任意位置出现即判写的节点
 _WRITE_NODES = (
