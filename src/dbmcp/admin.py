@@ -250,6 +250,22 @@ def _env_badge(env: str) -> str:
     return f'<span class="badge" style="background:{color}">{_esc(env or "—")}</span>'
 
 
+# 引擎 → 真实品牌 logo 文件名（devicon，vendored 到 static/db-icons/；postgres 文件名为 postgresql）
+_ENGINE_ICON_FILE = {
+    "mysql": "mysql", "postgres": "postgresql", "sqlite": "sqlite",
+    "clickhouse": "clickhouse", "redis": "redis", "duckdb": "duckdb",
+}
+
+
+def _engine_icon(engine: str) -> str:
+    """连接列表里引擎名前的品牌 logo（无对应图标则空串）。"""
+    f = _ENGINE_ICON_FILE.get(engine)
+    if not f:
+        return ""
+    return (f"<img src='/admin/static/db-icons/{f}.svg' alt='' title='{_esc(engine)}' "
+            f"style='width:15px;height:15px;vertical-align:middle;margin-right:6px'>")
+
+
 def _bool_pill(value: object) -> str:
     """True→是(绿) / False→否(灰) / None→未知(黄)。"""
     if value is True:
@@ -997,7 +1013,8 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
             db = f"<code>{_esc(c.database)}</code>" if c.database else "<span class='muted'>—</span>"
             rows.append(
                 f"<tr><td style='border-left:3px solid {stripe};padding-left:13px'>"
-                f"<code>{_esc(pname)}/{_esc(cname)}</code></td><td class='mono muted'>{_esc(c.engine)}</td>"
+                f"<code>{_esc(pname)}/{_esc(cname)}</code></td>"
+                f"<td class='mono muted'>{_engine_icon(c.engine)}{_esc(c.engine)}</td>"
                 f"<td>{_env_badge(c.environment)}</td><td><code>{_esc(c.host)}:{_esc(c.port)}</code></td>"
                 f"<td>{db}</td><td class='muted mono'>{_esc(jump)}</td>"
                 f"<td style='white-space:nowrap'>"

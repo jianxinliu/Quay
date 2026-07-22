@@ -50,17 +50,18 @@
   }
 
   var ENV_COLORS = { local: "#64748b", dev: "#2563eb", staging: "#d97706", prod: "#dc2626" };
-  // 各引擎的品牌色徽章（单色小方块 + 缩写），用于连接选择器/tab 组头一眼区分数据库类型
-  var ENGINE_META = {
-    mysql:      { mono: "My", bg: "#00758f", fg: "#fff" },
-    postgres:   { mono: "Pg", bg: "#336791", fg: "#fff" },
-    sqlite:     { mono: "SL", bg: "#0f80cc", fg: "#fff" },
-    clickhouse: { mono: "CH", bg: "#ffcc00", fg: "#1a1a1a" },
-    redis:      { mono: "Rd", bg: "#dc382d", fg: "#fff" },
-    duckdb:     { mono: "Dk", bg: "#fff000", fg: "#1a1a1a" },
+  // 各引擎的真实品牌 logo（devicon，vendored 到 static/db-icons/），用于连接选择器/tab 组头一眼区分数据库类型
+  var ENGINE_ICON_FILE = {
+    mysql: "mysql", postgres: "postgresql", sqlite: "sqlite",
+    clickhouse: "clickhouse", redis: "redis", duckdb: "duckdb",
+  };
+  var ENGINE_LABEL = {
+    mysql: "MySQL", postgres: "PostgreSQL", sqlite: "SQLite",
+    clickhouse: "ClickHouse", redis: "Redis", duckdb: "DuckDB",
   };
   function engIcon(engine) {
-    return ENGINE_META[engine] || { mono: String(engine || "?").slice(0, 2), bg: "#64748b", fg: "#fff" };
+    var f = ENGINE_ICON_FILE[engine];
+    return f ? { src: "/admin/static/db-icons/" + f + ".svg", label: ENGINE_LABEL[engine] || engine } : null;
   }
   var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
   var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
@@ -325,7 +326,7 @@
     template: `
 <div class="dg-sel">
   <button type="button" class="dg-sel-btn" @click.stop="toggle" :title="label">
-    <span v-if="selIc" class="dg-eng" :style="{background: selIc.bg, color: selIc.fg}">{{ selIc.mono }}</span>
+    <img v-if="selIc" class="dg-eng" :src="selIc.src" :title="selIc.label" alt="">
     <span v-if="selEnv" class="dg-env" :style="{background: envColor(selEnv)}">{{ selEnv }}</span>
     <span class="lb">{{ label }}</span><span class="ar">▾</span></button>
   <div v-if="open" class="dg-sel-pop" @click.stop>
@@ -333,7 +334,7 @@
     <div class="dg-sel-list">
       <div v-for="o in filtered" :key="o.value" class="dg-sel-item"
            :class="{cur: o.value === modelValue}" @click="pick(o.value)">
-        <span v-if="o.ic" class="dg-eng" :style="{background: o.ic.bg, color: o.ic.fg}">{{ o.ic.mono }}</span>
+        <img v-if="o.ic" class="dg-eng" :src="o.ic.src" :title="o.ic.label" alt="">
         <span v-if="o.env" class="dg-env" :style="{background: envColor(o.env)}">{{ o.env }}</span>{{ o.label }}</div>
       <div v-if="!filtered.length" class="dg-sel-none">（无匹配）</div>
     </div>
@@ -3533,7 +3534,7 @@
              @click="toggleTabGroup(g.conn)" :title="'连接：'+(g.conn||'无')+' · 点击折叠/展开 · 拖动可调整组顺序'"
              draggable="true" @dragstart="onGroupDragStart(g.conn, $event)" @dragover.prevent @drop="onGroupDrop(g.conn)" @dragend="dragGroup=null">
           <span class="car">{{ tabGroupCollapsed[g.conn] ? '▸' : '▾' }}</span>
-          <span v-if="g.meta.ic" class="dg-eng" :style="{background: g.meta.ic.bg, color: g.meta.ic.fg}">{{ g.meta.ic.mono }}</span>
+          <img v-if="g.meta.ic" class="dg-eng" :src="g.meta.ic.src" :title="g.meta.ic.label" alt="">
           <span class="gnm">{{ g.meta.name }}</span>
           <span class="gcount">{{ g.tabs.length }}</span>
         </div>
