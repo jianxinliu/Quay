@@ -1,5 +1,7 @@
 /* 查询台：DataGrip 风深色 IDE。仅本页加载，覆盖后台浅色壳为全屏工作台。 */
-main { padding: 0 !important; max-width: none !important; height: 100vh; overflow: hidden; }
+/* grid-column:2 把主区钉死在第 2 列：hover 时 .side 变 position:fixed 脱离网格，
+   若不钉死，main 会自动回填到第 1 列（46px）→ 1fr 区留空露出白色 body 背景（“遮盖”bug）。 */
+main { padding: 0 !important; max-width: none !important; height: 100vh; overflow: hidden; grid-column: 2; }
 .pending-banner { display: none !important; }  /* IDE 全屏，横幅让位；侧栏角标仍在 */
 
 /* 查询台页：后台左导航默认收起为窄条（IDE 要空间），悬浮展开 */
