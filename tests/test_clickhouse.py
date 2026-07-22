@@ -169,3 +169,26 @@ class TestClickhouseE2E:
     def test_explain_does_not_execute(self, service):
         res = service.query("demo", "ch", "EXPLAIN SELECT * FROM orders", CALLER)
         assert res["row_count"] >= 1
+
+    def test_no_database_lists_databases_then_tables(self, service, tmp_path):
+        """未绑定 database 时应能列出库（库→表→列三级树），选库后再列表。
+
+        `service` fixture 负责播种 dbm_ch_test.orders；这里另建一个**无 database** 的连接，
+        验证 list_databases 不再返回空、选库后能列表、不选库则明确引导报错。
+        （回归：service.list_databases 曾对 clickhouse 直接 return []）
+        """
+        import os
+        os.environ["CH_PW"] = CH_PW
+        cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"chnodb": {
+            "engine": "clickhouse", "environment": "dev",
+            "host": CH_HOST, "port": CH_PORT, "user": CH_USER, "password": "env://CH_PW",
+        }}}}})  # 无 database
+        svc = DbmService(cfg, AuditStore(tmp_path / "nodb.sqlite3"))
+        try:
+            dbs = svc.list_databases("demo", "chnodb", CALLER)
+            assert TEST_DB in dbs, f"list_databases 应含 {TEST_DB}，实际 {dbs}"
+            assert "orders" in svc.list_tables("demo", "chnodb", CALLER, schema=TEST_DB)
+            with pytest.raises(ValueError, match="未绑定默认库"):
+                svc.list_tables("demo", "chnodb", CALLER)
+        finally:
+            svc.close()

@@ -979,7 +979,7 @@ class DbmService:
     def list_databases(self, project: str, connection: str, caller: CallerInfo) -> list[str]:
         """列出连接可选的库/schema（MySQL 数据库 / PG schema）。sqlite 无此概念返回 []。"""
         cfg = self.config.get_connection(project, connection)
-        if cfg.engine not in ("mysql", "postgres"):
+        if cfg.engine not in ("mysql", "postgres", "clickhouse"):
             return []
         engine = self.pool.get(project, connection, cfg)
         return self._audited(project, connection, cfg, "list_databases", "", caller,
@@ -989,8 +989,9 @@ class DbmService:
         self, project: str, connection: str, caller: CallerInfo, schema: str | None = None
     ) -> list[str]:
         cfg = self.config.get_connection(project, connection)
-        # 未绑定默认库的 MySQL/PG，不带 schema 反射会崩（默认 schema 为 None）→ 明确报错引导
-        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres"):
+        # 未绑定默认库时，先让用户选库（库→表→列 三级树）。MySQL/PG 不带 schema 反射会崩
+        # （默认 schema 为 None）；ClickHouse 不会崩但会落到 default 库、看不到别的库 → 一并引导
+        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres", "clickhouse"):
             raise ValueError("此连接未绑定默认库，请先选择一个库（schema）再列表")
         engine = self.pool.get(project, connection, cfg)
         return self._audited(project, connection, cfg, "list_tables", schema or "", caller,
@@ -1005,7 +1006,7 @@ class DbmService:
         # ① 从「库.表」限定名拆出 schema；② 仍无 schema 且无默认库 → 明确报错引导，而非让它崩
         if schema is None and "." in table:
             schema, table = table.split(".", 1)
-        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres"):
+        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres", "clickhouse"):
             raise ValueError("此连接未绑定默认库，请用「库名.表名」指定表，或先选择一个库（schema）")
         engine = self.pool.get(project, connection, cfg)
         detail = f"{schema}.{table}" if schema else table
