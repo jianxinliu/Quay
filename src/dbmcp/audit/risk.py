@@ -26,7 +26,8 @@ _LEVEL_RANK = {lvl: i for i, lvl in enumerate(LEVELS)}
 LARGE_TABLE_ROWS = 1_000_000  # 大表 DDL → 锁表风险
 BULK_WRITE_ROWS = 10_000  # 预估影响行数超此值 → 批量写高危
 
-_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}
+_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
+             "clickhouse": "clickhouse"}
 
 
 class TableMetaLike(Protocol):

@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 import sqlglot
 from sqlglot import exp
 
-_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite"}
+_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
+             "clickhouse": "clickhouse"}
 
 # 只读语句的顶层节点白名单。
 # SetOperation 覆盖 UNION / UNION ALL / INTERSECT / EXCEPT——顶层是集合运算而非 Select，

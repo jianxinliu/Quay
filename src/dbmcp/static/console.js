@@ -471,12 +471,12 @@
       },
       needsDb: function () {
         var m = this.connMeta;
-        return !!m && (m.engine === "mysql" || m.engine === "postgres") && !m.database;
+        return !!m && (m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse") && !m.database;
       },
       aiFabStyle: function () {
         // ✨AI 按钮浮在编辑器右上角（对齐 schema 选择器）；有 schema 选择器时左移让位
         var m = this.connMeta, t = this.activeTab;
-        var hasSchema = !!m && (m.engine === "mysql" || m.engine === "postgres")
+        var hasSchema = !!m && (m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse")
           && t && t.type === "query";
         // 右缘一律基于 schemaFloatRight（已动态避开 minimap）；有 schema 选择器时再左移让位
         return { top: "8px", left: "auto",
@@ -990,7 +990,7 @@
           return;
         }
         var m = this.connMeta;
-        if (m && (m.engine === "mysql" || m.engine === "postgres")) {
+        if (m && (m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse")) {
           apiGet("/admin/sql/databases?conn=" + encodeURIComponent(t.conn)).then(function (d) {
             self.databases = d && d.ok ? d.databases : [];
             if (d && !d.ok) self.flash(d.error);
@@ -2205,7 +2205,7 @@
       // 按方言给标识符（表名/列名）加引号 —— 否则保留字或特殊字符的列名（如 key/order/desc）会 SQL 语法错误
       qid: function (name) {
         var m = this.connMeta, eng = m ? m.engine : "";
-        if (eng === "mysql") return "`" + String(name).replace(/`/g, "``") + "`";
+        if (eng === "mysql" || eng === "clickhouse") return "`" + String(name).replace(/`/g, "``") + "`";
         return '"' + String(name).replace(/"/g, '""') + '"';   // postgres / sqlite / duckdb
       },
       qtable: function (t) {
@@ -2514,7 +2514,7 @@
         var clear = function () { window.monaco.editor.setModelMarkers(model, "dbm", []); };
         if (!t || t.type !== "query" && t.type !== "flow") { clear(); return; }
         var dialect = this.isAnalysis ? "duckdb" : (this.connMeta ? this.connMeta.engine : "");
-        if (["mysql", "postgres", "sqlite", "duckdb"].indexOf(dialect) < 0) { clear(); return; }
+        if (["mysql", "postgres", "sqlite", "duckdb", "clickhouse"].indexOf(dialect) < 0) { clear(); return; }
         // 只 lint **光标所在的那条语句**（按 stmtRanges 拆分，与执行/边框同一套），
         // 避免把「无分号/换行分隔的多条」当成一条、误报到下一条上（红波浪线标错位置）。
         var info = this.stmtRangeAtCursor();
@@ -3643,7 +3643,7 @@
                   title="取消执行：向数据库发 KILL QUERY 中断正在跑的查询">取消</button>
         </div>
         <!-- 执行 schema 选择器浮在编辑器右上角（原顶部栏整条已去掉） -->
-        <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres') && activeTab && activeTab.type==='query'"
+        <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres'||connMeta.engine==='clickhouse') && activeTab && activeTab.type==='query'"
                class="dg-schema-float" :style="{right: schemaFloatRight + 'px'}" title="选择语句执行所在的库 / schema">
           <span class="lb">schema</span>
           <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
