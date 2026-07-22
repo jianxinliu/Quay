@@ -765,6 +765,12 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   border-radius: 3px; color: #fff; font-family: var(--dg-mono); text-transform: uppercase;
   vertical-align: middle; letter-spacing: .3px;
 }
+/* 引擎类型徽章：品牌色小方块 + 缩写，一眼区分 MySQL/PG/SQLite/ClickHouse/DuckDB */
+.dg-eng {
+  display: inline-block; font-size: 9px; line-height: 14px; height: 14px; min-width: 16px;
+  padding: 0 3px; margin-right: 6px; border-radius: 3px; text-align: center;
+  font-family: var(--dg-mono); font-weight: 600; vertical-align: middle; letter-spacing: .2px;
+}
 /* 生产环境警示条 */
 .dg-prod-ribbon { flex: none; height: 8px; background: var(--dg-red); }
 .dg-prod-ribbon.staging { background: #d97706; }
