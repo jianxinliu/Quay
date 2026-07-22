@@ -50,6 +50,18 @@
   }
 
   var ENV_COLORS = { local: "#64748b", dev: "#2563eb", staging: "#d97706", prod: "#dc2626" };
+  // 各引擎的品牌色徽章（单色小方块 + 缩写），用于连接选择器/tab 组头一眼区分数据库类型
+  var ENGINE_META = {
+    mysql:      { mono: "My", bg: "#00758f", fg: "#fff" },
+    postgres:   { mono: "Pg", bg: "#336791", fg: "#fff" },
+    sqlite:     { mono: "SL", bg: "#0f80cc", fg: "#fff" },
+    clickhouse: { mono: "CH", bg: "#ffcc00", fg: "#1a1a1a" },
+    redis:      { mono: "Rd", bg: "#dc382d", fg: "#fff" },
+    duckdb:     { mono: "Dk", bg: "#fff000", fg: "#1a1a1a" },
+  };
+  function engIcon(engine) {
+    return ENGINE_META[engine] || { mono: String(engine || "?").slice(0, 2), bg: "#64748b", fg: "#fff" };
+  }
   var chartInst = null;       // ECharts 实例（同一时刻只有活动 tab 的图表可见，共用一个）
   var CHART_PALETTE = ["#3574f0", "#d9a343", "#57965c", "#bc8cff", "#d9534f", "#39c5cf"];
   // 列类型 → 表头小图标（DataGrip 风）
@@ -284,6 +296,12 @@
           if (this.options[i].value === v) return this.options[i].env || "";
         return "";
       },
+      selIc: function () {
+        var v = this.modelValue;
+        for (var i = 0; i < this.options.length; i++)
+          if (this.options[i].value === v) return this.options[i].ic || null;
+        return null;
+      },
       envColor: function () { return function (e) { return ENV_COLORS[e] || "#64748b"; }; },
       filtered: function () {
         var q = this.q.trim().toLowerCase();
@@ -307,6 +325,7 @@
     template: `
 <div class="dg-sel">
   <button type="button" class="dg-sel-btn" @click.stop="toggle" :title="label">
+    <span v-if="selIc" class="dg-eng" :style="{background: selIc.bg, color: selIc.fg}">{{ selIc.mono }}</span>
     <span v-if="selEnv" class="dg-env" :style="{background: envColor(selEnv)}">{{ selEnv }}</span>
     <span class="lb">{{ label }}</span><span class="ar">▾</span></button>
   <div v-if="open" class="dg-sel-pop" @click.stop>
@@ -314,6 +333,7 @@
     <div class="dg-sel-list">
       <div v-for="o in filtered" :key="o.value" class="dg-sel-item"
            :class="{cur: o.value === modelValue}" @click="pick(o.value)">
+        <span v-if="o.ic" class="dg-eng" :style="{background: o.ic.bg, color: o.ic.fg}">{{ o.ic.mono }}</span>
         <span v-if="o.env" class="dg-env" :style="{background: envColor(o.env)}">{{ o.env }}</span>{{ o.label }}</div>
       <div v-if="!filtered.length" class="dg-sel-none">（无匹配）</div>
     </div>
@@ -514,7 +534,7 @@
         // Redis 连接走独立的 /admin/redis 控制台，不在 SQL 查询台里
         var sqlConns = this.connections.filter(function (c) { return c.engine !== "redis"; });
         var opts = [{ value: "", label: "选择连接…", env: "" }].concat(sqlConns.map(function (c) {
-          return { value: c.value, label: c.connection + " · " + c.engine, env: c.environment || "" };
+          return { value: c.value, label: c.connection, env: c.environment || "", ic: engIcon(c.engine) };
         }));
         return opts.concat(this.workspaces.map(function (w) {
           return { value: "analysis/" + w, label: "⚗ " + w + " · 分析工作区", env: "" };
@@ -580,7 +600,8 @@
       realConnOptions: function () {  // 取数节点可选的真实连接（不含分析工作区）
         return this.connections.map(function (c) {
           return { value: c.value,
-                   label: c.connection + " · " + c.engine + (c.environment ? " (" + c.environment + ")" : "") };
+                   label: c.connection + (c.environment ? " (" + c.environment + ")" : ""),
+                   ic: engIcon(c.engine) };
         });
       },
       joinKindOptions: function () {
@@ -678,10 +699,12 @@
       },
       // 每个 tab 显示所属连接 + 环境（防止本地/线上混淆）
       tabConn: function (t) {
-        if (!t.conn) return { name: "无连接", env: "none" };
-        if (t.conn.indexOf("analysis/") === 0) return { name: "⚗ " + t.conn.slice(9), env: "none" };
+        if (!t.conn) return { name: "无连接", env: "none", ic: null };
+        if (t.conn.indexOf("analysis/") === 0)
+          return { name: "⚗ " + t.conn.slice(9), env: "none", ic: engIcon("duckdb") };
         var m = this.connections.find(function (c) { return c.value === t.conn; });
-        return { name: m ? m.connection : t.conn.split("/").pop(), env: (m && m.environment) || "none" };
+        return { name: m ? m.connection : t.conn.split("/").pop(), env: (m && m.environment) || "none",
+                 ic: m ? engIcon(m.engine) : null };
       },
       togglePin: function (id) {
         var t = this.tabs.find(function (x) { return x.id === id; });
@@ -3510,6 +3533,7 @@
              @click="toggleTabGroup(g.conn)" :title="'连接：'+(g.conn||'无')+' · 点击折叠/展开 · 拖动可调整组顺序'"
              draggable="true" @dragstart="onGroupDragStart(g.conn, $event)" @dragover.prevent @drop="onGroupDrop(g.conn)" @dragend="dragGroup=null">
           <span class="car">{{ tabGroupCollapsed[g.conn] ? '▸' : '▾' }}</span>
+          <span v-if="g.meta.ic" class="dg-eng" :style="{background: g.meta.ic.bg, color: g.meta.ic.fg}">{{ g.meta.ic.mono }}</span>
           <span class="gnm">{{ g.meta.name }}</span>
           <span class="gcount">{{ g.tabs.length }}</span>
         </div>
