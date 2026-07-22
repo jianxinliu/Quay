@@ -36,6 +36,20 @@ projects:
         policy:
           mask_columns: [salary, phone]   # 业务敏感列（内置已覆盖 password/token/secret 等）
 
+      analytics-clickhouse:
+        engine: clickhouse
+        host: 127.0.0.1
+        port: 9000                 # native TCP 端口（不是 HTTP 的 8123）
+        environment: dev
+        user: default
+        password: env://CH_PW      # default 用户无密码时可省略
+        # database 可留空：查询台会列出所有库，进去再「库→表→列」自己选；
+        # 也可绑定默认库（下行），进去直接是该库的表。
+        # database: analytics
+        policy:
+          max_rows: 1000
+          statement_timeout_s: 30   # 映射为 ClickHouse max_execution_time（只读防线另加 readonly=1）
+
       dev-redis:
         engine: redis
         host: 127.0.0.1
