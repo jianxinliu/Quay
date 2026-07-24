@@ -1,0 +1,12 @@
+# Quay 单容器应用：dbmcp 服务监听 8100（/admin 管理后台 + /mcp 端点）。
+# 免密登录：镜像内置 DBM_TRUSTED_PROXY_AUTH=1，信任 lzc-ingress 注入的 X-HC-User-ID 身份。
+# 持久化：容器把配置/数据/密钥写在 /lzcapp/var（$HOME），bind 到应用持久化卷，重启/升级不丢。
+services:
+  quay:
+    image: registry.lazycat.cloud/chunfeng/jianxinliu/quay:44196215cde26a91
+    binds:
+      - /lzcapp/var:/lzcapp/var
+application:
+  subdomain: quay
+  routes:
+    - /=http://quay.cloud.lazycat.app.quay.lzcapp:8100

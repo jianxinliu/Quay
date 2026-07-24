@@ -1,0 +1,6 @@
+# 镜像已推到官方源 registry.lazycat.cloud（见 lzc-manifest.yml 的 image 引用），
+# 盒子从官方源拉取，无需内嵌/远程构建。
+# 如需更新镜像：本机 docker build → push ghcr → lzc-cli appstore copy-image → 更新 manifest 的 image tag。
+pkgout: ./
+manifest: ./lzc-manifest.yml
+icon: ./scripts/app-icon.png

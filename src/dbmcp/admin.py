@@ -1212,6 +1212,11 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         resp.delete_cookie(_COOKIE_NAME, path="/admin")
         return resp
 
+    @mcp.custom_route("/", methods=["GET"])
+    async def _root(_req: Request) -> RedirectResponse:
+        # 应用根路径重定向到管理后台（懒猫等反代把 / 转发到本服务时，用户落到 /admin）。
+        return RedirectResponse(url="/admin", status_code=307)
+
     @mcp.custom_route("/admin", methods=["GET"])
     @guard
     async def _index(_req: Request) -> RedirectResponse:

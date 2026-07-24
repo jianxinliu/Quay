@@ -1,0 +1,18 @@
+package: cloud.lazycat.app.quay
+version: 1.0.0
+name: Quay 数据库工作台
+description: 面向人与 AI 协作的本地数据库工作台：SQL 查询台、Redis 控制台、跨源分析工作台、MCP 端点，共享一套连接管理与安全治理（SQL 审计、写操作人工审批、操作全程留痕）。支持 MySQL/PostgreSQL/Redis/ClickHouse/DuckDB/SQLite，可经 SSH 多级跳板直连内网库。
+author: jianxinliu
+license: Apache-2.0
+homepage: https://github.com/jianxinliu/Quay
+permissions:
+  required:
+    - net.lan       # 连接局域网内的数据库
+    - net.internet  # 连接远程数据库 / SSH 隧道
+locales:
+  zh-CN:
+    name: Quay 数据库工作台
+    description: 人与 AI 协作的本地数据库工作台：SQL 查询台 · Redis 控制台 · 跨源分析 · MCP，统一连接与安全治理（审计+审批+留痕），支持多种数据库与 SSH 跳板
+  en-US:
+    name: Quay
+    description: A local database workbench for humans and AI agents — SQL IDE, Redis console, cross-source analysis and MCP over one governed connection layer (audit, approval, full trail)

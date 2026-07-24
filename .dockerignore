@@ -10,3 +10,4 @@ tests
 data
 assets/screenshots
 *.md
+!README.md

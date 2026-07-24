@@ -12,3 +12,4 @@ config/connections.yaml
 # LazyCat 打包/发布产物
 *.lpk
 .lzc-cli-publish*/
+.lzc-cli-cache/
