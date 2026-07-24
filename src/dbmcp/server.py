@@ -16,7 +16,20 @@ from pydantic import Field
 
 from .agent_format import render_agent_result
 from .approvals import ApprovalError
+from .health import ConnectionUnavailable
 from .service import CallerInfo, DbmService, QueryRejected
+
+
+def _tool_error_from_unavailable(e: ConnectionUnavailable) -> ToolError:
+    """把 ConnectionUnavailable 转成给 agent 的清晰 ToolError 文案。
+
+    文案里包含 state（unavailable/exhausted）与建议重试秒数，agent 据此决定
+    是稍等重试还是提示用户去后台处理，而不是把 pymysql 2013 之类的原始错误抛给 agent。
+    """
+    if e.state == "exhausted":
+        return ToolError(f"[connection_exhausted] {e}")
+    hint = f"（建议 {e.retry_after_s} 秒后重试）" if e.retry_after_s else ""
+    return ToolError(f"[connection_unavailable] {e}{hint}")
 
 
 def _caller_from_ctx(ctx: Context | None) -> CallerInfo:
@@ -134,6 +147,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             return service.list_connections(project)
         except KeyError as e:
             raise ToolError(str(e)) from e
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
 
     @mcp.tool
     def query(
@@ -158,6 +173,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             result = service.query(project, connection, sql, _caller_from_ctx(ctx))
             budget = service.agent_result_budget(project, connection)
             return render_agent_result(result, budget)
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (QueryRejected, KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 
@@ -187,6 +204,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         run = partial(service.execute, project, connection, sql, caller, reason=reason)
         try:
             result = await anyio.to_thread.run_sync(partial(run, change_id=change_id))
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (QueryRejected, KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
         if change_id is None:
@@ -222,6 +241,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """列出连接对应数据库中的所有表。"""
         try:
             return service.list_tables(project, connection, _caller_from_ctx(ctx))
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 
@@ -232,6 +253,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """查看表结构：字段（类型/可空/默认值/注释）、索引、主键。"""
         try:
             return service.describe_table(project, connection, table, _caller_from_ctx(ctx))
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 
@@ -248,6 +271,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             result = service.sample_rows(project, connection, table, limit, _caller_from_ctx(ctx))
             budget = service.agent_result_budget(project, connection)
             return render_agent_result(result, budget)
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 
@@ -287,6 +312,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             return await anyio.to_thread.run_sync(
                 lambda: service.analysis_import(workspace, dataset, project, connection,
                                                 sql, caller, limit, schema))
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (QueryRejected, KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
         except Exception as e:  # noqa: BLE001
@@ -358,6 +385,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """测试连接连通性（执行 SELECT 1）。"""
         try:
             return service.test_connection(project, connection, _caller_from_ctx(ctx))
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
 
