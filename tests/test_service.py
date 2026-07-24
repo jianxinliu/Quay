@@ -577,12 +577,16 @@ class TestApprovalNotify:
 
 
 class TestExhaustedNotify:
-    def test_exhausted_fires_notification(self, tmp_path):
+    def test_exhausted_does_not_notify(self, tmp_path, caplog):
+        """连接 exhausted 只落 warn 日志，不发通知——agent 侧已经收到明确的
+        [connection_exhausted] ToolError 会告诉用户，再推通知反而是噪音（尤其
+        网络抖动导致反复 exhausted 时会连发）。"""
+        import logging
         svc, notifier = _make_service_with_notifier(tmp_path)
-        # 直接推到 exhausted → 应通过 _on_connection_exhausted 发通知
-        svc._on_connection_exhausted("demo", "main", "OperationalError: down")
-        exh = [e for e in notifier.events if e["meta"].get("kind") == "connection_exhausted"]
-        assert len(exh) == 1
-        assert "demo/main" in exh[0]["title"]
-        assert "管理后台" in exh[0]["body"]
+        with caplog.at_level(logging.WARNING, logger="dbmcp.service"):
+            svc._on_connection_exhausted("demo", "main", "OperationalError: down")
+        # 没往 notifier 发
+        assert notifier.events == []
+        # 但落了 warn 日志（方便运维排查）
+        assert any("exhausted" in rec.getMessage() for rec in caplog.records)
         svc.close()

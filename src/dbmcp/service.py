@@ -1389,21 +1389,13 @@ class DbmService:
         engines.run_query(engine, "SELECT 1", max_rows=1)
 
     def _on_connection_exhausted(self, project: str, connection: str, error: str) -> None:
-        """连接 exhausted 时发一条通知（人为介入信号）。"""
-        try:
-            from .notify import build_admin_deeplink  # noqa: PLC0415
-            base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
-            self.notifier.send(
-                title=f"连接不可用 · {project}/{connection}",
-                body=f"重连多次仍失败，请到管理后台检查连接配置。最近错误：{error}",
-                meta={"kind": "connection_exhausted",
-                      "project": project, "connection": connection,
-                      "deeplink": build_admin_deeplink(
-                          base_url,
-                          f"/admin/settings?tab=connections&edit={project}/{connection}")},
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("notify exhausted failed")
+        """连接 exhausted 事件回调：只落 warn 日志，不发通知。
+
+        原因：连接不可用会在 agent 侧被 `[connection_exhausted]` ToolError 直接告知，
+        agent 会告诉用户；再发桌面/群通知反而形成噪音（尤其自建 server 抖动时会连发）。
+        审批单等"必须人主动介入"的场景仍走通知（那里 agent 不再触达）。
+        """
+        logger.warning("connection %s/%s exhausted: %s", project, connection, error)
 
     # ---------- 连接管理（管理后台，需已配置 config_path）----------
 
