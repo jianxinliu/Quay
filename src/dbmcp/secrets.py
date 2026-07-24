@@ -4,15 +4,92 @@
 
 - ``env://VAR_NAME``               从环境变量读取（Docker 部署推荐）
 - ``keyring://service/account``    从系统钥匙串读取（裸机运行时用，需安装 keyring extra）
+- ``file://account``               从 600 权限的本地密钥文件读取（容器/无桌面环境 keyring
+                                   不可用时，后台管理连接的密码回退到此，见 store_secret）
 - ``plain://literal``              字面量密码（仅限 local/dev 调试，不推荐）
+
+统一入口 ``store_secret`` / ``delete_secret`` 会优先用钥匙串、无后端时回退文件后端；
+配置文件里始终只存引用、不落明文。
 """
 
 from __future__ import annotations
 
+import json
 import os
+import stat
 
 
 KEYRING_SERVICE = "db-manage-mcp"
+
+
+# ---------- 文件密钥后端（容器/无桌面环境的 keyring 回退） ----------
+# 存到一个 600 权限的 JSON 文件（默认 ~/.config/db-manage-mcp/secrets.json，容器里
+# 因 $HOME=/lzcapp/var 落在持久化卷）。配置文件里仍只存 file:// 引用、不落明文；
+# 安全级别与设计中「Docker 推荐的 env://（600 env 文件）」一致。
+
+def _secrets_file() -> str:
+    return os.environ.get("DBM_SECRETS_FILE") or os.path.expanduser(
+        "~/.config/db-manage-mcp/secrets.json")
+
+
+def _load_file_secrets() -> dict[str, str]:
+    path = _secrets_file()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_file_secrets(data: dict[str, str]) -> None:
+    path = _secrets_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # 600，仅属主可读写
+    os.replace(tmp, path)
+
+
+def store_file_secret(account: str, value: str) -> str:
+    """把密码写入 600 权限的本地密钥文件，返回可写进配置的 file:// 引用。"""
+    if "/" in account:
+        raise SecretResolveError(f"file account 不能包含 '/': {account!r}")
+    data = _load_file_secrets()
+    data[account] = value
+    _save_file_secrets(data)
+    return f"file://{account}"
+
+
+def delete_file_secret(ref: str) -> None:
+    """删除 file:// 引用对应的密钥（非 file:// 引用则忽略）。"""
+    if not ref.startswith("file://"):
+        return
+    account = ref.removeprefix("file://")
+    data = _load_file_secrets()
+    if account in data:
+        del data[account]
+        _save_file_secrets(data)
+
+
+def store_secret(account: str, value: str) -> str:
+    """存储密码并返回配置引用：优先系统钥匙串；无可用后端（容器/无桌面）时
+    回退到 600 权限的本地密钥文件，保证 Docker 部署下也能用后台管理连接。"""
+    try:
+        return store_keyring_secret(account, value)
+    except SecretResolveError:
+        return store_file_secret(account, value)
+
+
+def delete_secret(ref: str) -> None:
+    """按引用类型删除对应密钥（keyring:// 或 file://）。"""
+    if ref and ref.startswith("file://"):
+        delete_file_secret(ref)
+    else:
+        delete_keyring_secret(ref)
 
 
 class SecretResolveError(Exception):
@@ -68,6 +145,13 @@ def resolve_secret(ref: str) -> str:
         if value is None:
             raise SecretResolveError(f"环境变量 {var} 未设置（引用: {ref}）")
         return value
+
+    if ref.startswith("file://"):
+        account = ref.removeprefix("file://")
+        data = _load_file_secrets()
+        if account not in data:
+            raise SecretResolveError(f"本地密钥文件中找不到 {account}")
+        return data[account]
 
     if ref.startswith("keyring://"):
         path = ref.removeprefix("keyring://")

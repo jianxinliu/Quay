@@ -292,7 +292,14 @@ def _resolve_api_key(key_env: str) -> str:
         v = keyring.get_password(KEYRING_SERVICE, AI_API_KEY_ACCOUNT)
         if v:
             return v
-    except Exception:  # 无 keyring 后端/未安装 → 回退 env
+    except Exception:  # 无 keyring 后端/未安装 → 试文件后端，再回退 env
+        pass
+    try:
+        from .secrets import _load_file_secrets  # noqa: PLC0415
+        v = _load_file_secrets().get(AI_API_KEY_ACCOUNT)
+        if v:
+            return v
+    except Exception:
         pass
     return os.environ.get((key_env or "DBM_AI_API_KEY").strip(), "")
 

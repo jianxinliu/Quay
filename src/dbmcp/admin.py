@@ -1856,15 +1856,17 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         # AI API key 单独处理：存钥匙串、绝不入设置库；勾选清除则删除
         from .ai import AI_API_KEY_ACCOUNT
         from .secrets import (KEYRING_SERVICE, SecretResolveError,
-                              delete_keyring_secret, store_keyring_secret)
+                              delete_secret, store_secret)
         key_val = str(f.get("ai_api_key") or "").strip()
         clear_key = str(f.get("ai_api_key_clear") or "") in ("1", "on", "true")
         try:
             settings = service.save_settings(updates)
             if clear_key:
-                delete_keyring_secret(f"keyring://{KEYRING_SERVICE}/{AI_API_KEY_ACCOUNT}")
+                # keyring 与文件后端两处都清（不确定当初存哪个，删除均幂等）
+                delete_secret(f"keyring://{KEYRING_SERVICE}/{AI_API_KEY_ACCOUNT}")
+                delete_secret(f"file://{AI_API_KEY_ACCOUNT}")
             elif key_val:
-                store_keyring_secret(AI_API_KEY_ACCOUNT, key_val)
+                store_secret(AI_API_KEY_ACCOUNT, key_val)
         except SecretResolveError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:  # noqa: BLE001

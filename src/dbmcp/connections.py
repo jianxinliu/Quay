@@ -18,7 +18,7 @@ from .config import (
     WriterAccount,
     save_config,
 )
-from .secrets import SecretResolveError, delete_keyring_secret, store_keyring_secret
+from .secrets import SecretResolveError, delete_secret, store_secret
 
 
 class ConnectionAdminError(Exception):
@@ -209,10 +209,10 @@ class ConnectionManager:
         removed = proj.connections.pop(connection)
         if not proj.connections:
             self.config.projects.pop(project)
-        # 清理 keyring（仅清 keyring:// 引用；env:// 等外部管理的不动）
-        delete_keyring_secret(removed.password or "")
+        # 清理密钥（清 keyring:// / file:// 引用；env:// 等外部管理的不动）
+        delete_secret(removed.password or "")
         if removed.writer is not None:
-            delete_keyring_secret(removed.writer.password)
+            delete_secret(removed.writer.password)
         save_config(self.config, self.config_path)
 
     # ---------- SSH 证书库（只存路径引用，绝不存密钥内容）----------
@@ -308,7 +308,7 @@ class ConnectionManager:
     ) -> str | None:
         if new_plain:
             try:
-                return store_keyring_secret(_keyring_account(project, connection, role), new_plain)
+                return store_secret(_keyring_account(project, connection, role), new_plain)
             except SecretResolveError as e:
                 raise ConnectionAdminError(str(e)) from e
         return existing_ref  # 留空 → 沿用旧引用（可能为 None）
