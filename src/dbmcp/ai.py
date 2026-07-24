@@ -285,7 +285,8 @@ def run_ai(prompt: str, *, provider: str, model: str, timeout: int,
 
 
 def _resolve_api_key(key_env: str) -> str:
-    """取 API key：优先系统钥匙串（后台页面存的），回退环境变量。绝不打印/落库。"""
+    """取 API key：优先系统钥匙串（后台页面存的），无 keyring 后端时看本地文件后端，
+    最后回退环境变量。绝不打印/落库。"""
     try:
         import keyring  # noqa: PLC0415
         from .secrets import KEYRING_SERVICE  # noqa: PLC0415
