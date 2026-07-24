@@ -25,6 +25,9 @@ WORKDIR /app
 # 从 builder 拷贝应用源码 + 已编译好的 .venv（两阶段同为 python:3.12-slim，解释器路径一致，venv 可用）。
 COPY --from=builder /app /app
 
+# 构建时生成内置 SQLite 示例库（仅标准库，无需 .venv）；entrypoint 首次启动会拷到持久化卷。
+RUN python scripts/demo_seed.py /app/demo/demo.sqlite3
+
 # 配置/数据/密钥统一落在持久化卷根 /lzcapp/var（$HOME 指向它，~/.config 自然持久化）。
 ENV HOME=/lzcapp/var \
     DBM_HOST=0.0.0.0 \

@@ -5,9 +5,21 @@ set -e
 mkdir -p /lzcapp/var/data
 
 CONFIG=/lzcapp/var/connections.yaml
-# 首次启动 seed 一个空配置；连接由管理后台 UI 写入此文件（随持久化卷保留）。
+DEMO=/lzcapp/var/demo.sqlite3
+
+# 首次启动：放入内置的 SQLite 示例库 + seed 一个指向它的连接配置，开箱即可查询。
+# 之后用户在管理后台的增删连接都会写回 $CONFIG（随持久化卷保留），不再覆盖。
 if [ ! -f "$CONFIG" ]; then
-  printf 'projects: {}\n' > "$CONFIG"
+  [ -f "$DEMO" ] || cp /app/demo/demo.sqlite3 "$DEMO" 2>/dev/null || true
+  cat > "$CONFIG" <<'YAML'
+projects:
+  demo:
+    connections:
+      demo-sqlite:
+        engine: sqlite
+        database: /lzcapp/var/demo.sqlite3
+        environment: local
+YAML
 fi
 
 exec /app/.venv/bin/dbm serve \
