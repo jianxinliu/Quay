@@ -3,7 +3,7 @@
 # 持久化：容器把配置/数据/密钥写在 /lzcapp/var（$HOME），bind 到应用持久化卷，重启/升级不丢。
 services:
   quay:
-    image: registry.lazycat.cloud/chunfeng/jianxinliu/quay:dc5f6d6b0d96494d
+    image: registry.lazycat.cloud/chunfeng/jianxinliu/quay:177c9ddc93ea979f
     binds:
       - /lzcapp/var:/lzcapp/var
 application:

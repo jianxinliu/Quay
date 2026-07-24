@@ -1,69 +1,86 @@
 """内置示例：首次启动时播种到 workflow 库，展示 DAG 画布的完整能力。
 
-示例「渠道ROI分析」覆盖全部七类节点：
-  两个取数（orders / users，同库不同查询）+ 一个文件源（渠道投放成本 CSV）
-  → 过滤（只留已支付）→ JOIN（订单×用户）→ 聚合（按渠道汇总收入）
-  → 自由 SQL（联成本表算 ROI）→ 输出（按 ROI 排序），结果默认以柱状图呈现。
+示例「分类销售 ROI 分析」基于内置 SQLite 示例库（连接 demo/demo-sqlite），覆盖全部七类节点：
+  三个取数（order_items 明细 / products 带分类 / orders 订单头）+ 一个文件源（各分类投放成本 CSV）
+  → 过滤（剔除已取消订单）→ JOIN×2（明细×有效订单、明细×产品分类）
+  → 聚合（按分类汇总销售额）→ 自由 SQL（联成本算 ROI）→ 输出（按 ROI 排序），默认柱状图。
 
-source 节点引用连接 local/demo-mysql（dbm_e2e 库的 orders/users 表）；
-换环境使用时在画布上点开取数节点改成自己的连接即可——模板价值在于结构。
+source 节点引用连接 demo/demo-sqlite（首次启动自带的示例库）；换到自己的库时，
+在画布上点开取数节点改连接与 SQL 即可——模板价值在于结构。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-EXAMPLE_NAME = "示例 · 渠道ROI分析"
+EXAMPLE_NAME = "示例 · 分类销售 ROI 分析"
 EXAMPLE_WORKSPACE = "ws1"
-EXAMPLE_CSV_REL = "demo/channel_cost.csv"  # 相对 data 目录
+EXAMPLE_CSV_REL = "demo/category_cost.csv"  # 相对 data 目录
 
-EXAMPLE_CSV = """channel,cost_total
-douyin,3500
-wechat,1800
-web,600
-appstore,2600
+# 各分类的市场投放成本（category 需与示例库 categories.name 一致）
+EXAMPLE_CSV = """category,cost_total
+电脑外设,8000
+显示设备,6000
+音频设备,5000
+存储设备,3000
+办公家具,7000
+线缆配件,2000
+网络设备,4000
 """
 
-EXAMPLE_CHART = {"view": "chart", "type": "bar", "x": "channel", "y": "revenue", "agg": ""}
+EXAMPLE_CHART = {"view": "chart", "type": "bar", "x": "category", "y": "revenue", "agg": ""}
 
 
 def example_graph(csv_path: str) -> dict:
     return {
         "nodes": [
-            {"id": "n_src_orders", "type": "source", "name": "orders", "x": 30, "y": 40,
-             "cfg": {"conn": "local/demo-mysql", "sql": "SELECT * FROM orders",
+            {"id": "n_src_items", "type": "source", "name": "items", "x": 30, "y": 40,
+             "cfg": {"conn": "demo/demo-sqlite",
+                     "sql": "SELECT order_id, product_id, qty, unit_price, discount"
+                            " FROM order_items",
                      "limit": 100000}},
-            {"id": "n_src_users", "type": "source", "name": "users", "x": 30, "y": 150,
-             "cfg": {"conn": "local/demo-mysql",
-                     "sql": "SELECT id, name, active FROM users", "limit": 10000}},
-            {"id": "n_cost", "type": "file", "name": "channel_cost", "x": 30, "y": 260,
+            {"id": "n_src_prod", "type": "source", "name": "products_cat", "x": 30, "y": 150,
+             "cfg": {"conn": "demo/demo-sqlite",
+                     "sql": "SELECT p.id AS product_id, c.name AS category"
+                            " FROM products p JOIN categories c ON p.category_id = c.id",
+                     "limit": 10000}},
+            {"id": "n_src_orders", "type": "source", "name": "orders", "x": 30, "y": 260,
+             "cfg": {"conn": "demo/demo-sqlite",
+                     "sql": "SELECT id AS order_id, status FROM orders",
+                     "limit": 100000}},
+            {"id": "n_cost", "type": "file", "name": "category_cost", "x": 30, "y": 370,
              "cfg": {"path": csv_path}},
-            {"id": "n_paid", "type": "filter", "name": "paid_orders", "x": 260, "y": 40,
-             "cfg": {"where": "status = 'paid'"}},
-            {"id": "n_join", "type": "join", "name": "orders_with_user", "x": 490, "y": 90,
-             "cfg": {"kind": "INNER", "on": "l.uid = r.id",
-                     "select": "l.*, r.name AS user_name, r.active"}},
-            {"id": "n_agg", "type": "aggregate", "name": "by_channel", "x": 720, "y": 90,
-             "cfg": {"group": "channel",
-                     "aggs": "count(*) AS orders_n, round(sum(amount), 2) AS revenue,"
-                             " round(avg(amount), 2) AS avg_amount,"
-                             " count(DISTINCT uid) AS buyers"}},
-            {"id": "n_roi", "type": "sql", "name": "channel_roi", "x": 950, "y": 150,
-             "cfg": {"sql": "SELECT b.channel, b.orders_n, b.buyers, b.revenue,"
-                            " b.avg_amount, c.cost_total,"
+            {"id": "n_valid", "type": "filter", "name": "valid_orders", "x": 260, "y": 260,
+             "cfg": {"where": "status <> '已取消'"}},
+            {"id": "n_join_io", "type": "join", "name": "valid_items", "x": 490, "y": 130,
+             "cfg": {"kind": "INNER", "on": "l.order_id = r.order_id",
+                     "select": "l.*"}},
+            {"id": "n_join_ip", "type": "join", "name": "items_cat", "x": 720, "y": 130,
+             "cfg": {"kind": "INNER", "on": "l.product_id = r.product_id",
+                     "select": "l.*, r.category"}},
+            {"id": "n_agg", "type": "aggregate", "name": "by_category", "x": 950, "y": 130,
+             "cfg": {"group": "category",
+                     "aggs": "count(DISTINCT order_id) AS orders_n, count(*) AS items_n,"
+                             " round(sum(qty * unit_price * (1 - discount)), 2) AS revenue,"
+                             " round(avg(unit_price), 2) AS avg_price"}},
+            {"id": "n_roi", "type": "sql", "name": "category_roi", "x": 1180, "y": 190,
+             "cfg": {"sql": "SELECT b.category, b.orders_n, b.items_n, b.revenue,"
+                            " c.cost_total,"
                             " round(b.revenue / c.cost_total, 2) AS roi"
-                            " FROM by_channel b JOIN channel_cost c"
-                            " ON b.channel = c.channel"}},
-            {"id": "n_out", "type": "output", "name": "report", "x": 1180, "y": 150,
+                            " FROM by_category b JOIN category_cost c"
+                            " ON b.category = c.category"}},
+            {"id": "n_out", "type": "output", "name": "report", "x": 1410, "y": 190,
              "cfg": {"order_by": "roi DESC", "limit": 100}},
         ],
         "edges": [
-            {"from": "n_src_orders", "to": "n_paid", "port": "in"},
-            {"from": "n_paid", "to": "n_join", "port": "left"},
-            {"from": "n_src_users", "to": "n_join", "port": "right"},
-            {"from": "n_join", "to": "n_agg", "port": "in"},
+            {"from": "n_src_orders", "to": "n_valid", "port": "in"},
+            {"from": "n_src_items", "to": "n_join_io", "port": "left"},
+            {"from": "n_valid", "to": "n_join_io", "port": "right"},
+            {"from": "n_join_io", "to": "n_join_ip", "port": "left"},
+            {"from": "n_src_prod", "to": "n_join_ip", "port": "right"},
+            {"from": "n_join_ip", "to": "n_agg", "port": "in"},
             {"from": "n_agg", "to": "n_roi", "port": "in"},
-            {"from": "n_cost", "to": "n_roi", "port": "in2"},  # 仅表意+定序（SQL 节点按名引用）
+            {"from": "n_cost", "to": "n_roi", "port": "in2"},  # 表意+定序（SQL 节点按名引用）
             {"from": "n_roi", "to": "n_out", "port": "in"},
         ],
     }
