@@ -60,6 +60,41 @@ def test_foreign_host_blocked_at_guard(client):
     assert tc.get("/admin/approvals").status_code == 200
 
 
+def test_no_auth_mode_skips_login(tmp_path):
+    """--no-auth：跳过认证，本机测试脚手架用；Host 校验仍在。"""
+    import sqlite3
+    from dbmcp.admin import mount_admin
+    from dbmcp.approvals import ApprovalStore
+    from dbmcp.audit.log import AuditStore
+    from dbmcp.config import AppConfig
+    from dbmcp.server import build_mcp
+    from dbmcp.service import DbmService
+    from dbmcp.snippets import SnippetStore
+
+    db_file = tmp_path / "biz.sqlite3"
+    conn = sqlite3.connect(db_file)
+    conn.executescript("CREATE TABLE t (id INTEGER);")
+    conn.commit()
+    conn.close()
+    cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
+        "engine": "sqlite", "database": str(db_file), "environment": "dev",
+    }}}}})
+    svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"),
+                     ApprovalStore(tmp_path / "a.sqlite3"))
+    svc.snippets = SnippetStore(tmp_path / "a.sqlite3")
+    mcp = build_mcp(svc)
+    mount_admin(mcp, svc, admin_token="unused", no_auth=True)
+    with TestClient(mcp.http_app()) as tc:
+        # 未登录直接访问受保护路由 → 200（跳过 auth）
+        assert tc.get("/admin/approvals").status_code == 200
+        # 铃铛 API 未登录也直接返回 JSON
+        assert tc.get("/admin/notifications/unread_count").json()["ok"] is True
+        # 但外来 Host 仍被 403（Host 校验先于 auth 检查）
+        assert tc.get("/admin/approvals",
+                      headers={"host": "attacker.example.com"}).status_code == 403
+    svc.close()
+
+
 def test_search_tables_and_lint(client):
     """全局表搜索（sqlite sqlite_master LIKE）+ sqlglot 语法检查接口。"""
     tc, svc = client
