@@ -476,3 +476,113 @@ class TestAiGenerateWorkflow:
                             lambda **kw: (dict(self._BAD), "sid-1"))  # 两次都非法
         with pytest.raises(QueryRejected, match="仍不合法"):
             service.ai_generate_workflow("demo", "main", "q", CALLER, tables=["users"])
+
+
+class _RecordingNotifier:
+    """内存 notifier：把 send 参数记录下来，供断言。"""
+
+    def __init__(self):
+        self.events: list[dict] = []
+
+    def send(self, title, body, meta=None):
+        self.events.append({"title": title, "body": body, "meta": meta or {}})
+
+
+def _make_service_with_notifier(tmp_path, *, engine="sqlite", db_file=None):
+    """构造带 RecordingNotifier 的 service。"""
+    if db_file is None:
+        db_file = tmp_path / "biz.sqlite3"
+        conn = sqlite3.connect(db_file)
+        conn.executescript("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);"
+                           "INSERT INTO users (name) VALUES ('alice'), ('bob');")
+        conn.commit()
+        conn.close()
+    cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
+        "engine": engine, "database": str(db_file), "environment": "dev",
+        "writer": {"user": "x", "password": "plain://unused"},
+    }}}}})
+    from dbmcp.approvals import ApprovalStore
+    notifier = _RecordingNotifier()
+    svc = DbmService(cfg, AuditStore(tmp_path / "audit.sqlite3"),
+                     ApprovalStore(tmp_path / "audit.sqlite3"), notifier=notifier)
+    return svc, notifier
+
+
+class TestHealthIntegration:
+    """连接级异常自动打标 + 后续入口直接抛 ConnectionUnavailable。"""
+
+    def test_conn_error_marks_unavailable_and_next_call_rejected(self, tmp_path, monkeypatch):
+        svc, _ = _make_service_with_notifier(tmp_path)
+        # 正常一次 → 健康位应为 ok（或未记录）
+        svc.query("demo", "main", "SELECT 1 AS x", CALLER)
+
+        # 让底层 run_query 抛出「连接级」错误 → 应打标 unavailable
+        from dbmcp import engines
+
+        def _boom(engine, sql, max_rows, max_cell_chars=4096, on_start=None):
+            raise ConnectionRefusedError("connection refused")
+
+        monkeypatch.setattr(engines, "run_query", _boom)
+        with pytest.raises(ConnectionRefusedError):
+            svc.query("demo", "main", "SELECT 1", CALLER)
+
+        # 再问一次：入口就应抛 ConnectionUnavailable，压根不进 DB
+        from dbmcp.health import ConnectionUnavailable
+        with pytest.raises(ConnectionUnavailable) as ei:
+            svc.query("demo", "main", "SELECT 1", CALLER)
+        assert ei.value.state == "unavailable"
+        assert ei.value.retry_after_s >= 0
+        svc.close()
+
+    def test_syntax_error_does_not_mark_unavailable(self, tmp_path):
+        svc, _ = _make_service_with_notifier(tmp_path)
+        # 语法错误 → OperationalError 之外的通用 exc，不打标
+        with pytest.raises(Exception):
+            svc.query("demo", "main", "SELECT * FROM no_such_table", CALLER)
+        # 下一次不应被健康位挡住
+        result = svc.query("demo", "main", "SELECT 1 AS x", CALLER)
+        assert result["rows"][0][0] == 1
+        svc.close()
+
+    def test_connection_config_change_clears_health(self, tmp_path, monkeypatch):
+        svc, _ = _make_service_with_notifier(tmp_path)
+        from dbmcp import engines
+        monkeypatch.setattr(engines, "run_query",
+                            lambda *a, **kw: (_ for _ in ()).throw(ConnectionRefusedError("no")))
+        with pytest.raises(ConnectionRefusedError):
+            svc.query("demo", "main", "SELECT 1", CALLER)
+        # 模拟"连接配置更新"路径清健康位
+        svc.health.force_clear("demo", "main")
+        monkeypatch.undo()
+        # 再查应成功
+        svc.query("demo", "main", "SELECT 1 AS x", CALLER)
+        svc.close()
+
+
+class TestApprovalNotify:
+    def test_approval_created_fires_notification(self, tmp_path):
+        svc, notifier = _make_service_with_notifier(tmp_path)
+        r = svc.execute("demo", "main", "DELETE FROM users WHERE id=1", CALLER)
+        assert r["status"] == "approval_required"
+        # 有且仅有一条通知，内容含审批单号 + 项目/连接
+        approval_events = [e for e in notifier.events
+                           if e["meta"].get("kind") == "approval_created"]
+        assert len(approval_events) == 1
+        e = approval_events[0]
+        assert f"#{r['change_id']}" in e["title"]
+        assert "demo/main" in e["title"]
+        assert e["meta"]["change_id"] == r["change_id"]
+        assert e["meta"]["risk_level"]
+        svc.close()
+
+
+class TestExhaustedNotify:
+    def test_exhausted_fires_notification(self, tmp_path):
+        svc, notifier = _make_service_with_notifier(tmp_path)
+        # 直接推到 exhausted → 应通过 _on_connection_exhausted 发通知
+        svc._on_connection_exhausted("demo", "main", "OperationalError: down")
+        exh = [e for e in notifier.events if e["meta"].get("kind") == "connection_exhausted"]
+        assert len(exh) == 1
+        assert "demo/main" in exh[0]["title"]
+        assert "管理后台" in exh[0]["body"]
+        svc.close()

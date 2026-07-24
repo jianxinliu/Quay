@@ -73,11 +73,15 @@ def _open_approvals(data_dir: str) -> ApprovalStore:
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
+    from .notify import build_default_notifier
+
     config = load_config(args.config)
     db_path = Path(args.data_dir) / "dbm.sqlite3"
     store = AuditStore(db_path)
     approvals = ApprovalStore(db_path)
-    service = DbmService(config, store, approvals, config_path=args.config)
+    # serve 才真发桌面通知；库使用/测试路径下 DbmService 默认 NoopNotifier
+    service = DbmService(config, store, approvals, config_path=args.config,
+                         notifier=build_default_notifier())
     service.metadata = MetadataCache(db_path, service.pool)
     service.snippets = SnippetStore(db_path)
     from .settings import SettingsStore
