@@ -94,6 +94,22 @@ def _local_request_ok(req: Request) -> bool:
             return False
     return True
 
+
+def _ingress_authed(req: Request) -> bool:
+    """懒猫微服（LazyCat）部署下的免密登录：请求先经 `lzc-ingress` 组件鉴权，
+    未登录会被它拦到登录页，只有通过后才带着可信身份 header 转发到本应用。
+
+    仅当显式开启 `DBM_TRUSTED_PROXY_AUTH` 且请求确由 lzc-ingress 转发
+    （`X-Forwarded-By` 固定为 `lzc-ingress`）并携带用户身份（`X-HC-User-ID`）时，
+    才视为已认证——跳过本机 Host/Origin 校验与 token cookie 校验。
+
+    默认关闭：非懒猫部署（本地进程模式）不受影响，安全模型不变。"""
+    if os.environ.get("DBM_TRUSTED_PROXY_AUTH", "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    if req.headers.get("x-forwarded-by", "").strip().lower() != "lzc-ingress":
+        return False
+    return bool(req.headers.get("x-hc-user-id", "").strip())
+
 _LEVEL_COLOR = {
     "CRITICAL": "#b00020",
     "HIGH": "#e65100",
@@ -1124,6 +1140,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
         """未认证访问受保护路由 → 重定向登录页；非本机来源（Host/Origin 不符）→ 403。"""
         @wraps(handler)
         async def _wrapped(req: Request) -> Response:
+            # 懒猫部署：经 lzc-ingress 鉴权并注入身份的请求直接放行（免密登录）。
+            if _ingress_authed(req):
+                return await handler(req)
             if not _local_request_ok(req):
                 if _wants_json(req):
                     return JSONResponse(

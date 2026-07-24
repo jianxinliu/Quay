@@ -8,3 +8,7 @@ config/connections.yaml
 *.app/
 .env
 .env.*
+
+# LazyCat 打包/发布产物
+*.lpk
+.lzc-cli-publish*/
