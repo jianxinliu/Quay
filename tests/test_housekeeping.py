@@ -89,7 +89,8 @@ def service(tmp_path):
 class TestHousekeepOnce:
     def test_stats_shape_and_no_crash(self, service):
         stats = service.housekeep_once(retention_days=30)
-        assert set(stats) == {"engines_reaped", "redis_reaped", "audit_purged", "changes_purged"}
+        assert set(stats) == {"engines_reaped", "redis_reaped", "audit_purged",
+                              "changes_purged", "notifications_purged"}
 
     def test_reap_wired(self, service):
         # 用过引擎后把回收阈值调成 0 → housekeep 应回收 1 个

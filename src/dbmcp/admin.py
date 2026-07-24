@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import anyio.to_thread
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from .approvals import ApprovalError
 
@@ -701,7 +701,7 @@ def _redis_body() -> str:
 
 
 _SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
-                  ("ai", "AI 助手"),
+                  ("ai", "AI 助手"), ("notify", "通知"),
                   ("connections", "连接管理"), ("ssh", "SSH 配置"), ("info", "系统信息")]
 
 _SETTINGS_SUBMIT_JS = """<script>
@@ -881,6 +881,103 @@ def _settings_ai_body(s: dict) -> str:
         + "<div class='muted' style='margin-top:4px'>生成可视化流程（DAG 画布）的系统提示。"
         + "清空并保存即恢复默认。</div></div>"
         + "</details>") + _AI_PROVIDER_TOGGLE_JS
+
+
+# 通知主渠道切换：按选中的 provider 显隐对应字段块
+_NOTIFY_PROVIDER_TOGGLE_JS = """<script>
+(function(){
+  var radios=document.querySelectorAll("input[name='notify_primary']"); if(!radios.length) return;
+  function upd(){
+    var v='none';
+    radios.forEach(function(r){ if(r.checked) v=r.value; });
+    ['bark','wecom','feishu'].forEach(function(k){
+      document.querySelectorAll('.notify-'+k).forEach(function(e){ e.style.display=(v===k?'':'none'); });
+    });
+  }
+  radios.forEach(function(r){ r.addEventListener('change', upd); });
+  upd();
+})();
+</script>"""
+
+
+def _settings_notify_body(s: dict) -> str:
+    """通知设置：主外部渠道单选（Bark / 企微 / 飞书）+ 可选 macOS 本地。
+
+    管理后台内推恒开，不在设置里出现开关；保留 7 天在 housekeep 里自动清。
+    """
+    primary = str(s.get("notify_primary") or "none").lower()
+
+    def radio(v: str, label: str, hint: str = "") -> str:
+        checked = " checked" if primary == v else ""
+        h = f"<span class='muted' style='margin-left:6px;font-size:12px'>{_esc(hint)}</span>" if hint else ""
+        return (f"<label style='display:block;margin:6px 0'>"
+                f"<input type='radio' name='notify_primary' value='{v}'{checked}> "
+                f"{_esc(label)}{h}</label>")
+
+    macos_hint = ("仅在 macOS 本地进程模式下有效；Docker/Linux 环境勾选无作用。"
+                  if _platform_is_macos() else
+                  "当前非 macOS 环境，勾选不会有效果——建议在下方配置外部渠道。")
+
+    body = (
+        "<div class='card' style='max-width:640px'>"
+        "<div class='muted' style='margin-bottom:12px'>"
+        "管理后台内推（铃铛角标）<b>默认开启不可关</b>，保留 7 天。外部渠道用于把重要提醒推到手机/群里。</div>"
+        "<form class='settings-form'>"
+        "<div style='margin-bottom:16px'><label>主外部渠道</label>"
+        + radio("none", "不发外部通知（默认）", "只在管理后台的铃铛里出现")
+        + radio("bark", "Bark", "iOS/macOS 推送，支持自建 server")
+        + radio("wecom", "企业微信 群机器人", "接入企微内部群通知")
+        + radio("feishu", "飞书 群机器人", "接入飞书内部群通知")
+        + "</div>"
+        # Bark 字段
+        + "<div class='notify-bark' style='padding:10px;border:1px dashed var(--border);"
+        + "border-radius:6px;margin-bottom:12px'>"
+        + _text_setting("Bark server URL", "notify_bark_server", s,
+                        "https://api.day.app",
+                        "官方 https://api.day.app 或你的自建 server（不含末尾 /）")
+        + _text_setting("Bark device key", "notify_bark_key", s, "",
+                        "Bark App 首页顶部的 device key。")
+        + "</div>"
+        # 企微字段
+        + "<div class='notify-wecom' style='padding:10px;border:1px dashed var(--border);"
+        + "border-radius:6px;margin-bottom:12px'>"
+        + _text_setting("企微机器人 Webhook", "notify_wecom_webhook", s, "",
+                        "群设置 → 机器人 → 添加/管理 → 复制 webhook 完整 URL。",
+                        width="100%")
+        + "</div>"
+        # 飞书字段
+        + "<div class='notify-feishu' style='padding:10px;border:1px dashed var(--border);"
+        + "border-radius:6px;margin-bottom:12px'>"
+        + _text_setting("飞书机器人 Webhook", "notify_feishu_webhook", s, "",
+                        "群设置 → 机器人 → 添加自定义机器人 → 复制 webhook 完整 URL。",
+                        width="100%")
+        + "</div>"
+        + _bool_setting("macOS 本地通知", "notify_macos_enabled", s, False,
+                        "启用", "关闭（默认）", macos_hint)
+        + "<button class='btn btn-primary' type='submit'>保存</button>"
+        + "<button type='button' class='btn' style='margin-left:8px' id='notify-test'>发送测试通知</button>"
+        + "<span class='settings-msg muted' style='margin-left:12px'></span>"
+        + "</form></div>"
+        + _NOTIFY_PROVIDER_TOGGLE_JS
+        + _SETTINGS_SUBMIT_JS
+        + """<script>
+document.getElementById('notify-test')?.addEventListener('click', async function(){
+  var m=document.querySelector('.settings-msg'); if(m)m.textContent='发送中…';
+  try{
+    var r=await fetch('/admin/notifications/test', {method:'POST'});
+    var d=await r.json();
+    if(m)m.textContent=d.ok?'✓ 已发送，请查看铃铛及所选外部渠道':'失败：'+d.error;
+  }catch(err){ if(m)m.textContent='失败：'+err; }
+});
+</script>"""
+    )
+    return body
+
+
+def _platform_is_macos() -> bool:
+    """给通知设置页判环境用（供文案切换），与 notify.is_macos 语义一致。"""
+    from .notify import is_macos  # noqa: PLC0415
+    return is_macos()
 
 
 def _settings_redis_body(s: dict) -> str:
@@ -1847,6 +1944,110 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "settings": settings})
 
+    # ---------- 通知（站内铃铛 + SSE + 测试发送）----------
+
+    def _get_with_timeout(q, timeout: float):  # noqa: ANN001
+        """SSE 用：把 queue.get(timeout) 交给线程池（run_sync 只接受位置参数）。"""
+        return q.get(True, timeout)
+
+    @mcp.custom_route("/admin/notifications/unread_count", methods=["GET"])
+    @guard
+    async def _notify_unread(_req: Request) -> JSONResponse:
+        if service.inbox is None:
+            return JSONResponse({"ok": True, "count": 0})
+        return JSONResponse({"ok": True, "count": service.inbox.unread_count()})
+
+    @mcp.custom_route("/admin/notifications/list", methods=["GET"])
+    @guard
+    async def _notify_list(req: Request) -> JSONResponse:
+        if service.inbox is None:
+            return JSONResponse({"ok": True, "items": []})
+        try:
+            limit = min(int(req.query_params.get("limit") or 20), 200)
+        except ValueError:
+            limit = 20
+        unread_only = req.query_params.get("unread") in ("1", "true", "yes")
+        items = [n.to_dict() for n in service.inbox.list_recent(limit=limit, unread_only=unread_only)]
+        return JSONResponse({"ok": True, "items": items})
+
+    @mcp.custom_route("/admin/notifications/mark_read", methods=["POST"])
+    @guard
+    async def _notify_mark_read(req: Request) -> JSONResponse:
+        if service.inbox is None:
+            return JSONResponse({"ok": True, "updated": 0})
+        f = await req.form()
+        ids_raw = str(f.get("ids") or "").strip()
+        all_flag = str(f.get("all") or "") in ("1", "true", "yes", "on")
+        if all_flag:
+            n = service.inbox.mark_all_read()
+        else:
+            ids: list[int] = []
+            for part in ids_raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    ids.append(int(part))
+                except ValueError:
+                    continue
+            n = service.inbox.mark_read(ids)
+        return JSONResponse({"ok": True, "updated": n})
+
+    @mcp.custom_route("/admin/notifications/test", methods=["POST"])
+    @guard
+    async def _notify_test(_req: Request) -> JSONResponse:
+        try:
+            service.notifier.send(
+                title="Quay 测试通知",
+                body="如果你收到了，说明当前配置的通知渠道工作正常。",
+                meta={"kind": "test"},
+            )
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse({"ok": True})
+
+    @mcp.custom_route("/admin/notifications/stream", methods=["GET"])
+    @guard
+    async def _notify_stream(req: Request) -> StreamingResponse:
+        """SSE 流：每条新通知实时推给已登录的后台页面。
+
+        用 anyio.to_thread 把阻塞的 queue.get 挪到线程池，避免霸占 event loop。
+        客户端断连时 anyio 抛 CancelledError，我们清订阅退出。
+        """
+        if service.inbox is None:
+            async def _empty():
+                yield b": inbox disabled\n\n"
+            return StreamingResponse(_empty(), media_type="text/event-stream")
+
+        inbox = service.inbox
+        q = inbox.subscribe()
+
+        async def _gen():
+            import json as _json  # noqa: PLC0415
+            import queue as _q  # noqa: PLC0415
+            try:
+                # 打招呼：让客户端立即知道连接成功
+                yield b": ok\n\n"
+                while True:
+                    if await req.is_disconnected():
+                        return
+                    # 等下一条（最多 25s），到点发心跳；断连由 is_disconnected 兜底
+                    try:
+                        n = await anyio.to_thread.run_sync(_get_with_timeout, q, 25)
+                    except _q.Empty:
+                        yield b": ping\n\n"
+                        continue
+                    if n is None:  # close sentinel
+                        return
+                    payload = _json.dumps(n.to_dict(), ensure_ascii=False)
+                    yield f"event: notification\ndata: {payload}\n\n".encode("utf-8")
+            finally:
+                inbox.unsubscribe(q)
+
+        return StreamingResponse(_gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
     @mcp.custom_route("/admin/settings", methods=["GET"])
     @guard
     async def _settings_page(req: Request) -> HTMLResponse:
@@ -1862,6 +2063,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
             content = _settings_redis_body(s)
         elif tab == "ai":
             content = _settings_ai_body(s)
+        elif tab == "notify":
+            content = _settings_notify_body(s)
         elif tab == "info":
             content = _settings_info_body(service, req)
         else:

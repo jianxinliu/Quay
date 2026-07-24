@@ -122,8 +122,10 @@ class DbmService:
         self.redis_pool.identities = self.config.ssh_identities
         self.approvals = approvals
         # 通知抽象：默认 Noop（safe default，测试与库使用都不会真发通知）；
-        # serve 入口显式注入 build_default_notifier() 得到 macOS 系统通知。
+        # serve 入口注入 NotifierRouter（内推 + 用户配置的外部渠道，动态跟随设置）。
         self.notifier = notifier if notifier is not None else NoopNotifier()
+        # 站内通知收件箱（serve 时注入 InboxStore）；SSE 铃铛与外部渠道之外的默认路径
+        self.inbox = None
         # 健康监控：exhausted 时发通知（同一连接短时间去重）
         self.health = HealthMonitor(
             probe=self._health_probe,
@@ -1515,13 +1517,18 @@ class DbmService:
 
     def housekeep_once(self, retention_days: int = DEFAULT_RETENTION_DAYS) -> dict:
         """执行一轮维护，返回统计（供测试与日志）。单项失败不影响其他项。"""
-        stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0, "changes_purged": 0}
+        from .inbox import DEFAULT_RETENTION_DAYS as INBOX_RETENTION
+        stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0,
+                 "changes_purged": 0, "notifications_purged": 0}
         for key, fn in (
             ("engines_reaped", self.pool.reap_idle),
             ("redis_reaped", self.redis_pool.reap_idle),
             ("audit_purged", lambda: self.store.purge_old(retention_days)),
             ("changes_purged",
              (lambda: self.approvals.purge_old(retention_days)) if self.approvals else (lambda: 0)),
+            # 通知短保留（7 天）：审批提醒/exhausted 告警不必久存
+            ("notifications_purged",
+             (lambda: self.inbox.purge_old(INBOX_RETENTION)) if self.inbox else (lambda: 0)),
         ):
             try:
                 stats[key] = fn()
@@ -1547,3 +1554,5 @@ class DbmService:
             self.snippets.close()
         if self.settings is not None:
             self.settings.close()
+        if self.inbox is not None:
+            self.inbox.close()
