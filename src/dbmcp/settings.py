@@ -56,6 +56,8 @@ DEFAULTS: dict[str, object] = {
     "notify_wecom_webhook": "",         # 企微机器人 webhook 完整 URL
     "notify_feishu_webhook": "",        # 飞书机器人 webhook 完整 URL
     "notify_macos_enabled": False,      # macOS 本地通知（仅 macOS 有效，Docker 无用）
+    # 通知里的 deeplink 用的外部可访问基址（Docker/反代场景填反代地址；本机默认即可）
+    "admin_base_url": "http://127.0.0.1:8100",
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）

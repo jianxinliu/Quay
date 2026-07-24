@@ -53,8 +53,12 @@ class MacOsNotifier(Notifier):
     """
 
     def send(self, title: str, body: str, meta: dict | None = None) -> None:
+        # osascript display notification 不支持点击跳转，把 URL 附到 body 尾部
+        # 让用户能看到（复制粘贴到浏览器）——比完全丢弃有用
+        deeplink = (meta or {}).get("deeplink") or ""
+        full_body = f"{body}\n{deeplink}" if deeplink else body
         threading.Thread(
-            target=self._send_sync, args=(title, body),
+            target=self._send_sync, args=(title, full_body),
             daemon=True, name="dbm-notify",
         ).start()
 
@@ -84,23 +88,66 @@ def _escape_applescript(s: str) -> str:
 # ---------- Webhook notifiers（Bark / 企微 / 飞书）----------
 
 
-def build_bark_payload(title: str, body: str, group: str = "Quay") -> dict:
-    """Bark（iOS 推送）payload。POST 到 {server}/{device_key}。"""
-    return {"title": title, "body": body, "group": group}
+def build_bark_payload(title: str, body: str, url: str | None = None,
+                       group: str = "Quay") -> dict:
+    """Bark（iOS 推送）payload。POST 到 {server}/{device_key}。
+
+    url 若给出，Bark 点击通知会打开该 URL（Bark 官方 `url` 字段）。
+    """
+    p = {"title": title, "body": body, "group": group}
+    if url:
+        p["url"] = url
+    return p
 
 
-def build_wecom_payload(title: str, body: str) -> dict:
-    """企业微信群机器人 payload（text 消息）。"""
+def build_wecom_payload(title: str, body: str, url: str | None = None) -> dict:
+    """企业微信群机器人 payload。
+
+    有 URL 时用 markdown 类型嵌入超链接；无则退回 text 类型（更兼容）。
+    """
+    if url:
+        return {
+            "msgtype": "markdown",
+            "markdown": {"content": f"**{title}**\n\n{body}\n\n[前往处理]({url})"},
+        }
     return {"msgtype": "text", "text": {"content": f"{title}\n{body}"}}
 
 
-def build_feishu_payload(title: str, body: str) -> dict:
-    """飞书自定义机器人 payload（text 消息）。"""
+def build_feishu_payload(title: str, body: str, url: str | None = None) -> dict:
+    """飞书自定义机器人 payload。
+
+    有 URL 时用 post 富文本类型嵌入超链接；无则退回 text 类型。
+    """
+    if url:
+        return {
+            "msg_type": "post",
+            "content": {"post": {"zh_cn": {"title": title, "content": [[
+                {"tag": "text", "text": body},
+                {"tag": "text", "text": "\n"},
+                {"tag": "a", "text": "前往处理", "href": url},
+            ]]}}},
+        }
     return {"msg_type": "text", "content": {"text": f"{title}\n{body}"}}
+
+
+def build_admin_deeplink(base_url: str, path: str) -> str:
+    """把管理后台内部路径拼成外部可访问的绝对 URL。
+
+    base_url 默认 http://127.0.0.1:8100（本机）；Docker/反代场景用户在设置里改。
+    """
+    base = (base_url or "http://127.0.0.1:8100").rstrip("/")
+    path = "/" + path.lstrip("/")
+    return f"{base}{path}"
+
+
+def approval_deeplink(base_url: str, change_id: int) -> str:
+    """审批详情页的直达 URL。"""
+    return build_admin_deeplink(base_url, f"/admin/approvals/{int(change_id)}")
 
 
 # provider 名 → (URL 构造函数, payload 构造函数)
 # URL 构造函数签名：(config: dict) → str
+# payload 构造函数签名：(title, body, url=None) → dict
 def _bark_url(cfg: dict) -> str:
     """Bark 支持自建 server；官方 https://api.day.app。device key 为路径。"""
     server = str(cfg.get("bark_server") or "https://api.day.app").rstrip("/")
@@ -124,7 +171,9 @@ def _feishu_url(cfg: dict) -> str:
     return url
 
 
-_WEBHOOK_PROVIDERS: dict[str, tuple[Callable[[dict], str], Callable[[str, str], dict]]] = {
+_WEBHOOK_PROVIDERS: dict[
+    str, tuple[Callable[[dict], str], Callable[..., dict]]
+] = {
     "bark": (_bark_url, build_bark_payload),
     "wecom": (_wecom_url, build_wecom_payload),
     "feishu": (_feishu_url, build_feishu_payload),
@@ -145,19 +194,20 @@ class WebhookNotifier(Notifier):
         self._config = dict(config or {})
 
     def send(self, title: str, body: str, meta: dict | None = None) -> None:
+        deeplink = (meta or {}).get("deeplink") or None
         threading.Thread(
-            target=self._send_sync, args=(title, body),
+            target=self._send_sync, args=(title, body, deeplink),
             daemon=True, name=f"dbm-notify-{self._provider}",
         ).start()
 
-    def _send_sync(self, title: str, body: str) -> None:
+    def _send_sync(self, title: str, body: str, deeplink: str | None = None) -> None:
         url_fn, payload_fn = _WEBHOOK_PROVIDERS[self._provider]
         try:
             url = url_fn(self._config)
         except ValueError as e:
             logger.warning("%s webhook 未生效: %s", self._provider, e)
             return
-        payload = payload_fn(title, body)
+        payload = payload_fn(title, body, url=deeplink) if deeplink else payload_fn(title, body)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             url, data=data, method="POST",

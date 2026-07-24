@@ -772,14 +772,19 @@ class DbmService:
         rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {report.level}）"
         self.store.record(rec)
         # 需要人为介入 → 主动发通知（安静即正常：不通知的话可能长时间没人看到）
+        # meta.deeplink 让各渠道适配跳转：Bark→url 字段、企微→markdown 链接、
+        # 飞书→post 富文本 a 节点、macOS→body 附 URL 文本、站内 inbox→前端点击
         try:
+            from .notify import approval_deeplink  # noqa: PLC0415
             sql_preview = " ".join(sql.split())[:120]
+            base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
             self.notifier.send(
                 title=f"新审批单 #{change.id} · {project}/{connection}",
                 body=f"风险 {report.level} · agent={caller.agent or 'unknown'}\nSQL: {sql_preview}",
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": project, "connection": connection,
-                      "risk_level": report.level},
+                      "risk_level": report.level,
+                      "deeplink": approval_deeplink(base_url, change.id)},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify approval_created failed")
@@ -1386,11 +1391,16 @@ class DbmService:
     def _on_connection_exhausted(self, project: str, connection: str, error: str) -> None:
         """连接 exhausted 时发一条通知（人为介入信号）。"""
         try:
+            from .notify import build_admin_deeplink  # noqa: PLC0415
+            base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
             self.notifier.send(
                 title=f"连接不可用 · {project}/{connection}",
                 body=f"重连多次仍失败，请到管理后台检查连接配置。最近错误：{error}",
                 meta={"kind": "connection_exhausted",
-                      "project": project, "connection": connection},
+                      "project": project, "connection": connection,
+                      "deeplink": build_admin_deeplink(
+                          base_url,
+                          f"/admin/settings?tab=connections&edit={project}/{connection}")},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify exhausted failed")

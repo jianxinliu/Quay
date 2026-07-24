@@ -78,6 +78,20 @@ class TestInboxEndpoints:
         assert lst[0]["kind"] == "approval_created"
         assert f"#{r['change_id']}" in lst[0]["title"]
         assert lst[0]["meta"]["change_id"] == r["change_id"]
+        # deeplink 直达审批详情页
+        expected = f"/admin/approvals/{r['change_id']}"
+        assert expected in lst[0]["meta"]["deeplink"]
+
+    def test_deeplink_uses_configured_base_url(self, client):
+        tc, svc = client
+        # 改基址（例如 Docker/反代场景）
+        tc.post("/admin/settings/save", data={
+            "admin_base_url": "https://quay.example.com",
+        })
+        r = svc.execute("demo", "main", "DELETE FROM users WHERE id=1", CALLER)
+        item = tc.get("/admin/notifications/list").json()["items"][0]
+        assert item["meta"]["deeplink"] == (
+            f"https://quay.example.com/admin/approvals/{r['change_id']}")
 
     def test_mark_read_single(self, client):
         tc, svc = client

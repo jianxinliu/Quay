@@ -14,6 +14,8 @@ from dbmcp.notify import (
     NotifierRouter,
     WebhookNotifier,
     _escape_applescript,
+    approval_deeplink,
+    build_admin_deeplink,
     build_bark_payload,
     build_default_notifier,
     build_feishu_payload,
@@ -93,13 +95,44 @@ class TestWebhookPayloads:
         p = build_bark_payload("hello", "world")
         assert p == {"title": "hello", "body": "world", "group": "Quay"}
 
+    def test_bark_payload_with_url(self):
+        p = build_bark_payload("hello", "world", url="https://x/y")
+        assert p["url"] == "https://x/y"
+        assert p["title"] == "hello"
+
     def test_wecom_payload_shape(self):
         p = build_wecom_payload("hello", "world")
         assert p == {"msgtype": "text", "text": {"content": "hello\nworld"}}
 
+    def test_wecom_payload_with_url_uses_markdown(self):
+        p = build_wecom_payload("hello", "world", url="https://x/y")
+        assert p["msgtype"] == "markdown"
+        assert "[前往处理](https://x/y)" in p["markdown"]["content"]
+        assert "**hello**" in p["markdown"]["content"]
+
     def test_feishu_payload_shape(self):
         p = build_feishu_payload("hello", "world")
         assert p == {"msg_type": "text", "content": {"text": "hello\nworld"}}
+
+    def test_feishu_payload_with_url_uses_post(self):
+        p = build_feishu_payload("hello", "world", url="https://x/y")
+        assert p["msg_type"] == "post"
+        # 富文本节点中含 a href
+        nodes = p["content"]["post"]["zh_cn"]["content"][0]
+        assert any(n.get("tag") == "a" and n.get("href") == "https://x/y" for n in nodes)
+
+
+class TestDeeplink:
+    def test_admin_deeplink_trims_slashes(self):
+        assert build_admin_deeplink("http://x:8100/", "/admin/foo") == "http://x:8100/admin/foo"
+        assert build_admin_deeplink("http://x:8100", "admin/foo") == "http://x:8100/admin/foo"
+
+    def test_approval_deeplink(self):
+        assert (approval_deeplink("http://x:8100", 42)
+                == "http://x:8100/admin/approvals/42")
+
+    def test_empty_base_falls_back(self):
+        assert approval_deeplink("", 7) == "http://127.0.0.1:8100/admin/approvals/7"
 
 
 class TestWebhookNotifier:
@@ -140,6 +173,28 @@ class TestWebhookNotifier:
         import pytest
         with pytest.raises(ValueError, match="未知通知渠道"):
             WebhookNotifier("email", {})
+
+    def test_wecom_with_deeplink_sends_markdown_payload(self):
+        import json
+        url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+        n = WebhookNotifier("wecom", {"wecom_webhook": url})
+        with patch("dbmcp.notify.urllib.request.urlopen") as m:
+            m.return_value.__enter__ = lambda self_: type("R", (), {"status": 200, "read": lambda: b""})()
+            m.return_value.__exit__ = lambda *a: None
+            n._send_sync("t", "b", deeplink="http://q/admin/approvals/1")
+            payload = json.loads(m.call_args.args[0].data.decode("utf-8"))
+            assert payload["msgtype"] == "markdown"
+            assert "http://q/admin/approvals/1" in payload["markdown"]["content"]
+
+    def test_bark_with_deeplink_puts_url_in_payload(self):
+        import json
+        n = WebhookNotifier("bark", {"bark_key": "k"})
+        with patch("dbmcp.notify.urllib.request.urlopen") as m:
+            m.return_value.__enter__ = lambda self_: type("R", (), {"status": 200, "read": lambda: b""})()
+            m.return_value.__exit__ = lambda *a: None
+            n._send_sync("t", "b", deeplink="http://q/admin/approvals/1")
+            payload = json.loads(m.call_args.args[0].data.decode("utf-8"))
+            assert payload["url"] == "http://q/admin/approvals/1"
 
 
 class TestComposite:

@@ -923,7 +923,11 @@ def _settings_notify_body(s: dict) -> str:
         "<div class='muted' style='margin-bottom:12px'>"
         "管理后台内推（铃铛角标）<b>默认开启不可关</b>，保留 7 天。外部渠道用于把重要提醒推到手机/群里。</div>"
         "<form class='settings-form'>"
-        "<div style='margin-bottom:16px'><label>主外部渠道</label>"
+        + _text_setting("外部可访问基址（deeplink 用）", "admin_base_url", s,
+                        "http://127.0.0.1:8100",
+                        "通知里点击「前往处理」跳转的完整 URL 前缀。Docker/反代场景填反代地址；"
+                        "本机运行保持默认即可。", width="100%")
+        + "<div style='margin-bottom:16px'><label>主外部渠道</label>"
         + radio("none", "不发外部通知（默认）", "只在管理后台的铃铛里出现")
         + radio("bark", "Bark", "iOS/macOS 推送，支持自建 server")
         + radio("wecom", "企业微信 群机器人", "接入企微内部群通知")
