@@ -49,6 +49,15 @@ DEFAULTS: dict[str, object] = {
     "ai_api_base": "https://api.anthropic.com",  # API 根地址（anthropic 或 openai 兼容端点）
     "ai_api_format": "anthropic",  # 请求/响应格式：anthropic（Messages）/ openai（Chat Completions）
     "ai_api_key_env": "DBM_AI_API_KEY",  # keyring 无值时兜底读的环境变量名（值不入设置库）
+    # ——通知（管理后台内推恒开、7 天自动清；外部主渠道单选，切换即时生效）
+    "notify_primary": "none",           # none / bark / wecom / feishu
+    "notify_bark_server": "https://api.day.app",  # 官方或自建 Bark server URL
+    "notify_bark_key": "",              # 设备 key（Bark App 中获取）
+    "notify_wecom_webhook": "",         # 企微机器人 webhook 完整 URL
+    "notify_feishu_webhook": "",        # 飞书机器人 webhook 完整 URL
+    "notify_macos_enabled": False,      # macOS 本地通知（仅 macOS 有效，Docker 无用）
+    # 通知里的 deeplink 用的外部可访问基址（Docker/反代场景填反代地址；本机默认即可）
+    "admin_base_url": "http://127.0.0.1:8100",
 }
 
 _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
@@ -68,6 +77,7 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
 
 _AI_PROVIDERS = ("claude", "codex", "api")
 _AI_API_FORMATS = ("anthropic", "openai")
+_NOTIFY_PROVIDERS = ("none", "bark", "wecom", "feishu")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_setting (
@@ -143,6 +153,9 @@ def _validate(key: str, raw: object) -> str:
     if key == "ai_api_format":
         v = str(raw).strip().lower()
         return v if v in _AI_API_FORMATS else str(default)
+    if key == "notify_primary":
+        v = str(raw).strip().lower()
+        return v if v in _NOTIFY_PROVIDERS else str(default)
     if isinstance(default, bool):  # 注意：bool 必须先于 int 判断（bool 是 int 的子类）
         return "true" if str(raw).lower() in ("true", "1", "on", "yes") else "false"
     if isinstance(default, int):

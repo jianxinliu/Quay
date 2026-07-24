@@ -73,19 +73,30 @@ def _open_approvals(data_dir: str) -> ApprovalStore:
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
-    from .notify import build_default_notifier
+    from .inbox import InboxNotifier, InboxStore
+    from .notify import NotifierRouter, build_from_settings
+    from .settings import SettingsStore
 
     config = load_config(args.config)
     db_path = Path(args.data_dir) / "dbm.sqlite3"
     store = AuditStore(db_path)
     approvals = ApprovalStore(db_path)
-    # serve 才真发桌面通知；库使用/测试路径下 DbmService 默认 NoopNotifier
+
+    # 通知：内推（管理后台铃铛，恒开）+ 主外部渠道（配置里选一个）+ 可选 macOS 本地
+    # NotifierRouter 每次 send 前读最新 settings 组装，改配置即时生效不需重启
+    inbox_store = InboxStore(db_path)
+    settings_store = SettingsStore(db_path)
+    inbox_notifier = InboxNotifier(inbox_store)
+
+    def _make_notifier():
+        return build_from_settings(settings_store.get_all(), inbox=inbox_notifier)
+
     service = DbmService(config, store, approvals, config_path=args.config,
-                         notifier=build_default_notifier())
+                         notifier=NotifierRouter(_make_notifier))
+    service.inbox = inbox_store
+    service.settings = settings_store
     service.metadata = MetadataCache(db_path, service.pool)
     service.snippets = SnippetStore(db_path)
-    from .settings import SettingsStore
-    service.settings = SettingsStore(db_path)
     from .analysis import AnalysisStore
     from .examples import seed_examples
     from .workflows import WorkflowStore

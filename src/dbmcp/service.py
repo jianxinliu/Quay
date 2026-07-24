@@ -122,8 +122,10 @@ class DbmService:
         self.redis_pool.identities = self.config.ssh_identities
         self.approvals = approvals
         # 通知抽象：默认 Noop（safe default，测试与库使用都不会真发通知）；
-        # serve 入口显式注入 build_default_notifier() 得到 macOS 系统通知。
+        # serve 入口注入 NotifierRouter（内推 + 用户配置的外部渠道，动态跟随设置）。
         self.notifier = notifier if notifier is not None else NoopNotifier()
+        # 站内通知收件箱（serve 时注入 InboxStore）；SSE 铃铛与外部渠道之外的默认路径
+        self.inbox = None
         # 健康监控：exhausted 时发通知（同一连接短时间去重）
         self.health = HealthMonitor(
             probe=self._health_probe,
@@ -770,14 +772,19 @@ class DbmService:
         rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {report.level}）"
         self.store.record(rec)
         # 需要人为介入 → 主动发通知（安静即正常：不通知的话可能长时间没人看到）
+        # meta.deeplink 让各渠道适配跳转：Bark→url 字段、企微→markdown 链接、
+        # 飞书→post 富文本 a 节点、macOS→body 附 URL 文本、站内 inbox→前端点击
         try:
+            from .notify import approval_deeplink  # noqa: PLC0415
             sql_preview = " ".join(sql.split())[:120]
+            base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
             self.notifier.send(
                 title=f"新审批单 #{change.id} · {project}/{connection}",
                 body=f"风险 {report.level} · agent={caller.agent or 'unknown'}\nSQL: {sql_preview}",
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": project, "connection": connection,
-                      "risk_level": report.level},
+                      "risk_level": report.level,
+                      "deeplink": approval_deeplink(base_url, change.id)},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify approval_created failed")
@@ -1382,16 +1389,13 @@ class DbmService:
         engines.run_query(engine, "SELECT 1", max_rows=1)
 
     def _on_connection_exhausted(self, project: str, connection: str, error: str) -> None:
-        """连接 exhausted 时发一条通知（人为介入信号）。"""
-        try:
-            self.notifier.send(
-                title=f"连接不可用 · {project}/{connection}",
-                body=f"重连多次仍失败，请到管理后台检查连接配置。最近错误：{error}",
-                meta={"kind": "connection_exhausted",
-                      "project": project, "connection": connection},
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("notify exhausted failed")
+        """连接 exhausted 事件回调：只落 warn 日志，不发通知。
+
+        原因：连接不可用会在 agent 侧被 `[connection_exhausted]` ToolError 直接告知，
+        agent 会告诉用户；再发桌面/群通知反而形成噪音（尤其自建 server 抖动时会连发）。
+        审批单等"必须人主动介入"的场景仍走通知（那里 agent 不再触达）。
+        """
+        logger.warning("connection %s/%s exhausted: %s", project, connection, error)
 
     # ---------- 连接管理（管理后台，需已配置 config_path）----------
 
@@ -1515,13 +1519,18 @@ class DbmService:
 
     def housekeep_once(self, retention_days: int = DEFAULT_RETENTION_DAYS) -> dict:
         """执行一轮维护，返回统计（供测试与日志）。单项失败不影响其他项。"""
-        stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0, "changes_purged": 0}
+        from .inbox import DEFAULT_RETENTION_DAYS as INBOX_RETENTION
+        stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0,
+                 "changes_purged": 0, "notifications_purged": 0}
         for key, fn in (
             ("engines_reaped", self.pool.reap_idle),
             ("redis_reaped", self.redis_pool.reap_idle),
             ("audit_purged", lambda: self.store.purge_old(retention_days)),
             ("changes_purged",
              (lambda: self.approvals.purge_old(retention_days)) if self.approvals else (lambda: 0)),
+            # 通知短保留（7 天）：审批提醒/exhausted 告警不必久存
+            ("notifications_purged",
+             (lambda: self.inbox.purge_old(INBOX_RETENTION)) if self.inbox else (lambda: 0)),
         ):
             try:
                 stats[key] = fn()
@@ -1547,3 +1556,5 @@ class DbmService:
             self.snippets.close()
         if self.settings is not None:
             self.settings.close()
+        if self.inbox is not None:
+            self.inbox.close()
