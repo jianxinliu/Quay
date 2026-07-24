@@ -18,8 +18,10 @@ from .audit.log import AuditRecord, AuditStore
 from .audit.redis_rules import classify_command, command_fingerprint, parse_command
 from .audit.risk import assess
 from .config import AppConfig, ConnectionConfig
+from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
 from .masking import apply_mask
 from .metadata import MetadataCache
+from .notify import NoopNotifier, Notifier
 from . import engines, redis_engine
 
 if TYPE_CHECKING:
@@ -109,6 +111,7 @@ class DbmService:
         metadata: MetadataCache | None = None,
         config_path: str | None = None,
         snippets: "SnippetStore | None" = None,
+        notifier: Notifier | None = None,
     ):
         self.config = config
         self.store = store
@@ -118,6 +121,14 @@ class DbmService:
         self.pool.identities = self.config.ssh_identities
         self.redis_pool.identities = self.config.ssh_identities
         self.approvals = approvals
+        # 通知抽象：默认 Noop（safe default，测试与库使用都不会真发通知）；
+        # serve 入口显式注入 build_default_notifier() 得到 macOS 系统通知。
+        self.notifier = notifier if notifier is not None else NoopNotifier()
+        # 健康监控：exhausted 时发通知（同一连接短时间去重）
+        self.health = HealthMonitor(
+            probe=self._health_probe,
+            on_exhausted=self._on_connection_exhausted,
+        )
         self.metadata = metadata
         self.config_path = config_path
         self.snippets = snippets
@@ -178,11 +189,22 @@ class DbmService:
         rec = self._base_record(project, connection, cfg, "query", sql, caller)
         if schema:
             rec.detail = f"schema={schema}"
-        try:
+
+        def _do() -> "engines.QueryResult":
             engine = self.pool.get(project, connection, cfg, schema=schema)
-            result = engines.run_query(engine, sql, max_rows,
-                                        max_cell_chars=max_cell_chars or cfg.policy.max_cell_chars,
-                                        on_start=on_start)
+            return engines.run_query(
+                engine, sql, max_rows,
+                max_cell_chars=max_cell_chars or cfg.policy.max_cell_chars,
+                on_start=on_start,
+            )
+
+        try:
+            result = self._run_touching_db(project, connection, _do)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
         except QueryRejected:
             raise
         except Exception as e:
@@ -320,9 +342,18 @@ class DbmService:
         rec = self._base_record(project, connection, cfg, "admin_execute", sql, caller)
         if schema:
             rec.detail = f"schema={schema}"
-        try:
+
+        def _do() -> "engines.QueryResult":
             engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
-            result = engines.run_write(engine, sql, on_start=on_start)
+            return engines.run_write(engine, sql, on_start=on_start)
+
+        try:
+            result = self._run_touching_db(project, connection, _do)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
@@ -362,9 +393,18 @@ class DbmService:
         rec = self._base_record(project, connection, cfg, "admin_import",
                                 f"IMPORT INTO {table} ({', '.join(columns)}) — {len(rows)} 行",
                                 caller)
-        try:
+
+        def _do() -> "engines.QueryResult":
             engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
-            result = engines.insert_rows(engine, table, columns, rows, schema=schema)
+            return engines.insert_rows(engine, table, columns, rows, schema=schema)
+
+        try:
+            result = self._run_touching_db(project, connection, _do)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
@@ -729,6 +769,18 @@ class DbmService:
         rec.status = "rejected"
         rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {report.level}）"
         self.store.record(rec)
+        # 需要人为介入 → 主动发通知（安静即正常：不通知的话可能长时间没人看到）
+        try:
+            sql_preview = " ".join(sql.split())[:120]
+            self.notifier.send(
+                title=f"新审批单 #{change.id} · {project}/{connection}",
+                body=f"风险 {report.level} · agent={caller.agent or 'unknown'}\nSQL: {sql_preview}",
+                meta={"kind": "approval_created", "change_id": change.id,
+                      "project": project, "connection": connection,
+                      "risk_level": report.level},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("notify approval_created failed")
         return {
             "status": "approval_required",
             "change_id": change.id,
@@ -762,9 +814,18 @@ class DbmService:
             return {"status": "rejected", "change_id": change_id, "reason": str(e)}
 
         # 执行审批单里存储的 SQL（不是 agent 重提的文本），用 writer 账号
-        try:
+
+        def _do() -> "engines.QueryResult":
             engine = self.pool.get(project, connection, cfg, role="writer")
-            result = engines.run_write(engine, change.sql)
+            return engines.run_write(engine, change.sql)
+
+        try:
+            result = self._run_touching_db(project, connection, _do)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
@@ -907,10 +968,19 @@ class DbmService:
             rec.fingerprint = command_fingerprint(safe_command)
             if db is not None:
                 rec.detail = f"db={db}"
-            try:
+
+            def _do_read():
                 client = self.redis_pool.get(project, connection, cfg, db=db)
-                result = redis_engine.run_command(client, parts,
-                                                  max_cell_chars=cfg.policy.max_cell_chars)
+                return redis_engine.run_command(client, parts,
+                                                max_cell_chars=cfg.policy.max_cell_chars)
+
+            try:
+                result = self._run_touching_db(project, connection, _do_read)
+            except ConnectionUnavailable as e:
+                rec.status = "error"
+                rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+                self.store.record(rec)
+                raise
             except Exception as e:
                 rec.status = "error"
                 rec.detail = f"{type(e).__name__}: {e}"
@@ -936,10 +1006,19 @@ class DbmService:
         rec = self._base_record(project, connection, cfg, "admin_execute", safe_command, caller)
         rec.fingerprint = command_fingerprint(safe_command)
         role = "writer" if cfg.writer is not None else "reader"
-        try:
+
+        def _do_write():
             client = self.redis_pool.get(project, connection, cfg, role=role, db=db)
-            result = redis_engine.run_command(client, parts,
-                                              max_cell_chars=cfg.policy.max_cell_chars)
+            return redis_engine.run_command(client, parts,
+                                            max_cell_chars=cfg.policy.max_cell_chars)
+
+        try:
+            result = self._run_touching_db(project, connection, _do_write)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
@@ -1238,7 +1317,12 @@ class DbmService:
     def _audited(self, project, connection, cfg, tool, detail_sql, caller, fn):  # noqa: ANN001
         rec = self._base_record(project, connection, cfg, tool, detail_sql, caller)
         try:
-            result = fn()
+            result = self._run_touching_db(project, connection, fn)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
         except Exception as e:
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
@@ -1247,6 +1331,67 @@ class DbmService:
         rec.status = "ok"
         self.store.record(rec)
         return result
+
+    def _run_touching_db(self, project: str, connection: str, fn):  # noqa: ANN001
+        """任何"会触达 DB/隧道"的动作都过这里：入口先查健康位、出错时按类别打标。
+
+        - 若健康位为 unavailable/exhausted：直接抛 ConnectionUnavailable（不碰 DB）
+        - 执行成功：清健康标记（如果之前挂过）
+        - 失败：判断是不是"连接级"异常，是就打标 + 启后台重连，然后原样再抛
+          （非连接级异常如 SQL 语法/权限拒/审批拒不打标，重连也没用）
+        """
+        self.health.check(project, connection)
+        try:
+            result = fn()
+        except ConnectionUnavailable:
+            raise
+        except Exception as e:
+            if is_connection_error(e):
+                # 池里对应的引擎/隧道大概率也坏了：回收让重连时用新连接
+                try:
+                    self.pool.dispose_connection(project, connection)
+                    self.redis_pool.dispose_connection(project, connection)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.health.mark_failed(project, connection, f"{type(e).__name__}: {e}")
+            raise
+        self.health.mark_ok(project, connection)
+        return result
+
+    def _health_probe(self, project: str, connection: str) -> None:
+        """健康监控的探测回调：走 reader 建/借连接做 SELECT 1（Redis 用 PING）。
+
+        失败原样抛出，让 HealthMonitor 记退避；成功即视作连接已恢复。
+        """
+        try:
+            cfg = self.config.get_connection(project, connection)
+        except KeyError:
+            # 连接被删了：视作已恢复（后续不会再有请求走它）
+            return
+        # 每次探测前先回收旧引擎/隧道，避免复用坏连接
+        try:
+            self.pool.dispose_connection(project, connection)
+            self.redis_pool.dispose_connection(project, connection)
+        except Exception:  # noqa: BLE001
+            pass
+        if cfg.engine == "redis":
+            client = self.redis_pool.get(project, connection, cfg)
+            client.ping()
+            return
+        engine = self.pool.get(project, connection, cfg)
+        engines.run_query(engine, "SELECT 1", max_rows=1)
+
+    def _on_connection_exhausted(self, project: str, connection: str, error: str) -> None:
+        """连接 exhausted 时发一条通知（人为介入信号）。"""
+        try:
+            self.notifier.send(
+                title=f"连接不可用 · {project}/{connection}",
+                body=f"重连多次仍失败，请到管理后台检查连接配置。最近错误：{error}",
+                meta={"kind": "connection_exhausted",
+                      "project": project, "connection": connection},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("notify exhausted failed")
 
     # ---------- 连接管理（管理后台，需已配置 config_path）----------
 
@@ -1341,9 +1486,10 @@ class DbmService:
     def _after_connection_change(
         self, project: str, connection: str, caller: CallerInfo, tool: str, detail: str
     ) -> None:
-        # 回收旧引擎/隧道，下次访问用新配置重建
+        # 回收旧引擎/隧道，下次访问用新配置重建；同步清健康位（新配置视作全新开始）
         self.pool.dispose_connection(project, connection)
         self.redis_pool.dispose_connection(project, connection)
+        self.health.force_clear(project, connection)
         rec = AuditRecord(project=project, connection=connection, tool=tool, status="ok",
                           agent=caller.agent, session_id=caller.session_id, detail=detail)
         self.store.record(rec)
@@ -1389,6 +1535,7 @@ class DbmService:
         if self._housekeeping_stop is not None:
             self._housekeeping_stop.set()
             self._housekeeping_stop = None
+        self.health.stop()
         self.pool.dispose()
         self.redis_pool.dispose()
         self.store.close()
