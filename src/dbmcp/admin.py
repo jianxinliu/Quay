@@ -1218,11 +1218,16 @@ def _ssh_identities_body(service: "DbmService") -> str:
     )
 
 
-def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None:
+def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
+                *, no_auth: bool = False) -> None:
+    """挂载管理后台。no_auth=True 时跳过认证——仅供本机测试脚手架，绝不用于生产。"""
     expected_cookie = _session_value(admin_token)
 
     def guard(handler: Callable[[Request], Awaitable[Response]]) -> Callable[[Request], Awaitable[Response]]:
-        """未认证访问受保护路由 → 重定向登录页；非本机来源（Host/Origin 不符）→ 403。"""
+        """未认证访问受保护路由 → 重定向登录页；非本机来源（Host/Origin 不符）→ 403。
+
+        no_auth 模式跳过认证检查（本机测试专用）；Host/Origin 校验仍保留。
+        """
         @wraps(handler)
         async def _wrapped(req: Request) -> Response:
             if not _local_request_ok(req):
@@ -1232,7 +1237,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str) -> None
                         status_code=403)
                 return Response("forbidden: request must originate from localhost",
                                 status_code=403)
-            if not _authed(req, expected_cookie):
+            if not no_auth and not _authed(req, expected_cookie):
                 # 前端 fetch 期望 JSON → 返回 401 JSON（前端据此提示重新登录）；
                 # 浏览器页面导航 → 仍 303 到登录页。
                 if _wants_json(req):

@@ -50,6 +50,8 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--retention-days", type=int,
                        default=int(os.environ.get("DBM_RETENTION_DAYS", "30")),
                        help="审计记录与终态审批单保留天数（默认 30）")
+    serve.add_argument("--no-auth", action="store_true",
+                       help=argparse.SUPPRESS)  # 仅供本机测试脚手架，不对外
 
     approvals = sub.add_parser("approvals", help="列出审批单")
     _add_data_dir(approvals)
@@ -113,12 +115,15 @@ def _cmd_serve(args: argparse.Namespace) -> None:
             from .admin import mount_admin
 
             admin_token = os.environ.get("DBM_ADMIN_TOKEN") or secrets.token_urlsafe(24)
-            if not os.environ.get("DBM_ADMIN_TOKEN"):
+            if args.no_auth:
+                print(f"\n[Quay] --no-auth 模式：管理后台无需登录。**仅供本机测试**\n"
+                      f"    http://{args.host}:{args.port}/admin/approvals\n", file=sys.stderr)
+            elif not os.environ.get("DBM_ADMIN_TOKEN"):
                 # 未设置则一次性生成，打印到 stderr 方便本地登录；生产应显式注入
                 print(f"\n[Quay] 未设置 DBM_ADMIN_TOKEN，本次生成管理 token：\n"
                       f"    {admin_token}\n"
                       f"    登录 http://{args.host}:{args.port}/admin/login\n", file=sys.stderr)
-            mount_admin(mcp, service, admin_token)
+            mount_admin(mcp, service, admin_token, no_auth=args.no_auth)
             mcp.run(transport="http", host=args.host, port=args.port)
     finally:
         service.close()

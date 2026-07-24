@@ -131,6 +131,52 @@ class TestInboxEndpoints:
         assert items[0]["kind"] == "test"
 
 
+class TestBellStaticAssets:
+    """铃铛 UI 的静态资源可访问 + 关键类/函数已挂进 admin.js/admin-chrome.css。
+
+    铃铛 JS 是 vanilla（没有单测框架），这里断言的是"关键实现已加载到全站外壳"，
+    保证任何服务端渲染页 / SPA 页面都能拿到铃铛脚本。真实交互靠人工验证/浏览器 e2e。
+    """
+
+    def test_admin_js_has_bell_bootstrap(self, client):
+        tc, _ = client
+        r = tc.get("/admin/static/admin.js")
+        assert r.status_code == 200
+        # 关键实现：类名 / SSE 端点 / 未读 API
+        assert "dbm-bell" in r.text
+        assert "/admin/notifications/stream" in r.text
+        assert "/admin/notifications/unread_count" in r.text
+        assert "/admin/notifications/mark_read" in r.text
+        # deeplink 单条点击跳转
+        assert "data-href" in r.text
+
+    def test_admin_chrome_css_has_bell_styles(self, client):
+        tc, _ = client
+        r = tc.get("/admin/static/admin-chrome.css")
+        assert r.status_code == 200
+        assert ".dbm-bell" in r.text
+        assert ".dbm-panel" in r.text
+        assert ".dbm-item.unread" in r.text
+
+    def test_admin_pages_load_bell_script(self, client):
+        """所有走 _shell 的页面都加载 admin.js，铃铛就都挂上了。"""
+        tc, _ = client
+        for path in ("/admin/audit", "/admin/approvals",
+                     "/admin/settings?tab=notify", "/admin/sql", "/admin/redis"):
+            r = tc.get(path)
+            assert r.status_code == 200, path
+            assert "/admin/static/admin.js" in r.text, path
+            assert "/admin/static/admin-chrome.css" in r.text, path
+
+    def test_login_page_does_not_load_bell(self, client):
+        """登录页不用铃铛（用户还没认证）。"""
+        tc, _ = client
+        tc.get("/admin/logout")
+        r = tc.get("/admin/login")
+        # 登录页是独立模板 _login_page，不加载 admin.js/admin-chrome.css
+        assert "/admin/static/admin.js" not in r.text
+
+
 class TestNotifySettingsPage:
     def test_notify_tab_renders(self, client):
         tc, _ = client
