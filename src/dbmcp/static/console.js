@@ -684,7 +684,7 @@
                     wfName: opts.wfName || "", wfSteps: null, vsel: null,
                     view: "table", chart: null,
                     graph: opts.graph || null, sel: null, nodeStatus: {},
-                    rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
+                    rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
@@ -893,7 +893,7 @@
       },
       // 双击表 / 右键「打开表数据」：data 型 tab，主区直接是数据网格
       openTableTab: function (t, db) {
-        var q = db ? db + "." + t : t;
+        var q = this.qtable({ schema: db || "", table: t });
         this.newTab({ type: "data", title: t, table: t, schema: db || "", sql: "SELECT * FROM " + q });
         var self = this; this.$nextTick(function () { self.run(false); });
       },
@@ -1120,7 +1120,7 @@
         editor.focus();
       },
       insertSelect: function (t, db) {
-        var q = db ? db + "." + t : t;
+        var q = this.qtable({ schema: db || "", table: t });
         this.insertText("SELECT * FROM " + q + " LIMIT 100;");
       },
 
@@ -1348,8 +1348,9 @@
         else if (act === "count") {
           // 轻量即时统计：不开 tab，toast 显示（之前开 data tab 会被 buildDataSql 覆盖成 SELECT *）
           var tab = this.activeTab;
+          var qq = this.qtable({ schema: s || "", table: t });
           this.flash("统计中…");
-          apiPost("/admin/sql/run", { conn: tab.conn, sql: "SELECT count(*) AS total FROM " + q })
+          apiPost("/admin/sql/run", { conn: tab.conn, sql: "SELECT count(*) AS total FROM " + qq })
             .then(function (d) {
               if (d.ok && d.kind === "read" && d.rows.length) self.flash(q + " 共 " + d.rows[0][0] + " 行");
               else self.flash(d.error || "统计失败");
@@ -1380,7 +1381,8 @@
         plan.items.forEach(function (item) {
           chain = chain.then(function () {
             var q = self.qn(item);
-            return apiPost("/admin/sql/run", { conn: tab.conn, sql: "DROP TABLE " + q, confirm: "1" })
+            var qq = self.qtable({ schema: item.db || "", table: item.t });
+            return apiPost("/admin/sql/run", { conn: tab.conn, sql: "DROP TABLE " + qq, confirm: "1" })
               .then(function (d) {
                 plan.results.push({ q: q, ok: !!(d.ok && d.kind === "write"), error: d.error || "" });
               })
@@ -1479,7 +1481,7 @@
         var self = this, p = this.importPlan, tab = this.activeTab;
         if (!p || p.running || !tab) return;
         p.running = true;
-        var q = p.db ? p.db + "." + p.t : p.t;
+        var q = this.qtable({ schema: p.db || "", table: p.t });
         apiPost("/admin/analysis/import", {
           conn: tab.conn, workspace: p.workspace, dataset: p.dataset,
           sql: "SELECT * FROM " + q, limit: p.limit,
@@ -1767,8 +1769,7 @@
       // ---------- 运行 / 分页 / 导出 ----------
       // data tab 的查询由 表 + WHERE 条 + 列头排序 构建（DataGrip Table Data 行为，走 SQL 跨页正确）
       buildDataSql: function (t) {
-        var q = t.schema ? t.schema + "." + t.table : t.table;
-        var sql = "SELECT * FROM " + q;
+        var sql = "SELECT * FROM " + this.qtable(t);
         if (t.where && t.where.trim()) sql += " WHERE " + t.where.trim();
         if (t.orderBy && t.orderBy.trim()) sql += " ORDER BY " + t.orderBy.trim();
         return sql;
@@ -1963,7 +1964,7 @@
           else if (sqlOverride == null && !isPage) { t.execMarks = [{ line: this.execLineFor(), state: "" }]; t.execIdx = 0; }
         }
         this.setExecGlyph(t, "run");
-        t.rowSel = {}; t.lastSelRi = -1; t.resQ = null;  // 重查后行号会变，行选择/搜索作废
+        t.rowSel = {}; t.lastSelRi = -1; t.resQ = null; t.cellSel = null;  // 重查后行号会变，行/单元格选择/搜索作废
         if (page === 0) t.result = null;
         // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询。
         // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
@@ -2198,21 +2199,30 @@
       cycleOrder: function (col) {
         var t = this.activeTab;
         if (!t || t.type !== "data") return;
-        if (t.orderBy === col + " ASC") t.orderBy = col + " DESC";
-        else if (t.orderBy === col + " DESC") t.orderBy = "";
-        else t.orderBy = col + " ASC";
+        var q = this.qid(col);
+        if (t.orderBy === q + " ASC") t.orderBy = q + " DESC";
+        else if (t.orderBy === q + " DESC") t.orderBy = "";
+        else t.orderBy = q + " ASC";
         this.run(false, 0);
       },
       orderMark: function (col) {
         var t = this.activeTab;
         if (!t || !t.orderBy) return "";
-        if (t.orderBy === col + " ASC") return " ↑";
-        if (t.orderBy === col + " DESC") return " ↓";
+        var q = this.qid(col);
+        if (t.orderBy === q + " ASC") return " ↑";
+        if (t.orderBy === q + " DESC") return " ↓";
         return "";
+      },
+      clearOrderBy: function () {
+        var t = this.activeTab;
+        if (!t || !t.orderBy) return;
+        t.orderBy = "";
+        this.run(false, 0);
       },
       funnel: function (col) {
         var t = this.activeTab; if (!t) return;
-        t.where = (t.where && t.where.trim()) ? (t.where.trim() + " AND " + col + " = ") : (col + " = ");
+        var q = this.qid(col);
+        t.where = (t.where && t.where.trim()) ? (t.where.trim() + " AND " + q + " = ") : (q + " = ");
         var self = this;
         this.$nextTick(function () {
           var el = document.getElementById("dg-where-input");
@@ -2670,6 +2680,8 @@
         var t = this.activeTab;
         if (!t || !t.result) return;
         if (!t.rowSel) t.rowSel = {};
+        // 行/单元格选中互斥，开始选行前清单元格选
+        t.cellSel = null;
         if (ev.shiftKey && t.lastSelRi >= 0) {
           var a = Math.min(t.lastSelRi, ri), b = Math.max(t.lastSelRi, ri);
           for (var i = a; i <= b; i++) t.rowSel[i] = true;
@@ -2686,6 +2698,76 @@
       clearRowSel: function () {
         var t = this.activeTab;
         if (t) { t.rowSel = {}; t.lastSelRi = -1; }
+      },
+      // ---------- 单元格拖框选中（Excel 风矩形区域） ----------
+      // cellSel = {r0, c0, r1, c1}，闭区间；未选时为 null
+      selCellCount: function () {
+        var t = this.activeTab, s = t && t.cellSel;
+        if (!s) return 0;
+        return (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
+      },
+      isCellSel: function (ri, ci) {
+        var s = this.activeTab && this.activeTab.cellSel;
+        return !!(s && ri >= s.r0 && ri <= s.r1 && ci >= s.c0 && ci <= s.c1);
+      },
+      clearCellSel: function () {
+        var t = this.activeTab;
+        if (t) t.cellSel = null;
+      },
+      // 从事件目标向上找到承载 ri:ci 的 td
+      _cellRcFromEvent: function (ev) {
+        var el = ev.target;
+        while (el && el !== document.body) {
+          if (el.tagName === "TD" && el.getAttribute("data-cell")) {
+            var p = el.getAttribute("data-cell").split(":");
+            return { ri: +p[0], ci: +p[1] };
+          }
+          el = el.parentNode;
+        }
+        return null;
+      },
+      // 结果表格上按下鼠标启动拖框。忽略正在编辑的单元格/新增行输入框/行号列/表头。
+      resMouseDown: function (ev) {
+        var t = this.activeTab;
+        if (!t || !t.result || !t.result.columns.length) return;
+        var tgt = ev.target;
+        if (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA") return;
+        if (tgt.closest && (tgt.closest(".dg-cell-edit") || tgt.closest("thead") ||
+                            tgt.closest("td.gut") || tgt.closest(".dg-newrow"))) return;
+        if (ev.button !== 0) return;
+        var start = this._cellRcFromEvent(ev);
+        if (!start) return;   // 只从数据单元格起拖
+        var self = this;
+        this._rb = { scroll: ev.currentTarget, start: start, cur: start, moved: false };
+        // 起点即预选（点单元格也选中一格）
+        t.rowSel = {}; t.lastSelRi = -1;
+        t.cellSel = { r0: start.ri, c0: start.ci, r1: start.ri, c1: start.ci };
+        var onMove = function (e) { self._rbMove(e); };
+        var onUp = function () {
+          document.removeEventListener("mousemove", onMove);
+          document.removeEventListener("mouseup", onUp);
+          self._rb = null;
+        };
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+        ev.preventDefault();
+      },
+      _rbMove: function (ev) {
+        var rb = this._rb; if (!rb) return;
+        // 从鼠标位置反查落在哪个 td（elementFromPoint 支持出滚动区域外裁切）
+        var el = document.elementFromPoint(ev.clientX, ev.clientY);
+        if (!el) return;
+        var td = el.closest ? el.closest("td[data-cell]") : null;
+        if (!td) return;
+        var p = td.getAttribute("data-cell").split(":");
+        var ri = +p[0], ci = +p[1];
+        rb.cur = { ri: ri, ci: ci };
+        rb.moved = true;
+        var t = this.activeTab; if (!t) return;
+        t.cellSel = {
+          r0: Math.min(rb.start.ri, ri), r1: Math.max(rb.start.ri, ri),
+          c0: Math.min(rb.start.ci, ci), c1: Math.max(rb.start.ci, ci),
+        };
       },
       selRis: function () {
         var t = this.activeTab;
@@ -2729,6 +2811,59 @@
         var n = ris.length;
         navigator.clipboard.writeText(text).then(function () {
           self.flash("已复制 " + n + " 行（" + fmt.toUpperCase() + "）");
+        }, function () { self.flash("复制失败（剪贴板权限）"); });
+        this.copyOpen = false;
+      },
+      // 选中的单元格矩形复制为各种格式（CSV / JSON / WHERE IN）
+      copyCells: function (fmt) {
+        var t = this.activeTab, s = t && t.cellSel;
+        if (!s || !t.result) return;
+        var allCols = t.result.columns, allRows = t.result.rows, self = this;
+        var cis = [], ris = [];
+        for (var _c = s.c0; _c <= s.c1; _c++) cis.push(_c);
+        for (var _r = s.r0; _r <= s.r1; _r++) ris.push(_r);
+        var cols = cis.map(function (ci) { return allCols[ci]; });
+        var text;
+        if (fmt === "csv") {
+          var esc = function (v) {
+            if (v == null) return "";
+            var s = self.cellText(v);
+            if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+            return s;
+          };
+          text = [cols.map(esc).join(",")].concat(ris.map(function (ri) {
+            return cis.map(function (ci) { return esc(allRows[ri][ci]); }).join(",");
+          })).join("\n");
+        } else if (fmt === "json") {
+          text = JSON.stringify(ris.map(function (ri) {
+            var o = {};
+            cis.forEach(function (ci) { o[allCols[ci]] = allRows[ri][ci]; });
+            return o;
+          }), null, 2);
+        } else if (fmt === "where-in") {
+          var parts = cis.map(function (ci) {
+            var col = allCols[ci];
+            var seen = {}, vals = [];
+            ris.forEach(function (ri) {
+              var v = allRows[ri][ci];
+              var k = v == null ? " NULL" : (typeof v) + ":" + String(v);
+              if (seen[k]) return;
+              seen[k] = 1; vals.push(v);
+            });
+            var hasNull = false;
+            var lit = vals.filter(function (v) { if (v == null) { hasNull = true; return false; } return true; })
+                          .map(function (v) { return self.sqlLit(self.cellText(v), v); });
+            var qcol = self.qid(col);
+            if (!lit.length && hasNull) return qcol + " IS NULL";
+            var inExpr = qcol + " IN (" + lit.join(", ") + ")";
+            return hasNull ? "(" + inExpr + " OR " + qcol + " IS NULL)" : inExpr;
+          });
+          text = parts.join(" AND ");
+        }
+        var label = fmt === "where-in" ? "WHERE (IN)" : fmt.toUpperCase();
+        var n = ris.length * cis.length;
+        navigator.clipboard.writeText(text).then(function () {
+          self.flash("已复制 " + n + " 格（" + label + "）");
         }, function () { self.flash("复制失败（剪贴板权限）"); });
         this.copyOpen = false;
       },
@@ -3055,14 +3190,14 @@
                      savedSql: t.savedSql != null ? t.savedSql : (t.sql || ""), dirty: !!t.dirty,
                      bookmarks: t.bookmarks || [],
                      where: t.where || "",
-                     orderBy: t.orderBy || (t.orderCol ? t.orderCol + " " + (t.orderDir || "ASC") : ""),
+                     orderBy: t.orderBy || (t.orderCol ? this.qid(t.orderCol) + " " + (t.orderDir || "ASC") : ""),
                      lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0,
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null, vsel: null,
                      view: t.view || "table", chart: t.chart || null,
                      graph: t.graph || null, sel: null, nodeStatus: {},
-                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null,
+                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      submit: null, submitting: false, refreshWarn: false,
                      colDisplay: t.colDisplay || {},
@@ -3826,6 +3961,7 @@
             <input id="dg-order-input" class="obin" :value="activeTab.orderBy" placeholder="amount DESC, id"
                    @input="onFilterInput('orderBy',$event)" @keydown="filterKey('orderBy',$event)" @blur="blurSug"
                    title="任意排序表达式，回车应用；点列头快捷设置">
+            <a v-if="activeTab.orderBy" class="ob-x" @click="clearOrderBy" title="清除排序">✕</a>
             <div v-if="sug.open && sug.which==='orderBy'" class="dg-sug">
               <div v-for="(c,i) in sug.items" :key="c" class="item" :class="{sel:i===sug.sel}"
                    @mousedown.prevent="pickSug(c)">{{ c }}</div>
@@ -3931,6 +4067,16 @@
                       @click="toggleDelSelected" title="标记选中行删除（提交时执行）">标记删除</button>
               <a class="act" @click="clearRowSel">✕</a>
             </span>
+            <span v-else-if="selCellCount()" class="rowops">
+              已选 {{ selCellCount() }} 格
+              <span class="dg-menu"><button class="dg-btn" @click.stop="copyOpen=!copyOpen">复制为 ▾</button>
+                <div v-if="copyOpen" class="dg-menu-pop">
+                  <button @click="copyCells('csv')">CSV</button>
+                  <button @click="copyCells('json')">JSON</button>
+                  <button @click="copyCells('where-in')">WHERE (IN)</button>
+                </div></span>
+              <a class="act" @click="clearCellSel">✕</a>
+            </span>
             <span v-if="activeTab.resQ" class="dg-resq">
               <input id="dg-resq-input" v-model="activeTab.resQ.q" placeholder="在结果中查找…"
                      @input="resQInput" @keydown.enter.exact="resQNext(1)"
@@ -3971,7 +4117,7 @@
             <div class="dg-chart" ref="chartEl"></div>
           </template>
           <div v-else class="dg-res-body">
-          <div class="dg-res-scroll"><table class="dg-rt">
+          <div class="dg-res-scroll" @mousedown="resMouseDown"><table class="dg-rt">
             <thead><tr>
               <th class="gut" title="点击行号选择行（⇧范围 / ⌘多选）">#</th>
               <th v-for="(c,ci) in activeTab.result.columns" :key="c"
@@ -3998,7 +4144,8 @@
                   :title="isDelRow(ri) ? '已标记删除（提交时执行）' : '点击选择行'">{{ isDelRow(ri) ? '␡' : ri+1 }}</td>
               <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)" :data-cell="ri+':'+ci"
                   :class="{editable: activeTab.type==='data', vsel: activeTab.vsel && activeTab.vsel.ri===ri && activeTab.vsel.ci===ci,
-                           edited: isEditedCell(ri,ci), hit: isHit(ri,ci), curhit: isCurHit(ri,ci)}"
+                           edited: isEditedCell(ri,ci), hit: isHit(ri,ci), curhit: isCurHit(ri,ci),
+                           csel: isCellSel(ri,ci)}"
                   @click="cellClick(ri,ci)"
                   @dblclick="activeTab.type==='data' && startEdit(ri,ci)">
                 <input v-if="activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci"
