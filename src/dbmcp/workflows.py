@@ -137,7 +137,7 @@ def _row(row: sqlite3.Row) -> Workflow:
 #   source    cfg: {conn: "project/connection", sql, limit?, schema?}   → 导入为数据集
 #   file      cfg: {path}                                               → 文件导入为数据集
 #   filter    cfg: {where}          输入 1（in）
-#   join      cfg: {kind, on}       输入 2（left/right，SQL 里别名 l / r）
+#   join      cfg: {kind, on, select?, ports_n?}  输入 N（端口 in_1..in_N，SQL 别名 a/b/c/...；老图 left/right 兼容为 in_1/in_2）
 #   aggregate cfg: {group, aggs}    输入 1
 #   sql       cfg: {sql}            输入任意（直接按上游节点名引用）
 #   output    cfg: {order_by?, limit?}  输入 1，终点（最多一个）
@@ -236,18 +236,50 @@ def compile_graph(graph: dict) -> dict:
                           "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
             last_view = name
         elif typ == "join":
-            left, right = inputs[nid].get("left"), inputs[nid].get("right")
-            if not left or not right:
-                raise WorkflowError(f"JOIN 节点「{name}」需要接满左右两个输入")
+            # 端口：新格式 in_1..in_N；老图 left→in_1、right→in_2 兼容层
+            ports = dict(inputs[nid])
+            if "left" in ports and "in_1" not in ports:
+                ports["in_1"] = ports.pop("left")
+            if "right" in ports and "in_2" not in ports:
+                ports["in_2"] = ports.pop("right")
+            ordered: list[tuple[int, str]] = []
+            for k, v in ports.items():
+                if not k.startswith("in_"):
+                    continue
+                try:
+                    idx = int(k.split("_", 1)[1])
+                except ValueError:
+                    continue
+                ordered.append((idx, v))
+            ordered.sort(key=lambda x: x[0])
+            if len(ordered) < 2:
+                raise WorkflowError(f"JOIN 节点「{name}」至少需要两个输入")
+            if len(ordered) > 16:
+                raise WorkflowError(f"JOIN 节点「{name}」最多支持 16 路输入")
+            aliases = "abcdefghijklmnop"
             on = (cfg.get("on") or "").strip()
             if not on:
-                raise WorkflowError(f"JOIN 节点「{name}」缺少 ON 条件（用 l / r 引用左右表）")
+                raise WorkflowError(
+                    f"JOIN 节点「{name}」缺少 ON 条件（用 a/b/c... 引用各输入表；两路时 a/b 等价老 l/r）")
             kind = (cfg.get("kind") or "INNER").upper()
             if kind not in ("INNER", "LEFT", "RIGHT", "FULL"):
                 raise WorkflowError(f"JOIN 类型 {kind!r} 不支持")
-            cols = (cfg.get("select") or "l.*, r.*").strip()
-            sql = (f"SELECT {cols} FROM {_q(nodes[left]['name'])} l"
-                   f" {kind} JOIN {_q(nodes[right]['name'])} r ON {on}")
+            n = len(ordered)
+            default_cols = ", ".join(f"{aliases[i]}.*" for i in range(n))
+            # 两路兼容：用户老配置里 SELECT 可能写 "l.*, r.*"，替换成 a.*/b.*
+            raw_cols = (cfg.get("select") or default_cols).strip()
+            if n == 2 and ("l." in raw_cols or "r." in raw_cols):
+                raw_cols = raw_cols.replace("l.", "a.").replace("r.", "b.")
+            cols = raw_cols
+            # 组装：SELECT cols FROM t1 a KIND JOIN t2 b KIND JOIN t3 c ... ON <整段>
+            first_id = ordered[0][1]
+            sql = f"SELECT {cols} FROM {_q(nodes[first_id]['name'])} {aliases[0]}"
+            for i, (_idx, from_id) in enumerate(ordered[1:], start=1):
+                sql += f" {kind} JOIN {_q(nodes[from_id]['name'])} {aliases[i]}"
+            # 两路兼容：ON 里的 l./r. 也翻译成 a./b.
+            if n == 2 and ("l." in on or "r." in on):
+                on = on.replace("l.", "a.").replace("r.", "b.")
+            sql += f" ON {on}"
             steps.append({"node": nid, "name": name,
                           "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
             last_view = name

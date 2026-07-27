@@ -259,7 +259,8 @@ class TestGraph:
         assert "GROUP BY name" in plan["steps"][1]["sql"]
         assert plan["steps"][2]["sql"] == 'SELECT * FROM "stats" ORDER BY n DESC LIMIT 100'
 
-    def test_compile_join_ports(self):
+    def test_compile_join_two_way_legacy_ports(self):
+        """老图端口 left/right 兼容为 in_1/in_2；老 cfg 的 l./r. 别名也翻译为 a./b."""
         from dbmcp.workflows import compile_graph
         g = {"nodes": [
                 _node("a", "source", "o", conn="p/c", sql="SELECT 1"),
@@ -268,7 +269,69 @@ class TestGraph:
              "edges": [{"from": "a", "to": "j", "port": "left"},
                        {"from": "b", "to": "j", "port": "right"}]}
         sql = compile_graph(g)["steps"][0]["sql"]
-        assert 'FROM "o" l LEFT JOIN "u" r ON l.uid = r.id' in sql
+        assert 'FROM "o" a LEFT JOIN "u" b ON a.uid = b.id' in sql
+
+    def test_compile_join_two_way_new_ports(self):
+        """新格式 in_1/in_2 端口 + a/b 别名。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("a", "source", "o", conn="p/c", sql="SELECT 1"),
+                _node("b", "source", "u", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "ou", kind="INNER", on="a.uid = b.id")],
+             "edges": [{"from": "a", "to": "j", "port": "in_1"},
+                       {"from": "b", "to": "j", "port": "in_2"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert 'FROM "o" a INNER JOIN "u" b ON a.uid = b.id' in sql
+
+    def test_compile_join_three_way(self):
+        """3 路 JOIN：别名 a/b/c，ON 用户手写整段条件，堆到最后一个 JOIN 后。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s1", "source", "orders", conn="p/c", sql="SELECT 1"),
+                _node("s2", "source", "users", conn="p/c", sql="SELECT 1"),
+                _node("s3", "source", "goods", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "j3", kind="INNER",
+                      on="a.uid=b.id AND a.gid=c.id",
+                      select="a.oid, b.name, c.title")],
+             "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                       {"from": "s2", "to": "j", "port": "in_2"},
+                       {"from": "s3", "to": "j", "port": "in_3"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert ('SELECT a.oid, b.name, c.title FROM "orders" a INNER JOIN "users" b'
+                ' INNER JOIN "goods" c ON a.uid=b.id AND a.gid=c.id') in sql
+
+    def test_compile_join_port_order_matters(self):
+        """端口序号决定 JOIN 顺序：in_2 早于 in_3 出现在 SQL 中，即使 edge 定义顺序反了。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s1", "source", "t1", conn="p/c", sql="SELECT 1"),
+                _node("s2", "source", "t2", conn="p/c", sql="SELECT 1"),
+                _node("s3", "source", "t3", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "jj", on="a.x=b.x AND b.y=c.y")],
+             "edges": [{"from": "s3", "to": "j", "port": "in_3"},
+                       {"from": "s1", "to": "j", "port": "in_1"},
+                       {"from": "s2", "to": "j", "port": "in_2"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        # a=t1, b=t2, c=t3
+        assert 'FROM "t1" a' in sql
+        assert '"t2" b' in sql
+        assert '"t3" c' in sql
+        # b 出现在 c 之前
+        assert sql.index('"t2" b') < sql.index('"t3" c')
+
+    def test_compile_join_default_select_n_way(self):
+        """N 路 JOIN 未指定 SELECT 时默认展开 a.*, b.*, c.*..."""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s1", "source", "t1", conn="p/c", sql="SELECT 1"),
+                _node("s2", "source", "t2", conn="p/c", sql="SELECT 1"),
+                _node("s3", "source", "t3", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "jj", on="a.x=b.x AND b.y=c.y")],
+             "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                       {"from": "s2", "to": "j", "port": "in_2"},
+                       {"from": "s3", "to": "j", "port": "in_3"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert 'SELECT a.*, b.*, c.*' in sql
 
     def test_compile_errors(self):
         from dbmcp.workflows import WorkflowError, compile_graph
@@ -278,10 +341,16 @@ class TestGraph:
             compile_graph({"nodes": [_node("a", "filter", "1bad", where="x")], "edges": []})
         with pytest.raises(WorkflowError, match="缺少输入"):
             compile_graph({"nodes": [_node("a", "filter", "f", where="x")], "edges": []})
-        with pytest.raises(WorkflowError, match="接满左右"):
+        with pytest.raises(WorkflowError, match="至少需要两个输入"):
             compile_graph({"nodes": [_node("a", "source", "s", conn="p/c", sql="SELECT 1"),
-                                     _node("j", "join", "jj", on="l.a=r.b")],
-                           "edges": [{"from": "a", "to": "j", "port": "left"}]})
+                                     _node("j", "join", "jj", on="a.x=b.x")],
+                           "edges": [{"from": "a", "to": "j", "port": "in_1"}]})
+        with pytest.raises(WorkflowError, match="缺少 ON"):
+            compile_graph({"nodes": [_node("s1", "source", "t1", conn="p/c", sql="SELECT 1"),
+                                     _node("s2", "source", "t2", conn="p/c", sql="SELECT 1"),
+                                     _node("j", "join", "jj")],
+                           "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                                     {"from": "s2", "to": "j", "port": "in_2"}]})
         with pytest.raises(WorkflowError, match="存在环"):
             compile_graph({"nodes": [_node("a", "filter", "f1", where="x"),
                                      _node("b", "filter", "f2", where="y")],
