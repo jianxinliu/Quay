@@ -269,7 +269,7 @@ class TestGraph:
              "edges": [{"from": "a", "to": "j", "port": "left"},
                        {"from": "b", "to": "j", "port": "right"}]}
         sql = compile_graph(g)["steps"][0]["sql"]
-        assert 'FROM "o" a LEFT JOIN "u" b ON a.uid = b.id' in sql
+        assert 'FROM "o" a LEFT JOIN "u" b ON (a.uid = b.id)' in sql
 
     def test_compile_join_two_way_new_ports(self):
         """新格式 in_1/in_2 端口 + a/b 别名。"""
@@ -281,10 +281,11 @@ class TestGraph:
              "edges": [{"from": "a", "to": "j", "port": "in_1"},
                        {"from": "b", "to": "j", "port": "in_2"}]}
         sql = compile_graph(g)["steps"][0]["sql"]
-        assert 'FROM "o" a INNER JOIN "u" b ON a.uid = b.id' in sql
+        assert 'FROM "o" a INNER JOIN "u" b ON (a.uid = b.id)' in sql
 
     def test_compile_join_three_way(self):
-        """3 路 JOIN：别名 a/b/c，ON 用户手写整段条件，堆到最后一个 JOIN 后。"""
+        """3 路 JOIN：别名 a/b/c；中间 JOIN 用 ON TRUE 占位，用户整段 ON 放最后
+        （DuckDB/标准 SQL 要求每个 JOIN 各带 ON 子句，本工程用整段 ON 语义等价）。"""
         from dbmcp.workflows import compile_graph
         g = {"nodes": [
                 _node("s1", "source", "orders", conn="p/c", sql="SELECT 1"),
@@ -297,8 +298,8 @@ class TestGraph:
                        {"from": "s2", "to": "j", "port": "in_2"},
                        {"from": "s3", "to": "j", "port": "in_3"}]}
         sql = compile_graph(g)["steps"][0]["sql"]
-        assert ('SELECT a.oid, b.name, c.title FROM "orders" a INNER JOIN "users" b'
-                ' INNER JOIN "goods" c ON a.uid=b.id AND a.gid=c.id') in sql
+        assert ('SELECT a.oid, b.name, c.title FROM "orders" a INNER JOIN "users" b ON TRUE'
+                ' INNER JOIN "goods" c ON (a.uid=b.id AND a.gid=c.id)') in sql
 
     def test_compile_join_port_order_matters(self):
         """端口序号决定 JOIN 顺序：in_2 早于 in_3 出现在 SQL 中，即使 edge 定义顺序反了。"""
@@ -422,6 +423,44 @@ class TestGraph:
              "edges": [{"from": "a", "to": "b", "port": "in"}]}
         out = service.workflow_preview_columns("ws1", g, "b", CALLER)
         assert out["columns"] == [] and "bad_src" in out["error"]
+
+    def test_three_way_join_actually_runs_in_duckdb(self, service, tmp_path):
+        """回归：3 路 JOIN 生成的 SQL 必须能在 DuckDB 里真跑通（不是只 parse 通过）。
+        之前一版把 A JOIN B JOIN C ON <整段> 写成没有中间 ON，DuckDB 直接语法错。"""
+        import sqlite3
+
+        from dbmcp.workflows import WorkflowStore
+
+        # 建三张表放到 sqlite（demo/main）里
+        with sqlite3.connect(service.config.get_connection("demo", "main").database) as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS t3o(id INTEGER, uid INTEGER);
+                DELETE FROM t3o; INSERT INTO t3o VALUES (1,1),(2,2),(3,3);
+                CREATE TABLE IF NOT EXISTS t3u(id INTEGER, city TEXT);
+                DELETE FROM t3u; INSERT INTO t3u VALUES (1,'SH'),(2,'BJ'),(3,'SZ');
+                CREATE TABLE IF NOT EXISTS t3g(id INTEGER, oid INTEGER, gname TEXT);
+                DELETE FROM t3g; INSERT INTO t3g VALUES (1,1,'x'),(2,2,'y'),(3,3,'z');
+            """)
+            c.commit()
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [
+            _node("s1", "source", "j_orders", conn="demo/main", sql="SELECT * FROM t3o"),
+            _node("s2", "source", "j_users", conn="demo/main", sql="SELECT * FROM t3u"),
+            _node("s3", "source", "j_goods", conn="demo/main", sql="SELECT * FROM t3g"),
+            _node("j", "join", "j_all", kind="INNER",
+                  on="a.uid=b.id AND a.id=c.oid", ports_n=3,
+                  select="a.id AS oid, b.city, c.gname"),
+            _node("o", "output", "j_out", order_by="oid", limit=10)],
+            "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                      {"from": "s2", "to": "j", "port": "in_2"},
+                      {"from": "s3", "to": "j", "port": "in_3"},
+                      {"from": "j", "to": "o", "port": "in"}]}
+        service.workflow_save("j3wf", "ws_j3", "", CALLER, graph=g)
+        out = service.workflow_run("j3wf", CALLER)
+        assert out["ok"] is True, out
+        assert out["output"]["row_count"] == 3
+        # 结果集含三列且行匹配
+        assert set(out["output"]["columns"]) == {"oid", "city", "gname"}
 
     def test_preview_node_returns_rows(self, service):
         g = {"nodes": [

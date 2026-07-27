@@ -271,15 +271,22 @@ def compile_graph(graph: dict) -> dict:
             if n == 2 and ("l." in raw_cols or "r." in raw_cols):
                 raw_cols = raw_cols.replace("l.", "a.").replace("r.", "b.")
             cols = raw_cols
-            # 组装：SELECT cols FROM t1 a KIND JOIN t2 b KIND JOIN t3 c ... ON <整段>
-            first_id = ordered[0][1]
-            sql = f"SELECT {cols} FROM {_q(nodes[first_id]['name'])} {aliases[0]}"
-            for i, (_idx, from_id) in enumerate(ordered[1:], start=1):
-                sql += f" {kind} JOIN {_q(nodes[from_id]['name'])} {aliases[i]}"
             # 两路兼容：ON 里的 l./r. 也翻译成 a./b.
             if n == 2 and ("l." in on or "r." in on):
                 on = on.replace("l.", "a.").replace("r.", "b.")
-            sql += f" ON {on}"
+            # 组装 SQL。SQL 里每个 JOIN 必须有自己的 ON 子句（DuckDB/标准 SQL）；
+            # 用户只填一段整体 ON，方案：中间的 N-2 个 JOIN 都填 ON TRUE 占位，
+            # 用户整段 ON 放最后一个 JOIN 后。语义等价、DuckDB 优化器会合并处理。
+            first_id = ordered[0][1]
+            sql = f"SELECT {cols} FROM {_q(nodes[first_id]['name'])} {aliases[0]}"
+            tail = ordered[1:]
+            for i, (_idx, from_id) in enumerate(tail, start=1):
+                sql += f" {kind} JOIN {_q(nodes[from_id]['name'])} {aliases[i]}"
+                # 中间 JOIN 用 ON TRUE 占位；最后一个 JOIN 接用户整段条件
+                if i < len(tail):
+                    sql += " ON TRUE"
+                else:
+                    sql += f" ON ({on})"
             steps.append({"node": nid, "name": name,
                           "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
             last_view = name
