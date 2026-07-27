@@ -245,3 +245,85 @@
   font-family: var(--dg-mono); color: var(--dg-text); vertical-align: top; }
 .wf-mod-preview-tbl tr:hover td { background: var(--dg-hover); }
 .wf-mod-preview-more { padding: 6px 10px; color: var(--dg-faint); font-size: 11px; text-align: center; }
+
+/* ---------- 调度浮层 ---------- */
+.wf-sched-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .4); z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+}
+.wf-sched-card {
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px;
+  min-width: 460px; max-width: 560px; max-height: 80vh; overflow: auto;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .4);
+}
+.wf-sched-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--dg-border);
+  color: var(--dg-text); font-size: 14px;
+}
+.wf-sched-hd .x { cursor: pointer; color: var(--dg-muted); padding: 0 6px; }
+.wf-sched-hd .x:hover { color: var(--dg-red); }
+.wf-sched-body { padding: 16px; }
+.wf-sched-body .row { margin-bottom: 14px; }
+.wf-sched-body .row label { display: block; margin-bottom: 4px; color: var(--dg-muted); font-size: 12px; }
+.wf-sched-body select, .wf-sched-body input[type=text], .wf-sched-body input:not([type=checkbox]) {
+  width: 100%; padding: 6px 9px; background: var(--dg-bg); color: var(--dg-text);
+  border: 1px solid var(--dg-border); border-radius: 4px; font-size: 13px;
+  box-sizing: border-box;
+}
+.wf-sched-cron { display: flex; gap: 8px; }
+.wf-sched-cron select { flex: none; width: 160px; }
+.wf-sched-cron input { flex: 1; }
+.wf-attach { display: flex; flex-direction: column; gap: 6px; }
+.wf-attach label { display: flex; align-items: center; gap: 6px; color: var(--dg-text); font-size: 13px; }
+.wf-sched-foot { display: flex; gap: 8px; margin-top: 20px; justify-content: flex-end; }
+.wf-sched-foot .dg-btn.danger { margin-right: auto; }
+
+/* ---------- 运行历史列表 ---------- */
+.wf-history { padding: 16px 8px; }
+.wf-runs { max-width: 900px; margin: 0 auto; }
+.wf-run-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 6px;
+  margin-bottom: 8px; cursor: pointer; transition: border-color .1s;
+}
+.wf-run-row:hover { border-color: var(--dg-accent); }
+.wf-run-row.st-ok { border-left: 3px solid var(--dg-green); }
+.wf-run-row.st-failed { border-left: 3px solid var(--dg-red); }
+.wf-run-row.st-running { border-left: 3px solid var(--dg-amber); }
+.wf-run-status { flex: none; font-weight: 600; min-width: 20px; text-align: center; }
+.wf-run-status.st-ok { color: var(--dg-green); }
+.wf-run-status.st-failed { color: var(--dg-red); }
+.wf-run-status.st-running { color: var(--dg-amber); }
+.wf-run-time { flex: none; color: var(--dg-text); font-family: var(--dg-mono); font-size: 12px; }
+.wf-run-trig {
+  flex: none; font-size: 10px; padding: 2px 6px; border-radius: 3px;
+  background: var(--dg-panel-2); color: var(--dg-muted);
+}
+.wf-run-err { flex: 1; color: var(--dg-red); font-size: 12px; }
+.wf-run-arrow { flex: none; color: var(--dg-faint); font-size: 18px; }
+
+/* ---------- 运行详情页 ---------- */
+.wf-run-page { padding: var(--wf-pad); }
+.wf-run-detail { max-width: 1000px; margin: 0 auto; }
+.wf-run-meta {
+  display: flex; gap: 24px; flex-wrap: wrap; padding: 12px 14px;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 6px;
+  margin-bottom: 14px; font-size: 12px; color: var(--dg-text);
+}
+.wf-run-meta b { color: var(--dg-muted); margin-right: 6px; font-weight: normal; font-size: 11px; }
+.wf-run-steps h3, .wf-run-preview h3 { font-size: 13px; margin: 0 0 10px; color: var(--dg-text); }
+.wf-run-step {
+  display: flex; align-items: center; gap: 10px; padding: 6px 12px;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 4px;
+  margin-bottom: 4px; font-size: 12px;
+}
+.wf-run-step.ok { border-left: 3px solid var(--dg-green); }
+.wf-run-step.err { border-left: 3px solid var(--dg-red); }
+.wf-run-step-idx {
+  flex: none; min-width: 20px; height: 20px; line-height: 20px; text-align: center;
+  background: var(--dg-panel-2); border-radius: 50%; font-size: 10px; color: var(--dg-muted);
+}
+.wf-run-step-name { flex: 1; color: var(--dg-text); font-family: var(--dg-mono); }
+.wf-run-step-rows { flex: none; color: var(--dg-muted); font-size: 11px; }
+.wf-run-preview { margin-top: 20px; }

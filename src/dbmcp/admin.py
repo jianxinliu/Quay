@@ -2275,6 +2275,140 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "workspace": name})
 
+    # ---------- 调度（PR-2） ----------
+
+    @mcp.custom_route("/admin/workflows/schedule", methods=["GET"])
+    @guard
+    async def _wf_schedule_get(req: Request) -> JSONResponse:
+        """取指定 workflow 的调度配置：?name=xxx"""
+        name = req.query_params.get("name") or ""
+        if not name:
+            return JSONResponse({"ok": False, "error": "name 必填"}, status_code=400)
+        try:
+            sched = await anyio.to_thread.run_sync(service.workflow_schedule_get, name)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "schedule": sched})
+
+    @mcp.custom_route("/admin/workflows/schedule", methods=["POST"])
+    @guard
+    async def _wf_schedule_upsert(req: Request) -> JSONResponse:
+        """增/改调度：name / cron_type / cron_value / enabled(0/1) / notify_on /
+        attach_kinds(逗号分隔或 JSON)。"""
+        import json as _json
+        f = await req.form()
+        name = str(f.get("name") or "").strip()
+        cron_type = str(f.get("cron_type") or "").strip()
+        cron_value = str(f.get("cron_value") or "").strip()
+        enabled = str(f.get("enabled") or "1").strip() not in ("0", "false", "no", "")
+        notify_on = str(f.get("notify_on") or "failure").strip()
+        raw_kinds = str(f.get("attach_kinds") or "").strip()
+        kinds: list[str] | None = None
+        if raw_kinds:
+            try:
+                parsed = _json.loads(raw_kinds)
+                if isinstance(parsed, list):
+                    kinds = [str(x) for x in parsed]
+            except ValueError:
+                kinds = [x.strip() for x in raw_kinds.split(",") if x.strip()]
+        if not name or not cron_type or not cron_value:
+            return JSONResponse(
+                {"ok": False, "error": "name / cron_type / cron_value 必填"},
+                status_code=400)
+        try:
+            sched = await anyio.to_thread.run_sync(
+                lambda: service.workflow_schedule_upsert(
+                    name, cron_type, cron_value,
+                    enabled=enabled, notify_on=notify_on, attach_kinds=kinds))
+        except (ValueError, RuntimeError) as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "schedule": sched})
+
+    @mcp.custom_route("/admin/workflows/schedule/delete", methods=["POST"])
+    @guard
+    async def _wf_schedule_delete(req: Request) -> JSONResponse:
+        f = await req.form()
+        name = str(f.get("name") or "").strip()
+        if not name:
+            return JSONResponse({"ok": False, "error": "name 必填"}, status_code=400)
+        try:
+            await anyio.to_thread.run_sync(service.workflow_schedule_delete, name)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True})
+
+    # ---------- 运行历史 & 详情 & xlsx 下载 ----------
+
+    @mcp.custom_route("/admin/workflows/runs", methods=["GET"])
+    @guard
+    async def _wf_runs(req: Request) -> JSONResponse:
+        """?name=xxx&limit=50 → 该 workflow 的运行历史（started_at DESC）。"""
+        name = req.query_params.get("name") or ""
+        try:
+            limit = int(req.query_params.get("limit") or "50")
+        except ValueError:
+            limit = 50
+        if not name:
+            return JSONResponse({"ok": False, "error": "name 必填"}, status_code=400)
+        try:
+            runs = await anyio.to_thread.run_sync(
+                lambda: service.workflow_runs_list(name, limit))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "runs": runs})
+
+    @mcp.custom_route("/admin/workflows/runs/{run_id:int}/detail", methods=["GET"])
+    @guard
+    async def _wf_run_detail(req: Request) -> JSONResponse:
+        try:
+            run_id = int(req.path_params["run_id"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "run_id 非法"}, status_code=400)
+        try:
+            run = await anyio.to_thread.run_sync(service.workflow_run_get, run_id)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "运行记录不存在"}, status_code=404)
+        return JSONResponse({"ok": True, "run": run})
+
+    @mcp.custom_route("/admin/workflows/runs/{run_id:int}", methods=["GET"])
+    @guard
+    async def _wf_run_page(req: Request) -> HTMLResponse:
+        """运行详情页 HTML shell（Vue 挂载点由 workflows.js 里的 App 处理）。"""
+        body = ('<div id="wf-app"></div>'
+                '<link rel="stylesheet" href="/admin/static/workflows.css">'
+                '<script src="/admin/static/vue.global.prod.js"></script>'
+                '<script src="/admin/static/dg-select.js"></script>'
+                '<script src="/admin/static/workflows.js"></script>')
+        return _shell("运行详情", body, doc=False)
+
+    @mcp.custom_route(
+        "/admin/workflows/runs/{run_id:int}/download/output.xlsx", methods=["GET"])
+    @guard
+    async def _wf_run_xlsx(req: Request) -> Response:
+        """下载 workflow 运行的 xlsx 产物（仅当 attach_kinds 含 xlsx_link 时存在）。"""
+        from pathlib import Path
+        try:
+            run_id = int(req.path_params["run_id"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "run_id 非法"}, status_code=400)
+        run = service.workflow_run_get(run_id)
+        if not run or not run.get("xlsx_path"):
+            return JSONResponse({"ok": False, "error": "xlsx 不存在"}, status_code=404)
+        if not service.data_dir:
+            return JSONResponse({"ok": False, "error": "data_dir 未配置"}, status_code=500)
+        full = Path(service.data_dir) / run["xlsx_path"]
+        try:
+            data = full.read_bytes()
+        except OSError:
+            return JSONResponse({"ok": False, "error": "xlsx 文件缺失"}, status_code=404)
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":
+                     f'attachment; filename="workflow-run-{run_id}.xlsx"'})
+
     @mcp.custom_route("/admin/sql/search_tables", methods=["GET"])
     @guard
     async def _sql_search_tables(req: Request) -> JSONResponse:

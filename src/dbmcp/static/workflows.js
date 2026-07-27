@@ -31,11 +31,16 @@
   }
 
   function parseHash() {
+    // 详情页 SPA hash 路由。运行详情页 (/admin/workflows/runs/{id}) 不走 hash，
+    // 而是让服务端渲染同一个 shell + 由 pathname 触发不同视图。
     var h = (location.hash || "").replace(/^#/, "");
+    // 服务端渲染的运行详情页：pathname 形如 /admin/workflows/runs/42
+    var m = /^\/admin\/workflows\/runs\/(\d+)/.exec(location.pathname || "");
+    if (m) return { view: "run", runId: parseInt(m[1], 10) };
     if (!h) return { view: "list" };
     if (h === "new") return { view: "new" };
-    var m = /^name=(.+)$/.exec(h);
-    if (m) return { view: "detail", name: decodeURIComponent(m[1]) };
+    var m2 = /^name=(.+)$/.exec(h);
+    if (m2) return { view: "detail", name: decodeURIComponent(m2[1]) };
     return { view: "list" };
   }
 
@@ -696,7 +701,19 @@
         runOut: null,
         runBusy: false,
         runErr: "",
-        saveTimer: null
+        saveTimer: null,
+        // 调度浮层
+        schedOpen: false,
+        schedForm: { cron_type: "interval", cron_value: "5", enabled: true,
+                     notify_on: "failure", attach_kinds: ["summary"] },
+        schedLoading: false,
+        schedError: "",
+        // 运行历史
+        runsList: [],
+        runsLoading: false,
+        // 运行详情（view=run）
+        currentRun: null,
+        currentRunErr: ""
       };
     },
     computed: {
@@ -728,8 +745,90 @@
       onHashChange: function () {
         this.route = parseHash();
         this.runOut = null; this.runErr = "";
+        this.schedOpen = false;
+        this.currentRun = null; this.currentRunErr = "";
         if (this.route.view === "detail") this.loadOne(this.route.name);
         if (this.route.view === "new") this.refreshWorkspaces();
+        if (this.route.view === "run") this.loadRun(this.route.runId);
+      },
+      // ---------- 调度浮层 ----------
+      openSchedule: function () {
+        if (!this.current) return;
+        this.schedOpen = true;
+        this.schedError = "";
+        this.schedLoading = true;
+        var self = this;
+        apiGet(API + "/schedule?name=" + encodeURIComponent(this.current.name))
+          .then(function (d) {
+            self.schedLoading = false;
+            if (d && d.ok && d.schedule) {
+              self.schedForm = {
+                cron_type: d.schedule.cron_type,
+                cron_value: d.schedule.cron_value,
+                enabled: d.schedule.enabled,
+                notify_on: d.schedule.notify_on,
+                attach_kinds: d.schedule.attach_kinds || ["summary"]
+              };
+            } else {
+              // 默认：每 5 分钟，只失败通知，summary
+              self.schedForm = { cron_type: "interval", cron_value: "5",
+                                 enabled: true, notify_on: "failure",
+                                 attach_kinds: ["summary"] };
+            }
+          });
+      },
+      saveSchedule: function () {
+        if (!this.current) return;
+        var self = this;
+        self.schedError = "";
+        apiPost(API + "/schedule", {
+          name: self.current.name,
+          cron_type: self.schedForm.cron_type,
+          cron_value: self.schedForm.cron_value,
+          enabled: self.schedForm.enabled ? "1" : "0",
+          notify_on: self.schedForm.notify_on,
+          attach_kinds: JSON.stringify(self.schedForm.attach_kinds || [])
+        }).then(function (d) {
+          if (!d.ok) { self.schedError = d.error || "保存失败"; return; }
+          self.schedOpen = false;
+        });
+      },
+      deleteSchedule: function () {
+        if (!this.current) return;
+        if (!window.confirm("确认删除该 workflow 的调度？")) return;
+        var self = this;
+        apiPost(API + "/schedule/delete", { name: self.current.name }).then(function () {
+          self.schedOpen = false;
+        });
+      },
+      toggleAttach: function (kind) {
+        var kinds = this.schedForm.attach_kinds || [];
+        var idx = kinds.indexOf(kind);
+        if (idx >= 0) kinds.splice(idx, 1);
+        else kinds.push(kind);
+        this.schedForm.attach_kinds = kinds.slice();  // 触发 reactivity
+      },
+      // ---------- 运行历史 ----------
+      loadRuns: function () {
+        if (!this.current) return;
+        var self = this;
+        self.runsLoading = true;
+        apiGet(API + "/runs?name=" + encodeURIComponent(this.current.name) + "&limit=50")
+          .then(function (d) {
+            self.runsLoading = false;
+            self.runsList = d && d.ok ? (d.runs || []) : [];
+          });
+      },
+      openRun: function (runId) {
+        // 跳到服务端渲染的详情页（新页 shell 会读 pathname）
+        location.href = "/admin/workflows/runs/" + runId;
+      },
+      loadRun: function (runId) {
+        var self = this;
+        apiGet(API + "/runs/" + runId + "/detail").then(function (d) {
+          if (!d || !d.ok) { self.currentRunErr = (d && d.error) || "加载失败"; return; }
+          self.currentRun = d.run;
+        });
       },
       loadOne: function (name) {
         var self = this;
@@ -828,9 +927,11 @@
     },
     mounted: function () {
       window.addEventListener("hashchange", this.onHashChange);
+      // 列表页 / 新建页需要 list & workspaces；详情页/运行详情页也顺便刷一下
       this.refresh();
       this.refreshWorkspaces();
       if (this.route.view === "detail") this.loadOne(this.route.name);
+      if (this.route.view === "run") this.loadRun(this.route.runId);
     },
     unmounted: function () {
       window.removeEventListener("hashchange", this.onHashChange);
@@ -887,7 +988,9 @@
       +     '<div class="wf-tabs">'
       +       '<button :class="{active: viewMode===\'blueprint\'}" @click="viewMode=\'blueprint\'">蓝图</button>'
       +       '<button :class="{active: viewMode===\'modules\'}" @click="viewMode=\'modules\'">模块</button>'
+      +       '<button :class="{active: viewMode===\'history\'}" @click="viewMode=\'history\'; loadRuns()">历史</button>'
       +     '</div>'
+      +     '<button class="dg-btn" @click="openSchedule" title="定时执行 + 通知设置">⚙ 调度</button>'
       +     '<button class="dg-btn run" @click="runCurrent" :disabled="runBusy">'
       +       '{{ runBusy ? "运行中…" : "▶ 运行" }}</button>'
       +   '</div>'
@@ -895,12 +998,125 @@
       +   '<div v-else class="wf-detail-body">'
       +     '<wf-blueprint v-if="viewMode===\'blueprint\'" :graph="current.graph" :conn="\'analysis/\' + current.workspace" '
       +       '@update:graph="onGraphUpdate" @run="runCurrent"/>'
-      +     '<wf-modules v-else :graph="current.graph" :workspace="current.workspace" '
+      +     '<wf-modules v-else-if="viewMode===\'modules\'" :graph="current.graph" :workspace="current.workspace" '
       +       '@update:graph="onGraphUpdate"/>'
+      // 历史 tab
+      +     '<div v-else-if="viewMode===\'history\'" class="wf-history">'
+      +       '<div v-if="runsLoading" class="wf-empty">加载中…</div>'
+      +       '<div v-else-if="!runsList.length" class="wf-empty">还没有运行记录。点上方「▶ 运行」执行一次，或建调度让它定时跑。</div>'
+      +       '<div v-else class="wf-runs">'
+      +         '<div v-for="r in runsList" :key="r.id" class="wf-run-row"'
+      +            ' :class="[\'st-\'+r.status]" @click="openRun(r.id)">'
+      +           '<span class="wf-run-status">{{ r.status===\'ok\' ? \'✓\' : r.status===\'failed\' ? \'✗\' : \'⟳\' }}</span>'
+      +           '<span class="wf-run-time">{{ fmtTime(r.started_at) }}</span>'
+      +           '<span class="wf-run-trig">{{ r.triggered_by }}</span>'
+      +           '<span class="wf-run-err" v-if="r.error">{{ r.error.slice(0, 80) }}</span>'
+      +           '<span class="wf-run-arrow">›</span>'
+      +         '</div>'
+      +       '</div>'
+      +     '</div>'
       +     '<div v-if="runErr" class="wf-run-out"><h3>运行失败</h3><pre>{{ runErr }}</pre></div>'
       +     '<div v-if="runOut" class="wf-run-out">'
       +       '<h3>运行结果</h3>'
       +       '<pre>{{ JSON.stringify(runOut, null, 2).slice(0, 2000) }}</pre>'
+      +     '</div>'
+      +   '</div>'
+      // 调度浮层
+      +   '<div v-if="schedOpen" class="wf-sched-overlay" @click.self="schedOpen=false">'
+      +     '<div class="wf-sched-card">'
+      +       '<div class="wf-sched-hd">'
+      +         '<b>⚙ 调度设置</b>'
+      +         '<span class="x" @click="schedOpen=false">✕</span>'
+      +       '</div>'
+      +       '<div v-if="schedLoading" class="wf-empty">加载中…</div>'
+      +       '<div v-else class="wf-sched-body">'
+      +         '<div class="row">'
+      +           '<label>频率</label>'
+      +           '<div class="wf-sched-cron">'
+      +             '<select v-model="schedForm.cron_type">'
+      +               '<option value="interval">每 N 分钟</option>'
+      +               '<option value="daily">每天</option>'
+      +               '<option value="weekly">每周</option>'
+      +               '<option value="monthly">每月</option>'
+      +               '<option value="cron">Cron 表达式（高级）</option>'
+      +             '</select>'
+      +             '<input v-model="schedForm.cron_value" '
+      +                ':placeholder="schedForm.cron_type===\'interval\'?\'5\':'
+      +                'schedForm.cron_type===\'daily\'?\'09:30\':'
+      +                'schedForm.cron_type===\'weekly\'?\'1 09:30（1=周一，0=周日）\':'
+      +                'schedForm.cron_type===\'monthly\'?\'15 09:00（每月15日）\':\'*/5 * * * *\'">'
+      +           '</div>'
+      +         '</div>'
+      +         '<div class="row"><label><input type="checkbox" v-model="schedForm.enabled"> 启用</label></div>'
+      +         '<div class="row">'
+      +           '<label>通知策略</label>'
+      +           '<select v-model="schedForm.notify_on">'
+      +             '<option value="failure">仅失败时（推荐）</option>'
+      +             '<option value="success">仅成功时</option>'
+      +             '<option value="always">每次都通知</option>'
+      +             '<option value="none">不通知</option>'
+      +           '</select>'
+      +         '</div>'
+      +         '<div class="row">'
+      +           '<label>通知产物</label>'
+      +           '<div class="wf-attach">'
+      +             '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'summary\')>=0"'
+      +               ' @change="toggleAttach(\'summary\')"> 摘要 + 链接</label>'
+      +             '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'markdown_table\')>=0"'
+      +               ' @change="toggleAttach(\'markdown_table\')"> Markdown 表格</label>'
+      +             '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'xlsx_link\')>=0"'
+      +               ' @change="toggleAttach(\'xlsx_link\')"> xlsx 下载链接</label>'
+      +           '</div>'
+      +         '</div>'
+      +         '<div v-if="schedError" class="wf-err">{{ schedError }}</div>'
+      +         '<div class="wf-sched-foot">'
+      +           '<button class="dg-btn danger" @click="deleteSchedule">删除调度</button>'
+      +           '<button class="dg-btn" @click="schedOpen=false">取消</button>'
+      +           '<button class="dg-btn run" @click="saveSchedule">保存</button>'
+      +         '</div>'
+      +       '</div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+      // ============ 运行详情页 ============
+      + '<div v-else-if="route.view===\'run\'" class="wf-run-page">'
+      +   '<div class="wf-detail-hd">'
+      +     '<a href="/admin/workflows">← 返回流程列表</a>'
+      +     '<b v-if="currentRun">运行 #{{ currentRun.id }}</b>'
+      +     '<a v-if="currentRun" :href="\'/admin/workflows#name=\' + encodeURIComponent(currentRun.name)"'
+      +       ' class="wf-ws">{{ currentRun.name }}</a>'
+      +     '<span v-if="currentRun" class="wf-run-status" :class="\'st-\'+currentRun.status">'
+      +       '{{ currentRun.status===\'ok\' ? \'✓ 成功\' : currentRun.status===\'failed\' ? \'✗ 失败\' : \'⟳ 运行中\' }}</span>'
+      +   '</div>'
+      +   '<div v-if="currentRunErr" class="wf-err">{{ currentRunErr }}</div>'
+      +   '<div v-else-if="!currentRun" class="wf-empty">加载中…</div>'
+      +   '<div v-else class="wf-detail-body wf-run-detail">'
+      +     '<div class="wf-run-meta">'
+      +       '<div><b>触发方式</b> {{ currentRun.triggered_by }}</div>'
+      +       '<div><b>开始</b> {{ fmtTime(currentRun.started_at) }}</div>'
+      +       '<div v-if="currentRun.finished_at"><b>结束</b> {{ fmtTime(currentRun.finished_at) }}</div>'
+      +       '<div v-if="currentRun.xlsx_path">'
+      +         '<a :href="\'/admin/workflows/runs/\'+currentRun.id+\'/download/output.xlsx\'" class="dg-btn sm">⬇ 下载 xlsx</a>'
+      +       '</div>'
+      +     '</div>'
+      +     '<div v-if="currentRun.error" class="wf-run-out"><h3>错误信息</h3><pre>{{ currentRun.error }}</pre></div>'
+      +     '<div v-if="currentRun.steps && currentRun.steps.length" class="wf-run-steps">'
+      +       '<h3>步骤（{{ currentRun.steps.length }}）</h3>'
+      +       '<div v-for="(s, i) in currentRun.steps" :key="i" class="wf-run-step"'
+      +          ' :class="s.ok ? \'ok\' : \'err\'">'
+      +         '<span class="wf-run-step-idx">{{ i+1 }}</span>'
+      +         '<span class="wf-run-step-name">{{ s.step || s.name }}</span>'
+      +         '<span v-if="s.rows != null" class="wf-run-step-rows">{{ s.rows }} 行</span>'
+      +         '<span v-if="s.error" class="wf-run-err">{{ s.error }}</span>'
+      +       '</div>'
+      +     '</div>'
+      +     '<div v-if="currentRun.output_preview && currentRun.output_preview.columns" class="wf-run-preview">'
+      +       '<h3>输出预览（{{ currentRun.output_preview.row_count }} 行）</h3>'
+      +       '<div class="wf-mod-preview-tbl"><table>'
+      +         '<thead><tr><th v-for="c in currentRun.output_preview.columns" :key="c">{{ c }}</th></tr></thead>'
+      +         '<tbody><tr v-for="(r, ri) in currentRun.output_preview.rows.slice(0, 50)" :key="ri">'
+      +           '<td v-for="(v, ci) in r" :key="ci">{{ v == null ? "" : String(v).slice(0, 80) }}</td>'
+      +         '</tr></tbody></table></div>'
       +     '</div>'
       +   '</div>'
       + '</div>'
