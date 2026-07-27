@@ -297,6 +297,14 @@ def _resolve_api_key(key_env: str) -> str:
     return os.environ.get((key_env or "DBM_AI_API_KEY").strip(), "")
 
 
+def _proxy_hint() -> str:
+    """403/连接错时的排查提示：已配代理→提示检查连通性；未配→提示可能需要代理。"""
+    p = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if p:
+        return f"（当前 HTTPS_PROXY={p}，若代理挂了或无权访问该 API 会 403，请检查代理进程和地区策略）"
+    return "（若在受限网络访问 Anthropic/OpenAI 常需代理；macOS 可在系统设置里开启代理，dbm-serve.sh 会自动继承）"
+
+
 def _run_api(prompt: str, *, model: str, timeout: int, session_id: str | None,
              base: str, fmt: str, key_env: str) -> tuple[str, str]:
     """直连 HTTP API（Anthropic Messages / OpenAI Chat）。密钥从 keyring/env 读，绝不落库/日志。
@@ -327,7 +335,9 @@ def _run_api(prompt: str, *, model: str, timeout: int, session_id: str | None,
             body = {"model": model or "claude-sonnet-5", "max_tokens": 4096, "messages": messages}
         resp = httpx.post(url, json=body, headers=headers, timeout=timeout)
     except httpx.HTTPError as e:
-        raise AIError(f"调用 API 失败：{e}") from e
+        raise AIError(f"调用 API 失败：{e}{_proxy_hint()}") from e
+    if resp.status_code in (401, 403):
+        raise AIError(f"API 返回 {resp.status_code}：{resp.text[:300]}{_proxy_hint()}")
     if resp.status_code != 200:
         raise AIError(f"API 返回 {resp.status_code}：{resp.text[:300]}")
     data = resp.json()
