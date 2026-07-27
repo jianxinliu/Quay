@@ -805,6 +805,8 @@ table.dg-rt th .ctype { display: inline-block; width: 15px; margin-right: 5px; t
 table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-ctx-backdrop { position: fixed; inset: 0; z-index: 190; }
 .dg-colmenu { z-index: 191; min-width: 180px; }
+/* 带 backdrop 的右键菜单必须盖在 backdrop(190) 之上，否则点按钮会先命中 backdrop 把菜单关掉 */
+.dg-dbmenu { z-index: 191; }
 .dg-colmenu button.on { color: var(--dg-accent); font-weight: 600; }
 .dg-colmenu button.on::before { content: "✓ "; }
 /* Value 面板 Record 视图：字段名 + 类型标签 + 值（JSON 美化） */

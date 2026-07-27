@@ -3852,7 +3852,7 @@
   <!-- 库/连接节点右键菜单：重连数据库（连接被判不可用/exhausted 后自愈） -->
   <template v-if="dbCtx.show">
     <div class="dg-ctx-backdrop" @click="closeDbCtx" @contextmenu.prevent="closeDbCtx"></div>
-    <div class="dg-ctx" :style="{left: dbCtx.x+'px', top: dbCtx.y+'px'}" @click.stop>
+    <div class="dg-ctx dg-dbmenu" :style="{left: dbCtx.x+'px', top: dbCtx.y+'px'}" @click.stop>
       <div class="hd">{{ dbCtx.conn }}</div>
       <button :disabled="reconnecting" @click="reconnect(dbCtx.conn)">{{ reconnecting ? "重连中…" : "↻ 重连数据库" }}</button>
     </div>
