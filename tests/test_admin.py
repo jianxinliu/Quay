@@ -755,6 +755,94 @@ def test_ai_route_generates_when_enabled(client, monkeypatch):
     assert d["session_id"] == "sid-9"
 
 
+def test_workflow_new_page_and_list_route(client):
+    """新页 GET /admin/workflows 返 HTML shell（含 Vue 挂载点）；老 JSON 迁到 /list。"""
+    tc, _ = client
+    r = tc.get("/admin/workflows")
+    assert r.status_code == 200
+    assert 'id="wf-app"' in r.text and "workflows.js" in r.text
+    # 老 JSON 端点被搬到 /list
+    r2 = tc.get("/admin/workflows/list")
+    assert r2.status_code == 200 and r2.json()["ok"] is True
+
+
+def test_workflow_preview_columns_http(client, tmp_path):
+    """preview_columns 路由：成功返回列/类型；参数缺失 400；graph 非法 400。"""
+    import json as _json
+
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    g = {"nodes": [
+        {"id": "a", "type": "source", "name": "u",
+         "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}},
+        {"id": "b", "type": "filter", "name": "flt", "cfg": {"where": "id >= 1"}}],
+        "edges": [{"from": "a", "to": "b", "port": "in"}]}
+    r = tc.post("/admin/workflows/preview_columns",
+                data={"workspace": "ws1", "node": "b", "graph": _json.dumps(g)})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert {c["name"] for c in d["columns"]} >= {"id", "name"}
+    # 参数缺失
+    r2 = tc.post("/admin/workflows/preview_columns", data={"node": "b"})
+    assert r2.status_code == 400
+    # graph 非法 JSON
+    r3 = tc.post("/admin/workflows/preview_columns",
+                 data={"workspace": "ws1", "node": "b", "graph": "not-json"})
+    assert r3.status_code == 400
+
+
+def test_workflow_preview_node_http(client, tmp_path):
+    """preview_node 路由：拿前 N 行数据，走 analysis 沙箱。"""
+    import json as _json
+
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    g = {"nodes": [{"id": "a", "type": "source", "name": "u",
+                    "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}}],
+         "edges": []}
+    r = tc.post("/admin/workflows/preview_node",
+                data={"workspace": "ws1", "node": "a", "graph": _json.dumps(g), "limit": "5"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert set(d["columns"]) >= {"id", "name"}
+    assert d["row_count"] >= 1
+
+
+def test_workflow_workspaces_http(client, tmp_path):
+    """workspaces 列表路由：analysis 未初始化时应友好错误，初始化后能列出。"""
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    # 未初始化 analysis → analysis_overview 抛
+    r = tc.get("/admin/workflows/workspaces")
+    assert r.status_code == 400
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    r2 = tc.get("/admin/workflows/workspaces")
+    assert r2.status_code == 200 and r2.json()["ok"] is True
+
+
+def test_workflow_workspace_create_http(client, tmp_path):
+    """workspace_create 路由：建成功后能被 workspaces 列表返回；重名幂等。"""
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    # 空名 400
+    r0 = tc.post("/admin/workflows/workspace_create", data={"name": ""})
+    assert r0.status_code == 400
+    # 建成功
+    r = tc.post("/admin/workflows/workspace_create", data={"name": "ws_test"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # 列表能看到
+    ws = tc.get("/admin/workflows/workspaces").json()["workspaces"]
+    assert any(w["workspace"] == "ws_test" for w in ws)
+    # 幂等（DuckDB 里再连一次即可，不报错）
+    r2 = tc.post("/admin/workflows/workspace_create", data={"name": "ws_test"})
+    assert r2.status_code == 200
+
+
 def test_workflow_ai_gated_and_generates(client, monkeypatch):
     """流程 AI 路由：未开启 403；开启后返回校验通过的 graph（假 ai.generate_workflow）。"""
     from dbmcp import ai
@@ -779,3 +867,126 @@ def test_workflow_ai_gated_and_generates(client, monkeypatch):
     assert d["ok"] is True
     assert [n["name"] for n in d["graph"]["nodes"]] == ["src", "out"]
     assert all("x" in n and "y" in n for n in d["graph"]["nodes"])  # 已排版
+
+
+# ==============================================================
+# PR-2：调度 / 运行历史 / xlsx 下载 HTTP 路由
+# ==============================================================
+
+
+def _prep_pr2_service(svc, tmp_path):
+    """给 client fixture 的 svc 补上 workflows/schedules/runs/analysis 并建一个 workflow。"""
+    from dbmcp.analysis import AnalysisStore
+    from dbmcp.service import CallerInfo as CI
+    from dbmcp.workflows import WorkflowRunStore, WorkflowScheduleStore, WorkflowStore
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    svc.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+    svc.schedules = WorkflowScheduleStore(tmp_path / "sched.sqlite3")
+    svc.runs = WorkflowRunStore(tmp_path / "runs.sqlite3")
+    svc.data_dir = str(tmp_path / "data")
+    caller = CI(agent="pytest/1.0", session_id="s1")
+    g = {"nodes": [{"id": "a", "type": "source", "name": "u", "x": 0, "y": 0,
+                    "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}}],
+         "edges": []}
+    svc.workflow_save("wf_pr2", "ws_pr2", "", caller, graph=g)
+
+
+def test_workflow_schedule_get_upsert_delete(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    # 空 name → 400
+    r0 = tc.post("/admin/workflows/schedule",
+                 data={"name": "", "cron_type": "interval", "cron_value": "5"})
+    assert r0.status_code == 400
+    # workflow 不存在 → 400
+    r1 = tc.post("/admin/workflows/schedule",
+                 data={"name": "nope", "cron_type": "interval", "cron_value": "5"})
+    assert r1.status_code == 400
+    # 建
+    r2 = tc.post("/admin/workflows/schedule",
+                 data={"name": "wf_pr2", "cron_type": "interval", "cron_value": "5",
+                       "notify_on": "always", "attach_kinds": "summary,markdown_table"})
+    assert r2.status_code == 200 and r2.json()["ok"] is True
+    got = r2.json()["schedule"]
+    assert got["notify_on"] == "always"
+    assert set(got["attach_kinds"]) == {"summary", "markdown_table"}
+    # 读
+    r3 = tc.get("/admin/workflows/schedule?name=wf_pr2")
+    assert r3.status_code == 200 and r3.json()["schedule"]["cron_type"] == "interval"
+    # 改（改 cron_value + enabled=0）
+    r4 = tc.post("/admin/workflows/schedule",
+                 data={"name": "wf_pr2", "cron_type": "daily", "cron_value": "09:00",
+                       "enabled": "0"})
+    assert r4.status_code == 200
+    assert r4.json()["schedule"]["enabled"] is False
+    # 删
+    r5 = tc.post("/admin/workflows/schedule/delete", data={"name": "wf_pr2"})
+    assert r5.status_code == 200
+    r6 = tc.get("/admin/workflows/schedule?name=wf_pr2")
+    assert r6.status_code == 200 and r6.json()["schedule"] is None
+
+
+def test_workflow_schedule_rejects_bad_cron(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    r = tc.post("/admin/workflows/schedule",
+                data={"name": "wf_pr2", "cron_type": "interval", "cron_value": "9999"})
+    assert r.status_code == 400
+    r2 = tc.post("/admin/workflows/schedule",
+                 data={"name": "wf_pr2", "cron_type": "daily", "cron_value": "25:00"})
+    assert r2.status_code == 400
+
+
+def test_workflow_runs_and_detail(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    # 触发一次调度产生 run 记录
+    svc.workflow_schedule_upsert("wf_pr2", "interval", "5", notify_on="none")
+    svc._run_scheduled("wf_pr2")  # noqa: SLF001
+    r1 = tc.get("/admin/workflows/runs?name=wf_pr2")
+    assert r1.status_code == 200
+    runs = r1.json()["runs"]
+    assert len(runs) == 1 and runs[0]["status"] == "ok"
+    run_id = runs[0]["id"]
+    r2 = tc.get(f"/admin/workflows/runs/{run_id}/detail")
+    assert r2.status_code == 200
+    assert r2.json()["run"]["id"] == run_id
+    # 不存在的 id → 404
+    r3 = tc.get("/admin/workflows/runs/99999/detail")
+    assert r3.status_code == 404
+
+
+def test_workflow_run_detail_page_shell(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    svc.workflow_schedule_upsert("wf_pr2", "interval", "5", notify_on="none")
+    svc._run_scheduled("wf_pr2")  # noqa: SLF001
+    run_id = svc.workflow_runs_list("wf_pr2")[0]["id"]
+    r = tc.get(f"/admin/workflows/runs/{run_id}")
+    assert r.status_code == 200
+    assert 'id="wf-app"' in r.text and "workflows.js" in r.text
+
+
+def test_workflow_run_xlsx_download(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    svc.workflow_schedule_upsert("wf_pr2", "interval", "5",
+                                  attach_kinds=["summary", "xlsx_link"])
+    svc._run_scheduled("wf_pr2")  # noqa: SLF001
+    run_id = svc.workflow_runs_list("wf_pr2")[0]["id"]
+    r = tc.get(f"/admin/workflows/runs/{run_id}/download/output.xlsx")
+    assert r.status_code == 200
+    ct = r.headers.get("content-type", "")
+    assert "spreadsheet" in ct
+    assert r.content[:2] == b"PK"  # xlsx 是 zip
+
+
+def test_workflow_run_xlsx_download_missing(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    # 未含 xlsx_link → 没落文件
+    svc.workflow_schedule_upsert("wf_pr2", "interval", "5", attach_kinds=["summary"])
+    svc._run_scheduled("wf_pr2")  # noqa: SLF001
+    run_id = svc.workflow_runs_list("wf_pr2")[0]["id"]
+    r = tc.get(f"/admin/workflows/runs/{run_id}/download/output.xlsx")
+    assert r.status_code == 404

@@ -259,7 +259,8 @@ class TestGraph:
         assert "GROUP BY name" in plan["steps"][1]["sql"]
         assert plan["steps"][2]["sql"] == 'SELECT * FROM "stats" ORDER BY n DESC LIMIT 100'
 
-    def test_compile_join_ports(self):
+    def test_compile_join_two_way_legacy_ports(self):
+        """老图端口 left/right 兼容为 in_1/in_2；老 cfg 的 l./r. 别名也翻译为 a./b."""
         from dbmcp.workflows import compile_graph
         g = {"nodes": [
                 _node("a", "source", "o", conn="p/c", sql="SELECT 1"),
@@ -268,7 +269,70 @@ class TestGraph:
              "edges": [{"from": "a", "to": "j", "port": "left"},
                        {"from": "b", "to": "j", "port": "right"}]}
         sql = compile_graph(g)["steps"][0]["sql"]
-        assert 'FROM "o" l LEFT JOIN "u" r ON l.uid = r.id' in sql
+        assert 'FROM "o" a LEFT JOIN "u" b ON (a.uid = b.id)' in sql
+
+    def test_compile_join_two_way_new_ports(self):
+        """新格式 in_1/in_2 端口 + a/b 别名。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("a", "source", "o", conn="p/c", sql="SELECT 1"),
+                _node("b", "source", "u", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "ou", kind="INNER", on="a.uid = b.id")],
+             "edges": [{"from": "a", "to": "j", "port": "in_1"},
+                       {"from": "b", "to": "j", "port": "in_2"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert 'FROM "o" a INNER JOIN "u" b ON (a.uid = b.id)' in sql
+
+    def test_compile_join_three_way(self):
+        """3 路 JOIN：别名 a/b/c；中间 JOIN 用 ON TRUE 占位，用户整段 ON 放最后
+        （DuckDB/标准 SQL 要求每个 JOIN 各带 ON 子句，本工程用整段 ON 语义等价）。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s1", "source", "orders", conn="p/c", sql="SELECT 1"),
+                _node("s2", "source", "users", conn="p/c", sql="SELECT 1"),
+                _node("s3", "source", "goods", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "j3", kind="INNER",
+                      on="a.uid=b.id AND a.gid=c.id",
+                      select="a.oid, b.name, c.title")],
+             "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                       {"from": "s2", "to": "j", "port": "in_2"},
+                       {"from": "s3", "to": "j", "port": "in_3"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert ('SELECT a.oid, b.name, c.title FROM "orders" a INNER JOIN "users" b ON TRUE'
+                ' INNER JOIN "goods" c ON (a.uid=b.id AND a.gid=c.id)') in sql
+
+    def test_compile_join_port_order_matters(self):
+        """端口序号决定 JOIN 顺序：in_2 早于 in_3 出现在 SQL 中，即使 edge 定义顺序反了。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s1", "source", "t1", conn="p/c", sql="SELECT 1"),
+                _node("s2", "source", "t2", conn="p/c", sql="SELECT 1"),
+                _node("s3", "source", "t3", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "jj", on="a.x=b.x AND b.y=c.y")],
+             "edges": [{"from": "s3", "to": "j", "port": "in_3"},
+                       {"from": "s1", "to": "j", "port": "in_1"},
+                       {"from": "s2", "to": "j", "port": "in_2"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        # a=t1, b=t2, c=t3
+        assert 'FROM "t1" a' in sql
+        assert '"t2" b' in sql
+        assert '"t3" c' in sql
+        # b 出现在 c 之前
+        assert sql.index('"t2" b') < sql.index('"t3" c')
+
+    def test_compile_join_default_select_n_way(self):
+        """N 路 JOIN 未指定 SELECT 时默认展开 a.*, b.*, c.*..."""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s1", "source", "t1", conn="p/c", sql="SELECT 1"),
+                _node("s2", "source", "t2", conn="p/c", sql="SELECT 1"),
+                _node("s3", "source", "t3", conn="p/c", sql="SELECT 1"),
+                _node("j", "join", "jj", on="a.x=b.x AND b.y=c.y")],
+             "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                       {"from": "s2", "to": "j", "port": "in_2"},
+                       {"from": "s3", "to": "j", "port": "in_3"}]}
+        sql = compile_graph(g)["steps"][0]["sql"]
+        assert 'SELECT a.*, b.*, c.*' in sql
 
     def test_compile_errors(self):
         from dbmcp.workflows import WorkflowError, compile_graph
@@ -278,10 +342,16 @@ class TestGraph:
             compile_graph({"nodes": [_node("a", "filter", "1bad", where="x")], "edges": []})
         with pytest.raises(WorkflowError, match="缺少输入"):
             compile_graph({"nodes": [_node("a", "filter", "f", where="x")], "edges": []})
-        with pytest.raises(WorkflowError, match="接满左右"):
+        with pytest.raises(WorkflowError, match="至少需要两个输入"):
             compile_graph({"nodes": [_node("a", "source", "s", conn="p/c", sql="SELECT 1"),
-                                     _node("j", "join", "jj", on="l.a=r.b")],
-                           "edges": [{"from": "a", "to": "j", "port": "left"}]})
+                                     _node("j", "join", "jj", on="a.x=b.x")],
+                           "edges": [{"from": "a", "to": "j", "port": "in_1"}]})
+        with pytest.raises(WorkflowError, match="缺少 ON"):
+            compile_graph({"nodes": [_node("s1", "source", "t1", conn="p/c", sql="SELECT 1"),
+                                     _node("s2", "source", "t2", conn="p/c", sql="SELECT 1"),
+                                     _node("j", "join", "jj")],
+                           "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                                     {"from": "s2", "to": "j", "port": "in_2"}]})
         with pytest.raises(WorkflowError, match="存在环"):
             compile_graph({"nodes": [_node("a", "filter", "f1", where="x"),
                                      _node("b", "filter", "f2", where="y")],
@@ -310,6 +380,104 @@ class TestGraph:
         # 中间节点是工作区里的视图，可单独预览
         prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
         assert prev["rows"][0][0] == 2
+
+    def test_preview_columns_lazy_and_refresh(self, service, tmp_path):
+        """preview_columns：懒建模式复用已存 view；refresh=True 强制重建。"""
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30"),
+                _node("c", "aggregate", "stats", group="", aggs="count(*) AS n")],
+             "edges": [{"from": "a", "to": "b", "port": "in"},
+                       {"from": "b", "to": "c", "port": "in"}]}
+        # 首次预览 b：懒建应从空工作区物化 source a + step b
+        out = service.workflow_preview_columns("ws1", g, "b", CALLER)
+        assert out["columns"] and {c["name"] for c in out["columns"]} == {"id", "name", "age"}
+        assert "error" not in out
+        # 第二次同节点：懒模式命中已建 view，直接 DESCRIBE
+        out2 = service.workflow_preview_columns("ws1", g, "b", CALLER)
+        assert out2 == out
+        # 预览 c：会追加建 c，b 已存不再重跑
+        outc = service.workflow_preview_columns("ws1", g, "c", CALLER)
+        assert {c["name"] for c in outc["columns"]} == {"n"}
+        # refresh=True 强制重建
+        out_r = service.workflow_preview_columns("ws1", g, "b", CALLER, refresh=True)
+        assert out_r == out
+
+    def test_preview_columns_missing_node(self, service):
+        g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users")],
+             "edges": []}
+        out = service.workflow_preview_columns("ws1", g, "not-exist", CALLER)
+        assert out["columns"] == [] and "不在流程中" in out["error"]
+
+    def test_preview_columns_compile_error(self, service):
+        """编译失败 → 返回 {columns:[], error}，不抛异常。"""
+        g = {"nodes": [_node("a", "filter", "f", where="x")], "edges": []}
+        out = service.workflow_preview_columns("ws1", g, "a", CALLER)
+        assert out["columns"] == [] and "编译流程失败" in out["error"]
+
+    def test_preview_columns_upstream_error(self, service):
+        """上游连接不存在 → error 携带节点名，不抛。"""
+        g = {"nodes": [
+                _node("a", "source", "bad_src", conn="nope/nope", sql="SELECT 1"),
+                _node("b", "filter", "flt", where="1=1")],
+             "edges": [{"from": "a", "to": "b", "port": "in"}]}
+        out = service.workflow_preview_columns("ws1", g, "b", CALLER)
+        assert out["columns"] == [] and "bad_src" in out["error"]
+
+    def test_three_way_join_actually_runs_in_duckdb(self, service, tmp_path):
+        """回归：3 路 JOIN 生成的 SQL 必须能在 DuckDB 里真跑通（不是只 parse 通过）。
+        之前一版把 A JOIN B JOIN C ON <整段> 写成没有中间 ON，DuckDB 直接语法错。"""
+        import sqlite3
+
+        from dbmcp.workflows import WorkflowStore
+
+        # 建三张表放到 sqlite（demo/main）里
+        with sqlite3.connect(service.config.get_connection("demo", "main").database) as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS t3o(id INTEGER, uid INTEGER);
+                DELETE FROM t3o; INSERT INTO t3o VALUES (1,1),(2,2),(3,3);
+                CREATE TABLE IF NOT EXISTS t3u(id INTEGER, city TEXT);
+                DELETE FROM t3u; INSERT INTO t3u VALUES (1,'SH'),(2,'BJ'),(3,'SZ');
+                CREATE TABLE IF NOT EXISTS t3g(id INTEGER, oid INTEGER, gname TEXT);
+                DELETE FROM t3g; INSERT INTO t3g VALUES (1,1,'x'),(2,2,'y'),(3,3,'z');
+            """)
+            c.commit()
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [
+            _node("s1", "source", "j_orders", conn="demo/main", sql="SELECT * FROM t3o"),
+            _node("s2", "source", "j_users", conn="demo/main", sql="SELECT * FROM t3u"),
+            _node("s3", "source", "j_goods", conn="demo/main", sql="SELECT * FROM t3g"),
+            _node("j", "join", "j_all", kind="INNER",
+                  on="a.uid=b.id AND a.id=c.oid", ports_n=3,
+                  select="a.id AS oid, b.city, c.gname"),
+            _node("o", "output", "j_out", order_by="oid", limit=10)],
+            "edges": [{"from": "s1", "to": "j", "port": "in_1"},
+                      {"from": "s2", "to": "j", "port": "in_2"},
+                      {"from": "s3", "to": "j", "port": "in_3"},
+                      {"from": "j", "to": "o", "port": "in"}]}
+        service.workflow_save("j3wf", "ws_j3", "", CALLER, graph=g)
+        out = service.workflow_run("j3wf", CALLER)
+        assert out["ok"] is True, out
+        assert out["output"]["row_count"] == 3
+        # 结果集含三列且行匹配
+        assert set(out["output"]["columns"]) == {"oid", "city", "gname"}
+
+    def test_preview_node_returns_rows(self, service):
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30")],
+             "edges": [{"from": "a", "to": "b", "port": "in"}]}
+        out = service.workflow_preview_node("ws1", g, "b", CALLER, limit=10)
+        assert set(out["columns"]) == {"id", "name", "age"}
+        # alice(30) + carol(41) 两行
+        assert out["row_count"] == 2
+
+    def test_preview_node_limit_clamped(self, service):
+        g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users")],
+             "edges": []}
+        out = service.workflow_preview_node("ws1", g, "a", CALLER, limit=10000)
+        # 上限 1000，clamp 不抛
+        assert out["row_count"] <= 1000
 
     def test_agent_save_workflow_guard(self, service, tmp_path):
         """agent 侧保存（allow_replace_graph=False）：可建/覆盖脚本式，不可覆盖人画的 DAG。"""
