@@ -389,10 +389,8 @@
         editorFontSize: 13,     // 系统设置：编辑器字号（sql_font_size）
         editorWordWrap: false,  // 系统设置：编辑器自动换行（sql_word_wrap）
         schemaFloatRight: 16,   // schema 浮层距编辑器右缘距离（动态避开 minimap）
-        linkDraft: null,        // 画布拉线中 {from, x, y}（画布内坐标）
         aiEnabled: false,       // 系统设置：AI 辅助写 SQL 是否开启（决定「✨ AI」按钮是否出现）
         aiPanel: null,          // AI 生成面板：{question, explain, samples, tables, picked, filter, loading, running, error}
-        wfAi: null,             // AI 生成流程面板：{question, conn, tables, picked, filter, loading, running, error, pos}
       };
     },
     computed: {
@@ -531,21 +529,6 @@
         if (!t || !t.result) return [];
         return t.result.columns.map(function (c) { return { value: c, label: c }; });
       },
-      selNode: function () {
-        var t = this.activeTab;
-        if (!t || t.type !== "flow" || !t.sel || !t.graph) return null;
-        return t.graph.nodes.find(function (n) { return n.id === t.sel; }) || null;
-      },
-      realConnOptions: function () {  // 取数节点可选的真实连接（不含分析工作区）
-        return this.connections.map(function (c) {
-          return { value: c.value,
-                   label: c.connection + (c.environment ? " (" + c.environment + ")" : ""),
-                   ic: engIcon(c.engine) };
-        });
-      },
-      joinKindOptions: function () {
-        return ["INNER", "LEFT", "RIGHT", "FULL"].map(function (k) { return { value: k, label: k }; });
-      }
     },
     methods: {
       flash: function (m) { var self = this; this.toast = m; clearTimeout(this._tt);
@@ -621,7 +604,6 @@
                     pendingSql: null, readSql: null, explain: null, edit: null,
                     wfName: opts.wfName || "", wfSteps: null, vsel: null,
                     view: "table", chart: null,
-                    graph: opts.graph || null, sel: null, nodeStatus: {},
                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
@@ -1208,61 +1190,7 @@
         }).catch(function (e) { if (self.aiPanel) { p.running = false; p.error = String(e); } });
       },
 
-      // ---------- AI 生成流程（DAG 画布，只生成不执行） ----------
-      openWfAi: function () {
-        var conn = this.realConnOptions[0] ? this.realConnOptions[0].value : "";
-        this.wfAi = { question: "", conn: conn, tables: [], picked: {}, filter: "",
-                      loading: !!conn, running: false, error: "", pos: { left: 60, top: 70 } };
-        if (conn) this.wfAiLoadTables();
-      },
-      wfAiSetConn: function (v) {
-        if (!this.wfAi) return;
-        this.wfAi.conn = v; this.wfAi.picked = {}; this.wfAi.tables = []; this.wfAi.loading = true;
-        this.wfAiLoadTables();
-      },
-      wfAiLoadTables: function () {
-        var self = this, w = this.wfAi; if (!w || !w.conn) return;
-        apiGet("/admin/sql/tables?conn=" + encodeURIComponent(w.conn)).then(function (d) {
-          if (!self.wfAi) return;
-          self.wfAi.loading = false;
-          if (d && d.ok) self.wfAi.tables = d.tables || [];
-          else self.wfAi.error = (d && d.error) || "无法加载表列表";
-        }).catch(function (e) { if (self.wfAi) { self.wfAi.loading = false; self.wfAi.error = String(e); } });
-      },
-      wfAiTogglePick: function (name) {
-        var w = this.wfAi; if (!w) return;
-        if (w.picked[name]) delete w.picked[name]; else w.picked[name] = true;
-      },
-      wfAiVisibleTables: function () {
-        var w = this.wfAi; if (!w) return [];
-        var f = (w.filter || "").toLowerCase().trim();
-        return f ? w.tables.filter(function (t) { return t.toLowerCase().indexOf(f) >= 0; }) : w.tables;
-      },
-      wfAiDragStart: function (e) {
-        var w = this.wfAi; if (!w) return;
-        var sx = e.clientX, sy = e.clientY, sl = w.pos.left, st = w.pos.top;
-        function mv(ev) { w.pos.left = Math.max(0, sl + ev.clientX - sx); w.pos.top = Math.max(0, st + ev.clientY - sy); }
-        function up() { window.removeEventListener("mousemove", mv); window.removeEventListener("mouseup", up); }
-        window.addEventListener("mousemove", mv); window.addEventListener("mouseup", up);
-      },
-      wfAiGenerate: function () {
-        var self = this, w = this.wfAi, t = this.activeTab;
-        if (!w || !t || w.running) return;
-        if (!(w.question || "").trim()) { w.error = "请描述你想做的流程"; return; }
-        if (!w.conn) { w.error = "请选择取数连接"; return; }
-        w.running = true; w.error = "";
-        apiPost("/admin/workflows/ai", { conn: w.conn, question: w.question,
-                                         tables: JSON.stringify(Object.keys(w.picked)) }).then(function (d) {
-          if (!self.wfAi) return;
-          w.running = false;
-          if (!d || !d.ok) { w.error = (d && d.error) || "生成失败"; return; }
-          t.graph = { nodes: (d.graph && d.graph.nodes) || [], edges: (d.graph && d.graph.edges) || [] };
-          t.sel = null; t.nodeStatus = {};
-          self.wfAi = null;
-          self.persist();
-          self.flash("已生成流程，请审阅后点「运行流程」");
-        }).catch(function (e) { if (self.wfAi) { w.running = false; w.error = String(e); } });
-      },
+      // AI 生成流程已迁到 /admin/workflows 独立页。
 
       // ---------- 表右键菜单 / 批量 DROP ----------
       openCtx: function (e, t, db) {
@@ -1342,7 +1270,7 @@
       },
       saveWorkflow: function () {
         var self = this, t = this.activeTab;
-        if (!t || (!this.isAnalysis && t.type !== "flow")) { this.flash("请先切到分析工作区连接"); return; }
+        if (!t || !this.isAnalysis) { this.flash("请先切到分析工作区连接"); return; }
         var name = t.wfName || "";
         this.wfAsk = { name: name, ws: (t.conn || "").split("/")[1] || "flow" };
       },
@@ -1351,11 +1279,9 @@
         if (!a || !a.name.trim()) { this.flash("请填写 workflow 名称"); return; }
         // 图表配置随 workflow 保存（含当前视图，载入/重跑时原样恢复）
         var chart = t.chart ? JSON.stringify(Object.assign({ view: t.view || "table" }, t.chart)) : "";
-        var isFlow = t.type === "flow";
         apiPost("/admin/workflows/save", { name: a.name.trim(), workspace: a.ws,
-                                           script: isFlow ? "" : this.currentSql(),
-                                           graph: isFlow ? JSON.stringify(t.graph) : "",
-                                           chart: chart })
+                                           script: this.currentSql(),
+                                           graph: "", chart: chart })
           .then(function (d) {
             if (!d.ok) { self.flash(d.error); return; }
             t.wfName = a.name.trim(); self.wfAsk = null;
@@ -1367,16 +1293,12 @@
       },
       runWorkflow: function (wf) {
         // 在（或新开）该工作区的 tab 里跑：结果走异步 job，kind=workflow
+        // DAG workflow 建议在流程独立页里跑（有可视化+调度）；这里对 DAG 也支持直接跑但不打开画布
         var self = this;
         var conn = "analysis/" + wf.workspace;
         var t = this.activeTab;
-        if (wf.graph) {  // DAG workflow：开画布 tab，逐节点标注状态
-          if (!t || t.type !== "flow" || t.wfName !== wf.name)
-            t = this.newFlowTab({ title: "▶ " + wf.name, conn: conn,
-                                  graph: JSON.parse(JSON.stringify(wf.graph)), wfName: wf.name });
-          t.graph.nodes.forEach(function (n) { t.nodeStatus[n.id] = "running"; });
-        } else if (!t || t.conn !== conn) {
-          t = this.newTab({ title: "▶ " + wf.name, conn: conn, sql: wf.script });
+        if (!t || t.conn !== conn) {
+          t = this.newTab({ title: "▶ " + wf.name, conn: conn, sql: wf.script || "-- DAG workflow，无脚本" });
         }
         t.running = true; t.err = null; t.ok = null; t.result = null; t.confirm = null; t.wfName = wf.name;
         this.applyWfChart(t, wf);
@@ -1387,14 +1309,13 @@
         });
       },
       loadWorkflow: function (wf) {
-        var t;
-        if (wf.graph) {  // DAG workflow → 画布 tab
-          t = this.newFlowTab({ title: wf.name, conn: "analysis/" + wf.workspace,
-                                graph: JSON.parse(JSON.stringify(wf.graph)), wfName: wf.name });
-        } else {
-          t = this.newTab({ title: wf.name, conn: "analysis/" + wf.workspace, sql: wf.script });
-          t.wfName = wf.name;
+        // DAG workflow → 跳转流程独立页编辑；脚本式 → 在查询台开 tab 载脚本（老行为）
+        if (wf.graph) {
+          location.href = "/admin/workflows#name=" + encodeURIComponent(wf.name);
+          return;
         }
+        var t = this.newTab({ title: wf.name, conn: "analysis/" + wf.workspace, sql: wf.script });
+        t.wfName = wf.name;
         this.applyWfChart(t, wf);
       },
       applyWfChart: function (t, wf) {
@@ -1529,180 +1450,7 @@
       },
       disposeChart: function () { if (chartInst) { chartInst.dispose(); chartInst = null; } },
 
-      // ---------- DAG 画布（flow tab）----------
-      // 节点固定尺寸；输入口在左缘（join 两个：left/right），输出口在右缘中点
-      newFlowTab: function (opts) {
-        opts = opts || {};
-        var conn = this.isAnalysis ? this.activeTab.conn
-                                   : "analysis/" + (this.workspaces[0] || "flow");
-        var t = this.newTab({ type: "flow", title: opts.title || "流程 " + seq,
-                              conn: opts.conn || conn,
-                              graph: opts.graph || { nodes: [], edges: [] } });
-        t.wfName = opts.wfName || "";
-        return t;
-      },
-      flowAddNode: function (type) {
-        var t = this.activeTab;
-        if (!t || t.type !== "flow") return;
-        var prefix = { source: "src", file: "file", filter: "flt", join: "join",
-                       aggregate: "agg", sql: "sql", output: "out" }[type] || "n";
-        var i = 1;
-        var names = {};
-        t.graph.nodes.forEach(function (n) { names[n.name] = 1; });
-        while (names[prefix + i]) i++;
-        var id = "n" + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
-        var cfg = type === "join" ? { kind: "INNER", on: "", select: "l.*, r.*" }
-                : type === "aggregate" ? { group: "", aggs: "" }
-                : type === "source" ? { conn: "", sql: "", limit: null }
-                : {};
-        t.graph.nodes.push({ id: id, type: type, name: prefix + i,
-                             x: 30 + (t.graph.nodes.length % 5) * 190,
-                             y: 30 + Math.floor(t.graph.nodes.length / 5) * 90, cfg: cfg });
-        t.sel = id;
-        this.persist();
-      },
-      flowDelNode: function (id) {
-        var t = this.activeTab, g = t.graph;
-        g.nodes = g.nodes.filter(function (n) { return n.id !== id; });
-        g.edges = g.edges.filter(function (e) { return e.from !== id && e.to !== id; });
-        if (t.sel === id) t.sel = null;
-        delete t.nodeStatus[id];
-        this.persist();
-      },
-      flowNodeById: function (id) {
-        var t = this.activeTab;
-        if (!t || !t.graph) return null;
-        return t.graph.nodes.find(function (n) { return n.id === id; }) || null;
-      },
-      flowInPorts: function (n) {
-        if (n.type === "join") return ["left", "right"];
-        if (n.type === "source" || n.type === "file") return [];
-        if (n.type === "sql") return ["in"];  // sql 节点连线仅表意（SQL 里直接引用上游名）
-        return ["in"];
-      },
-      flowHasOut: function (n) { return n.type !== "output"; },
-      portPos: function (node, port) {
-        var W = 150, H = 40;
-        if (port === "out") return { x: node.x + W, y: node.y + H / 2 };
-        if (node.type === "join") {
-          return { x: node.x, y: node.y + (port === "left" ? 13 : 27) };
-        }
-        return { x: node.x, y: node.y + H / 2 };
-      },
-      edgePath: function (e) {
-        var f = this.flowNodeById(e.from), t = this.flowNodeById(e.to);
-        if (!f || !t) return "";
-        var a = this.portPos(f, "out"), b = this.portPos(t, e.port || "in");
-        var dx = Math.max(40, Math.abs(b.x - a.x) / 2);
-        return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " "
-             + (b.x - dx) + "," + b.y + " " + b.x + "," + b.y;
-      },
-      draftPath: function () {
-        var d = this.linkDraft;
-        if (!d) return "";
-        var f = this.flowNodeById(d.from);
-        if (!f) return "";
-        var a = this.portPos(f, "out");
-        var dx = Math.max(40, Math.abs(d.x - a.x) / 2);
-        return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " "
-             + (d.x - dx) + "," + d.y + " " + d.x + "," + d.y;
-      },
-      _canvasXY: function (ev) {
-        var r = this.$refs.flowCanvas.getBoundingClientRect();
-        var el = this.$refs.flowCanvas;
-        return { x: ev.clientX - r.left + el.scrollLeft, y: ev.clientY - r.top + el.scrollTop };
-      },
-      flowNodeDown: function (ev, node) {
-        var self = this;
-        this.activeTab.sel = node.id;
-        var start = this._canvasXY(ev), ox = node.x, oy = node.y, moved = false;
-        function move(e2) {
-          var p = self._canvasXY(e2);
-          node.x = Math.max(0, ox + p.x - start.x);
-          node.y = Math.max(0, oy + p.y - start.y);
-          moved = true;
-        }
-        function up() {
-          window.removeEventListener("mousemove", move);
-          window.removeEventListener("mouseup", up);
-          if (moved) self.persist();
-        }
-        window.addEventListener("mousemove", move);
-        window.addEventListener("mouseup", up);
-        ev.preventDefault();
-      },
-      portDown: function (ev, node) {
-        var self = this;
-        var p = this._canvasXY(ev);
-        this.linkDraft = { from: node.id, x: p.x, y: p.y };
-        function move(e2) {
-          if (self.linkDraft) { var q = self._canvasXY(e2); self.linkDraft.x = q.x; self.linkDraft.y = q.y; }
-        }
-        function up() {
-          window.removeEventListener("mousemove", move);
-          window.removeEventListener("mouseup", up);
-          // 若落在输入口上，portUp 已建边并清掉 linkDraft；这里兜底取消
-          setTimeout(function () { self.linkDraft = null; }, 0);
-        }
-        window.addEventListener("mousemove", move);
-        window.addEventListener("mouseup", up);
-        ev.preventDefault();
-        ev.stopPropagation();
-      },
-      portUp: function (ev, node, port) {
-        var d = this.linkDraft, t = this.activeTab;
-        if (!d || d.from === node.id) return;
-        t.graph.edges = t.graph.edges.filter(function (e) {
-          return !(e.to === node.id && (e.port || "in") === port);  // 每个输入口只接一条
-        });
-        t.graph.edges.push({ from: d.from, to: node.id, port: port });
-        this.linkDraft = null;
-        this.persist();
-      },
-      flowDelEdge: function (i) {
-        this.activeTab.graph.edges.splice(i, 1);
-        this.persist();
-      },
-      edgeMid: function (e) {
-        var f = this.flowNodeById(e.from), t = this.flowNodeById(e.to);
-        if (!f || !t) return { x: -99, y: -99 };
-        var a = this.portPos(f, "out"), b = this.portPos(t, e.port || "in");
-        return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      },
-      runFlow: function () {
-        var self = this, t = this.activeTab;
-        if (!t || t.type !== "flow") return;
-        var ws = (t.conn || "").split("/")[1] || "flow";
-        t.running = true; t.err = null; t.ok = null; t.result = null; t.wfSteps = null;
-        t.nodeStatus = {};
-        t.graph.nodes.forEach(function (n) { t.nodeStatus[n.id] = "running"; });
-        apiPost("/admin/workflows/run_graph", { workspace: ws, graph: JSON.stringify(t.graph) })
-          .then(function (d) {
-            if (!d.ok) { t.running = false; t.err = d.error; t.nodeStatus = {}; return; }
-            t.jobId = d.job_id; t.jobPage = 0; self.persist();
-            self.pollJob(t.id, d.job_id, 0);
-          }).catch(function (e) { t.running = false; t.err = "" + e; t.nodeStatus = {}; });
-      },
-      flowPreview: function (node) {
-        // 运行过一次后，各节点都是工作区里的视图/表，直接查前 100 行
-        this.run(false, 0, 'SELECT * FROM "' + node.name + '" LIMIT 100');
-      },
-      flowTypeLabel: function (t) {
-        return { source: "取数", file: "文件", filter: "过滤", join: "JOIN",
-                 aggregate: "聚合", sql: "SQL", output: "输出" }[t] || t;
-      },
-      flowNodeDesc: function (n) {
-        var c = n.cfg || {};
-        if (n.type === "source") return c.conn ? c.conn + (c.sql ? " · " + c.sql : "") : "（选连接）";
-        if (n.type === "file") return c.path || "（选文件）";
-        if (n.type === "filter") return c.where ? "WHERE " + c.where : "（填条件）";
-        if (n.type === "join") return (c.kind || "INNER") + (c.on ? " ON " + c.on : "（填 ON）");
-        if (n.type === "aggregate") return (c.group ? "BY " + c.group + " · " : "") + (c.aggs || "（填聚合）");
-        if (n.type === "sql") return c.sql || "（写 SQL）";
-        if (n.type === "output") return (c.order_by ? "ORDER BY " + c.order_by + " " : "")
-                                       + "LIMIT " + (c.limit || 1000);
-        return "";
-      },
+      // DAG 画布已迁到 /admin/workflows 独立页；查询台不再承载 flow tab。
 
       // ---------- 运行 / 分页 / 导出 ----------
       // data tab 的查询由 表 + WHERE 条 + 列头排序 构建（DataGrip Table Data 行为，走 SQL 跨页正确）
@@ -1865,7 +1613,6 @@
         var self = this, t = this.activeTab;
         if (!t) return;
         if (t.type === "ddl") { this.flash("DDL 为只读视图"); return; }
-        if (t.type === "flow" && sqlOverride == null) { this.runFlow(); return; }
         if (!t.conn) { this.flash("请先选择连接"); return; }
         // 同一 tab 已有查询在执行 → 直接拒绝（不排队、不并发），提示先取消
         if (t.running) { this.flash("当前查询仍在执行，请先取消或等待完成"); return; }
@@ -1944,12 +1691,6 @@
             t2.wfSteps = r.steps || [];
             if (r.output) t2.result = Object.assign({ paginated: false }, r.output);
             else if (!r.ok) t2.err = (r.steps.filter(function (x) { return !x.ok; })[0] || {}).error || "运行失败";
-            if (t2.type === "flow") {  // 画布：按 steps 里的 node id 给节点标 ✓/✗
-              t2.nodeStatus = {};
-              (r.steps || []).forEach(function (s) {
-                if (s.node) t2.nodeStatus[s.node] = s.ok ? "ok" : "err";
-              });
-            }
             self.flash(r.ok ? "workflow 运行完成" : "workflow 运行失败（见步骤）");
           }
           else if (r.kind === "read") {
@@ -3090,8 +2831,7 @@
                                 result: i === t.resultIdx ? rt.result : null };
                      }),
                      resultIdx: t.resultIdx || 0,
-                     view: t.view || "table", chart: t.chart || null,
-                     graph: t.graph || null };
+                     view: t.view || "table", chart: t.chart || null };
           }, this);
           var activeId = this.activeId;
           var data = { v: 2, tabs: tabs, activeId: activeId, treeCache: this.treeCache,
@@ -3119,7 +2859,9 @@
           if (!raw) return;
           var d = JSON.parse(raw);
           if (!d.tabs || !d.tabs.length) return;
-          this.tabs = d.tabs.map(function (t) {
+          // 静默丢弃老的 flow tab（DAG 画布已迁到 /admin/workflows 独立页）
+          var rawTabs = d.tabs.filter(function (t) { return (t.type || "query") !== "flow"; });
+          this.tabs = rawTabs.map(function (t) {
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: t.sql || "",
                      result: t.result || null, ok: t.ok || null, err: t.err || null,
@@ -3134,7 +2876,6 @@
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null, vsel: null,
                      view: t.view || "table", chart: t.chart || null,
-                     graph: t.graph || null, sel: null, nodeStatus: {},
                      rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      submit: null, submitting: false, refreshWarn: false,
@@ -3553,11 +3294,12 @@
       </div>
       <div class="dg-sec-hd acc-hd" @click="toggleAcc('wf')"><span class="caret">{{ acc.wf ? '▾' : '▸' }}</span><span>工作流</span>
         <span class="acc-acts" @click.stop>
-        <span class="act" @click="newFlowTab()" title="新建可视化流程（DAG 画布）">＋流程</span>
+        <a class="act" href="/admin/workflows" title="打开流程独立页">流程 →</a>
         <span class="act" @click="loadWorkflows" title="刷新">↻</span></span></div>
       <div v-show="acc.wf" class="acc-body cap">
-      <div v-if="!wfs.length" class="dg-empty">（暂无：点「＋流程」画一个，或在工作区写脚本点「存工作流」）</div>
-      <div v-for="w in wfs" :key="w.name" class="dg-snip" @click="loadWorkflow(w)" :title="'工作区 '+w.workspace+(w.graph?' · 点击打开画布':' · 点击载入脚本')">
+      <div v-if="!wfs.length" class="dg-empty">（暂无 workflow。<a href="/admin/workflows">去流程页新建</a>）</div>
+      <div v-for="w in wfs" :key="w.name" class="dg-snip" @click="loadWorkflow(w)"
+           :title="'工作区 '+w.workspace+(w.graph?' · 点击载入脚本（画布请到流程页编辑）':' · 点击载入脚本')">
         <div class="t"><span>{{ w.graph ? "⧉" : "⚙" }} {{ w.name }}</span>
           <span class="x" style="opacity:1;color:var(--dg-green)" @click.stop="runWorkflow(w)" title="重跑（重拉数据+执行脚本）">▶</span>
           <span class="x" :class="{arm: delWf===w.name}" @click.stop="askDeleteWf(w.name)">{{ delWf===w.name ? "确认?" : "✕" }}</span></div>
@@ -3595,11 +3337,10 @@
   <section class="dg-main">
     <div v-if="isProd" class="dg-prod-ribbon" title="生产环境 · PROD · 写操作将影响线上数据，请谨慎"></div>
     <div v-else-if="isStaging" class="dg-prod-ribbon staging" title="预发布 · STAGING 环境"></div>
-    <!-- 顶部栏只在「流程」或「分析工作区脚本」时显示（承载 运行流程/存工作流）；
+    <!-- 顶部栏只在「分析工作区脚本」时显示（承载 存工作流）；
          普通 SQL 编辑器整条去掉：执行走 ⌘Enter/右键，schema 选择器浮在编辑器内 -->
-    <div class="dg-top" v-if="activeTab && (activeTab.type==='flow' || (isAnalysis && activeTab.type==='query'))">
-      <button v-if="activeTab.type==='flow'" class="dg-btn run" :disabled="activeTab.running" @click="run(false)">▶ {{ activeTab.running ? "执行中…" : "运行流程" }}</button>
-      <button class="dg-btn" @click="saveWorkflow" title="把当前脚本/流程图存为可重跑的 workflow">存工作流</button>
+    <div class="dg-top" v-if="activeTab && isAnalysis && activeTab.type==='query'">
+      <button class="dg-btn" @click="saveWorkflow" title="把当前脚本存为可重跑的 workflow（DAG 编辑请到 /admin/workflows）">存工作流</button>
     </div>
     <div class="dg-tabs">
       <template v-for="g in tabGroups" :key="g.conn">
@@ -3681,7 +3422,7 @@
         <button class="dg-btn" @click="wfAsk=null">取消</button>
       </div>
     </div>
-    <div class="dg-editor-row" v-show="activeTab && activeTab.type!=='data' && activeTab.type!=='flow'" :style="editorRowStyle">
+    <div class="dg-editor-row" v-show="activeTab && activeTab.type!=='data'" :style="editorRowStyle">
       <div class="dg-editor"><div ref="editorEl" style="position:absolute;inset:0"></div>
         <div v-if="!editorReady" class="dg-editor-loading">编辑器加载中…</div>
         <button v-if="aiEnabled && !aiPanel && activeTab && activeTab.type==='query'"
@@ -3749,120 +3490,8 @@
         </label>
       </div>
     </div>
-    <div class="dg-flow" v-if="activeTab && activeTab.type==='flow' && activeTab.graph" :style="{height: editorH + 'px'}">
-      <div class="dg-flow-bar">
-        <button class="dg-btn" @click="flowAddNode('source')" title="从任意连接取数为数据集">＋取数</button>
-        <button class="dg-btn" @click="flowAddNode('file')" title="导入本地 CSV/Parquet/JSON">＋文件</button>
-        <button class="dg-btn" @click="flowAddNode('filter')">＋过滤</button>
-        <button class="dg-btn" @click="flowAddNode('join')">＋JOIN</button>
-        <button class="dg-btn" @click="flowAddNode('aggregate')">＋聚合</button>
-        <button class="dg-btn" @click="flowAddNode('sql')" title="自由 SQL（直接引用上游节点名）">＋SQL</button>
-        <button class="dg-btn" @click="flowAddNode('output')">＋输出</button>
-        <button v-if="aiEnabled" class="dg-btn" style="border-color:var(--dg-accent);color:var(--dg-text)"
-                @click="openWfAi" title="用 AI 按需求生成整张流程图（载到画布，不执行）">✨ AI 生成流程</button>
-        <span class="hint" style="margin-left:auto">拖节点右缘圆点 → 下一节点左缘连线 · 点 ✕ 删连线 · 工作区 {{ (activeTab.conn||'').split('/')[1] }}</span>
-      </div>
-      <div v-if="wfAi" class="dg-ai-pop" :style="{left: wfAi.pos.left + 'px', top: wfAi.pos.top + 'px'}">
-        <div class="dg-ai-head" @mousedown="wfAiDragStart"><span class="t">✨ AI 生成流程</span>
-          <span class="x" @mousedown.stop @click="wfAi=null" title="关闭">✕</span></div>
-        <div class="dg-ai-empty" style="margin-bottom:4px">描述你要做的分析，AI 生成整张 DAG（校验通过后载到画布，不执行）。会覆盖当前画布。</div>
-        <textarea class="dg-ai-q" v-model="wfAi.question" rows="2" spellcheck="false"
-                  placeholder="例如：从订单表按用户聚合总消费额，关联用户表取城市，输出消费前 20 名"
-                  @keydown.meta.enter.stop="wfAiGenerate" @keydown.ctrl.enter.stop="wfAiGenerate"></textarea>
-        <div class="dg-ai-scope">
-          <div class="dg-ai-scope-hd"><span>取数连接</span></div>
-          <dg-select :model-value="wfAi.conn" :options="realConnOptions" placeholder="选择连接…"
-                     @update:model-value="wfAiSetConn"/>
-        </div>
-        <div class="dg-ai-scope">
-          <div class="dg-ai-scope-hd"><span>表 · 已选 {{ wfAi.picked ? Object.keys(wfAi.picked).length : 0 }}（不选=整库）</span>
-            <input v-model="wfAi.filter" placeholder="筛选…" class="dg-ai-filter"></div>
-          <div v-if="wfAi.loading" class="dg-ai-empty">加载表…</div>
-          <div v-else-if="wfAi.tables.length" class="dg-ai-tables">
-            <label v-for="tb in wfAiVisibleTables()" :key="tb" class="dg-ai-tbl">
-              <input type="checkbox" :checked="!!wfAi.picked[tb]" @change="wfAiTogglePick(tb)"> {{ tb }}
-            </label>
-          </div>
-          <div v-else class="dg-ai-empty">（选个连接以列表；也可不选表按整库生成）</div>
-        </div>
-        <div v-if="wfAi.error" class="dg-ai-err">{{ wfAi.error }}</div>
-        <div class="dg-ai-foot"><span class="sp"></span>
-          <button class="dg-btn run" :disabled="wfAi.running" @click="wfAiGenerate">{{ wfAi.running ? "生成中…（约 10–60s）" : "生成 ⌘↵" }}</button>
-          <button class="dg-btn" :disabled="wfAi.running" @click="wfAi=null">取消</button>
-        </div>
-      </div>
-      <div class="dg-flow-body">
-        <div class="dg-flow-canvas" ref="flowCanvas">
-          <svg class="dg-flow-svg">
-            <path v-for="(e,i) in activeTab.graph.edges" :key="i" class="fe" :d="edgePath(e)"/>
-            <path v-if="linkDraft" class="fe draft" :d="draftPath()"/>
-          </svg>
-          <div v-for="(e,i) in activeTab.graph.edges" :key="'x'+i" class="dg-edge-x"
-               :style="{left: edgeMid(e).x + 'px', top: edgeMid(e).y + 'px'}"
-               title="删除连线" @click="flowDelEdge(i)">✕</div>
-          <div v-for="n in activeTab.graph.nodes" :key="n.id" class="dg-fnode"
-               :class="[n.type, {sel: activeTab.sel===n.id}, activeTab.nodeStatus[n.id] || '']"
-               :style="{left: n.x + 'px', top: n.y + 'px'}"
-               @mousedown="flowNodeDown($event, n)">
-            <div class="hd"><span class="ty">{{ flowTypeLabel(n.type) }}</span>
-              <span class="nm">{{ n.name }}</span>
-              <span class="st">{{ activeTab.nodeStatus[n.id]==='ok' ? '✓' : activeTab.nodeStatus[n.id]==='err' ? '✗' : activeTab.nodeStatus[n.id]==='running' ? '⟳' : '' }}</span>
-              <span class="x" @mousedown.stop @click.stop="flowDelNode(n.id)">✕</span></div>
-            <div class="bd">{{ flowNodeDesc(n) }}</div>
-            <span v-for="p in flowInPorts(n)" :key="p" class="port pin" :class="p"
-                  :title="p==='left'?'左输入（SQL 里是 l）':p==='right'?'右输入（SQL 里是 r）':'输入'"
-                  @mousedown.stop @mouseup="portUp($event, n, p)"></span>
-            <span v-if="flowHasOut(n)" class="port pout" title="拖到下一节点的输入口"
-                  @mousedown="portDown($event, n)"></span>
-          </div>
-          <div v-if="!activeTab.graph.nodes.length" class="dg-empty" style="padding:40px;position:absolute">
-            用上方按钮添加节点：取数 → 过滤 / JOIN / 聚合 → 输出，拖节点右缘圆点到下一节点左缘完成连线。</div>
-        </div>
-        <div class="dg-flow-cfg" v-if="selNode">
-          <div class="cfg-hd">{{ flowTypeLabel(selNode.type) }} 节点</div>
-          <div class="row"><label>名字</label><input v-model="selNode.name" @change="persist" spellcheck="false"></div>
-          <template v-if="selNode.type==='source'">
-            <div class="row"><label>连接</label><dg-select :model-value="selNode.cfg.conn" :options="realConnOptions"
-                 placeholder="选择连接…" @update:model-value="v => { selNode.cfg.conn = v; persist(); }"/></div>
-            <div class="row"><label>取数 SQL</label><textarea v-model="selNode.cfg.sql" rows="5" @change="persist"
-                 spellcheck="false" placeholder="SELECT * FROM t WHERE ..."></textarea></div>
-            <div class="row"><label>行数上限</label><input type="number" v-model.number="selNode.cfg.limit" @change="persist" placeholder="默认 20 万"></div>
-            <div class="row"><label>schema</label><input v-model="selNode.cfg.schema" @change="persist" placeholder="未绑库连接需指定"></div>
-          </template>
-          <template v-else-if="selNode.type==='file'">
-            <div class="row"><label>文件路径</label><input v-model="selNode.cfg.path" @change="persist" placeholder="/path/data.csv（csv/parquet/json）"></div>
-          </template>
-          <template v-else-if="selNode.type==='filter'">
-            <div class="row"><label>WHERE</label><textarea v-model="selNode.cfg.where" rows="4" @change="persist"
-                 spellcheck="false" placeholder="status = 'paid' AND amount > 100"></textarea></div>
-          </template>
-          <template v-else-if="selNode.type==='join'">
-            <div class="row"><label>类型</label><dg-select :model-value="selNode.cfg.kind || 'INNER'" :options="joinKindOptions"
-                 @update:model-value="v => { selNode.cfg.kind = v; persist(); }"/></div>
-            <div class="row"><label>ON</label><input v-model="selNode.cfg.on" @change="persist" spellcheck="false" placeholder="l.uid = r.id（l=左输入 r=右输入）"></div>
-            <div class="row"><label>SELECT</label><input v-model="selNode.cfg.select" @change="persist" spellcheck="false" placeholder="l.*, r.*"></div>
-          </template>
-          <template v-else-if="selNode.type==='aggregate'">
-            <div class="row"><label>GROUP BY</label><input v-model="selNode.cfg.group" @change="persist" spellcheck="false" placeholder="channel（留空 = 全局聚合）"></div>
-            <div class="row"><label>聚合表达式</label><textarea v-model="selNode.cfg.aggs" rows="3" @change="persist"
-                 spellcheck="false" placeholder="count(*) AS n, sum(amount) AS total"></textarea></div>
-          </template>
-          <template v-else-if="selNode.type==='sql'">
-            <div class="row"><label>SQL</label><textarea v-model="selNode.cfg.sql" rows="8" @change="persist"
-                 spellcheck="false" placeholder="SELECT ...（直接用上游节点名作表名）"></textarea></div>
-          </template>
-          <template v-else-if="selNode.type==='output'">
-            <div class="row"><label>ORDER BY</label><input v-model="selNode.cfg.order_by" @change="persist" spellcheck="false" placeholder="total DESC"></div>
-            <div class="row"><label>LIMIT</label><input type="number" v-model.number="selNode.cfg.limit" @change="persist" placeholder="1000"></div>
-          </template>
-          <div class="row acts">
-            <button class="dg-btn" @click="flowPreview(selNode)" title="运行过一次后，各节点都是工作区里的视图，可直接查看">预览数据</button>
-            <button class="dg-btn danger" @click="flowDelNode(selNode.id)">删除节点</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="dg-hsplit" v-show="activeTab && (activeTab.type==='query' || activeTab.type==='flow')" @mousedown="beginDrag($event, 'y')"></div>
+    <!-- DAG 画布已迁到 /admin/workflows 独立页 -->
+    <div class="dg-hsplit" v-show="activeTab && activeTab.type==='query'" @mousedown="beginDrag($event, 'y')"></div>
     <div class="dg-results" v-show="activeTab && activeTab.type!=='ddl'">
       <template v-if="activeTab">
         <div v-if="activeTab.type==='data'" class="dg-toolbar">
