@@ -2425,6 +2425,28 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         job_id = str(f.get("id") or "")
         return JSONResponse({"ok": _jobmgr.cancel(job_id)})
 
+    @mcp.custom_route("/admin/sql/reconnect", methods=["POST"])
+    @guard
+    async def _sql_reconnect(req: Request) -> JSONResponse:
+        """人工重连：连接被判 unavailable/exhausted 后，从查询台点「重连」强制重建。
+
+        绕过健康位（否则 exhausted 连接连测试都做不了），成功即恢复可用。
+        """
+        f = await req.form()
+        raw = str(f.get("conn") or "")
+        if _analysis_ws(raw):
+            return JSONResponse({"ok": False, "error": "分析工作区为本地沙箱，无需重连"})
+        try:
+            project, connection = _resolve_conn(raw)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)})
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: service.reconnect_connection(project, connection, _caller(req)))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)})
+        return JSONResponse(out)
+
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard
     async def _sql_run(req: Request) -> JSONResponse:

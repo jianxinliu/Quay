@@ -1297,6 +1297,37 @@ class DbmService:
 
         return self._audited(project, connection, cfg, "test_connection", "", caller, _run)
 
+    def reconnect_connection(self, project: str, connection: str, caller: CallerInfo) -> dict:
+        """人工触发的强制重连：清健康位 + 回收旧引擎/隧道，然后主动探测重建。
+
+        与 test_connection 的关键区别：test_connection 走 `_run_touching_db`，连接处于
+        unavailable/exhausted 时会被 `health.check()` 直接挡下、根本不会尝试重建；exhausted
+        连接因此无法靠它自愈。这里**绕过健康位**，无条件重置后走 `_health_probe`（SELECT 1 /
+        PING）建立新连接——供管理后台/查询台在收到「连接不可用」错误时点「重连」使用。
+
+        探测成功：健康位已随成功清为 ok，返回 {ok, engine}。
+        探测失败：记审计 + 若为连接级错误则 mark_failed（后台退避重连从头再来），原样抛出。
+        """
+        cfg = self.config.get_connection(project, connection)  # 连接不存在 → KeyError
+        # 无条件清健康状态：exhausted/unavailable 都归零，让本次探测不被拦
+        self.health.force_clear(project, connection)
+        rec = self._base_record(project, connection, cfg, "reconnect", "", caller)
+        try:
+            # _health_probe 会先 dispose 旧引擎/隧道再探测，拿到的是全新连接
+            self._health_probe(project, connection)
+        except Exception as e:  # noqa: BLE001
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            if is_connection_error(e):
+                # 仍连不上：重新进入后台退避重连（给它再一轮机会）
+                self.health.mark_failed(project, connection, f"{type(e).__name__}: {e}")
+            raise
+        rec.status = "ok"
+        rec.detail = "重连成功"
+        self.store.record(rec)
+        return {"ok": True, "engine": cfg.engine}
+
     # ---------- 内部 ----------
 
     def _base_record(

@@ -46,6 +46,47 @@ def service(tmp_path):
     svc.close()
 
 
+class TestReconnect:
+    """人工重连：绕过健康位强制重建连接（供查询台「重连数据库」用）。"""
+
+    def test_reconnect_healthy_returns_ok(self, service):
+        out = service.reconnect_connection("demo", "main", CALLER)
+        assert out == {"ok": True, "engine": "sqlite"}
+
+    def test_reconnect_clears_exhausted(self, service):
+        # 模拟连接已被判定 exhausted（后台重连线程已放弃）
+        from dbmcp.health import Health
+
+        service.health._entries[("demo", "main")] = Health(
+            state="exhausted", fail_count=5, last_error="lost connection"
+        )
+        # test_connection 走健康位，exhausted 时会被直接挡下、根本连不上
+        with pytest.raises(Exception):
+            service.test_connection("demo", "main", CALLER)
+        # reconnect 绕过健康位强制重建，成功后健康位清空、连接恢复可用
+        out = service.reconnect_connection("demo", "main", CALLER)
+        assert out["ok"] is True
+        assert service.health.get("demo", "main") is None
+        service.test_connection("demo", "main", CALLER)  # 现在可用了
+
+    def test_reconnect_probe_failure_reenters_backoff(self, service, monkeypatch):
+        """探测仍失败：原样抛出，并重新进入后台退避重连（unavailable）。"""
+        def boom(_p, _c):
+            raise ConnectionRefusedError("Connection refused")
+
+        monkeypatch.setattr(service, "_health_probe", boom)
+        with pytest.raises(ConnectionRefusedError):
+            service.reconnect_connection("demo", "main", CALLER)
+        h = service.health.get("demo", "main")
+        assert h is not None and h.state == "unavailable"
+        assert "Connection refused" in h.last_error
+        service.health.stop()  # 收尾后台重连线程
+
+    def test_reconnect_unknown_connection_raises(self, service):
+        with pytest.raises(KeyError):
+            service.reconnect_connection("demo", "nope", CALLER)
+
+
 class TestProbeFields:
     def test_redis_no_auth_not_blocked_by_password_guard(self, service):
         """无认证 Redis：不填密码不应被『请填写密码』挡住，而是真正去连。"""

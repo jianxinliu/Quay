@@ -431,6 +431,8 @@
         dragGroup: null,        // 拖动的组（连接 key），用于整体调整组顺序
         ctx: { show: false, x: 0, y: 0, table: "", schema: "", multi: false },
         tabCtx: { show: false, x: 0, y: 0, id: null },  // 编辑区 tab 右键菜单
+        dbCtx: { show: false, x: 0, y: 0, conn: "" },   // 左树「库/连接」节点右键菜单（重连）
+        reconnecting: false,                            // 正在重连（禁用重复点击）
         renamingId: null, renameVal: "",                // tab 就地改名
         acc: { tree: true, bm: true, wf: true, hist: false, snip: true },  // 左栏手风琴各区展开状态
         dropPlan: null,         // {items:[{t,db}], running, results}
@@ -2063,6 +2065,34 @@
           self.flash(d.ok ? "已请求取消" : "任务已结束，无需取消");
         }).catch(function (e) { self.flash("取消失败：" + e); });
       },
+      // 左树「库/连接」节点右键菜单：打开/关闭
+      openDbCtx: function (e, conn) {
+        if (!conn) return;
+        e.preventDefault(); e.stopPropagation();
+        this.dbCtx = { show: true, x: e.clientX, y: e.clientY, conn: conn };
+      },
+      closeDbCtx: function () { this.dbCtx.show = false; },
+      // 人工重连该连接：绕过健康位强制重建，成功后清错误提示、刷新左树恢复元数据。
+      // 连接被判 unavailable/exhausted 后，普通查询/刷新都会被健康位挡下，只有这里能自愈。
+      reconnect: function (conn) {
+        conn = conn || (this.activeTab && this.activeTab.conn);
+        this.closeDbCtx();
+        if (!conn || this.reconnecting) return;
+        var self = this;
+        this.reconnecting = true;
+        this.flash("正在重连 " + conn + " …");
+        apiPost("/admin/sql/reconnect", { conn: conn }).then(function (d) {
+          self.reconnecting = false;
+          if (d && d.ok) {
+            // 清掉该连接下所有 tab 的连接错误提示，刷新当前树
+            self.tabs.forEach(function (t) { if (t.conn === conn && t.err) t.err = null; });
+            self.flash("✓ 连接已恢复，可重新执行查询");
+            self.refreshTree();
+          } else {
+            self.flash("重连失败：" + ((d && d.error) || "未知错误"));
+          }
+        }).catch(function (e) { self.reconnecting = false; self.flash("重连失败：" + e); });
+      },
       // 多语句顺序执行的推进：上一条成功(ok=true)则跑下一条；失败/取消/需确认则中止整个序列。
       _seqAdvance: function (t, ok) {
         if (!t || !t.seq) return;
@@ -3565,7 +3595,7 @@
         <div v-if="!databases.length" class="dg-empty">（加载中或无可用库）</div>
         <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>
         <template v-for="db in filteredDatabases" :key="db">
-          <div class="dg-item" @click="toggleDb(db)">
+          <div class="dg-item" @click="toggleDb(db)" @contextmenu="openDbCtx($event, activeTab.conn)">
             <span class="tw">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic ic-db"></span><span class="nm">{{ db }}</span>
           </div>
           <template v-if="openDb[db]">
@@ -3587,7 +3617,7 @@
         </template>
       </template>
       <template v-else>
-        <div class="dg-item sub" @click="toggleTf('')">
+        <div class="dg-item sub" @click="toggleTf('')" @contextmenu="openDbCtx($event, activeTab.conn)">
           <span class="tw">{{ openTf[''] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
           <span class="nm">tables</span><span class="cnt">{{ tablesByDb[''] ? tablesByDb[''].length : "…" }}</span></div>
         <template v-if="openTf['']">
@@ -4252,6 +4282,14 @@
     <div class="sep"></div>
     <button class="danger" @click="ctxAction('drop')">{{ ctx.multi ? ("DROP " + selCount + " 张表…") : "DROP 表…" }}</button>
   </div>
+  <!-- 库/连接节点右键菜单：重连数据库（连接被判不可用/exhausted 后自愈） -->
+  <template v-if="dbCtx.show">
+    <div class="dg-ctx-backdrop" @click="closeDbCtx" @contextmenu.prevent="closeDbCtx"></div>
+    <div class="dg-ctx" :style="{left: dbCtx.x+'px', top: dbCtx.y+'px'}" @click.stop>
+      <div class="hd">{{ dbCtx.conn }}</div>
+      <button :disabled="reconnecting" @click="reconnect(dbCtx.conn)">{{ reconnecting ? "重连中…" : "↻ 重连数据库" }}</button>
+    </div>
+  </template>
   <!-- 列显示类型菜单（数值列右键；仅展示不改值） -->
   <template v-if="colMenu.show">
     <div class="dg-ctx-backdrop" @click="closeColMenu" @contextmenu.prevent="closeColMenu"></div>

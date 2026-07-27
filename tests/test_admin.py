@@ -60,6 +60,27 @@ def test_foreign_host_blocked_at_guard(client):
     assert tc.get("/admin/approvals").status_code == 200
 
 
+def test_sql_reconnect_recovers_exhausted(client):
+    """查询台「重连数据库」：连接被判 exhausted 后，HTTP 路由强制重建使其恢复可用。"""
+    tc, svc = client
+    from dbmcp.health import Health
+
+    svc.health._entries[("demo", "main")] = Health(state="exhausted", fail_count=5,
+                                                    last_error="lost connection")
+    r = tc.post("/admin/sql/reconnect", data={"conn": "demo/main"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["engine"] == "sqlite"
+    assert svc.health.get("demo", "main") is None
+
+
+def test_sql_reconnect_bad_conn_returns_error(client):
+    tc, _ = client
+    r = tc.post("/admin/sql/reconnect", data={"conn": "demo/nope"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+
+
 def test_no_auth_mode_skips_login(tmp_path):
     """--no-auth：跳过认证，本机测试脚手架用；Host 校验仍在。"""
     import sqlite3
