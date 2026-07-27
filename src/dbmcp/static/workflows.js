@@ -417,9 +417,272 @@
   };
   Blueprint.methods.portY = portY;
 
+  // ---------- 拓扑排序（Kahn；无环即返节点数组）----------
+  function topoOrder(graph) {
+    var nodes = graph.nodes || [], edges = graph.edges || [];
+    var byId = {};
+    nodes.forEach(function (n) { byId[n.id] = n; });
+    var indeg = {}, downstream = {};
+    nodes.forEach(function (n) { indeg[n.id] = 0; downstream[n.id] = []; });
+    edges.forEach(function (e) {
+      if (!byId[e.from] || !byId[e.to]) return;
+      indeg[e.to] = (indeg[e.to] || 0) + 1;
+      downstream[e.from].push(e.to);
+    });
+    var queue = nodes.filter(function (n) { return !indeg[n.id]; }).map(function (n) { return n.id; });
+    var order = [];
+    while (queue.length) {
+      var id = queue.shift();
+      order.push(byId[id]);
+      downstream[id].forEach(function (t) {
+        indeg[t]--;
+        if (indeg[t] === 0) queue.push(t);
+      });
+    }
+    // 有环时补上剩余节点（模块视图仍显示，让用户能编辑修复）
+    if (order.length < nodes.length) {
+      var seen = {};
+      order.forEach(function (n) { seen[n.id] = 1; });
+      nodes.forEach(function (n) { if (!seen[n.id]) order.push(n); });
+    }
+    return order;
+  }
+
+  // ---------- 模块视图组件 ----------
+  var Modules = {
+    name: "wf-modules",
+    props: ["graph", "workspace"],
+    emits: ["update:graph"],
+    data: function () {
+      return {
+        expanded: {},        // {nodeId: true} 是否展开表单
+        upstreamCols: {},    // {nodeId: {loading, error, columns:[{name,type}]}}
+        preview: {},         // {nodeId: {loading, error, columns, rows}}
+        realConnOptions: []
+      };
+    },
+    computed: {
+      orderedNodes: function () { return topoOrder(this.graph); },
+      joinKindOptions: function () {
+        return [{ value: "INNER", label: "INNER" }, { value: "LEFT", label: "LEFT" },
+                { value: "RIGHT", label: "RIGHT" }, { value: "FULL", label: "FULL" }];
+      }
+    },
+    methods: {
+      typeLabel: function (t) {
+        return { source: "取数", file: "文件", filter: "过滤", join: "JOIN",
+                 aggregate: "聚合", sql: "SQL", output: "输出" }[t] || t;
+      },
+      persist: function () { this.$emit("update:graph", this.graph); },
+      toggle: function (id) {
+        var was = !!this.expanded[id];
+        this.expanded[id] = !was;
+        // 首次展开且是非源节点，自动加载上游 schema（懒模式，服务端命中缓存快）
+        if (!was && !this.upstreamCols[id]) {
+          var n = this.nodeById(id);
+          if (n && n.type !== "source" && n.type !== "file") this.loadSchema(id, false);
+        }
+      },
+      nodeById: function (id) {
+        return (this.graph.nodes || []).find(function (n) { return n.id === id; }) || null;
+      },
+      joinPortsCount: function (n) { return joinPortsN(n); },
+      addJoinPort: function (n) {
+        if (!n || n.type !== "join") return;
+        var cur = joinPortsN(n);
+        if (cur >= JOIN_MAX_PORTS) return;
+        n.cfg.ports_n = cur + 1;
+        this.persist();
+      },
+      delJoinPort: function (n) {
+        if (!n || n.type !== "join") return;
+        var cur = joinPortsN(n);
+        if (cur <= 2) return;
+        n.cfg.ports_n = cur - 1;
+        var removed = "in_" + cur;
+        var self = this;
+        this.graph.edges = (this.graph.edges || []).filter(function (e) {
+          return !(e.to === n.id && normalizePort(self.nodeById(n.id), e.port) === removed);
+        });
+        this.persist();
+      },
+      // ---------- 上游 schema 感知 ----------
+      loadSchema: function (nodeId, refresh) {
+        var self = this;
+        self.upstreamCols[nodeId] = { loading: true, error: "", columns: [] };
+        apiPost(API + "/preview_columns", {
+          workspace: self.workspace, graph: JSON.stringify(self.graph),
+          node: nodeId, refresh: refresh ? "1" : "0"
+        }).then(function (d) {
+          if (!d || !d.ok) {
+            self.upstreamCols[nodeId] = { loading: false, error: (d && d.error) || "取列失败", columns: [] };
+            return;
+          }
+          self.upstreamCols[nodeId] = {
+            loading: false, error: d.error || "", columns: d.columns || []
+          };
+        });
+      },
+      upstreamCol: function (nodeId) {
+        return this.upstreamCols[nodeId] || { loading: false, error: "", columns: [] };
+      },
+      colOpts: function (nodeId) {
+        var uc = this.upstreamCol(nodeId);
+        return (uc.columns || []).map(function (c) { return { value: c.name, label: c.name + " · " + c.type }; });
+      },
+      insertCol: function (n, field, col) {
+        // 把列名插到某个 cfg 文本框的当前光标末尾（简易版：直接 append）
+        var cur = (n.cfg[field] || "").trim();
+        n.cfg[field] = cur ? cur + ", " + col : col;
+        this.persist();
+      },
+      // ---------- 单步预览「查看输出」 ----------
+      runPreview: function (nodeId) {
+        var self = this;
+        self.preview[nodeId] = { loading: true, error: "", columns: [], rows: [] };
+        apiPost(API + "/preview_node", {
+          workspace: self.workspace, graph: JSON.stringify(self.graph),
+          node: nodeId, limit: 100
+        }).then(function (d) {
+          if (!d || !d.ok) {
+            self.preview[nodeId] = { loading: false, error: (d && d.error) || "预览失败", columns: [], rows: [] };
+            return;
+          }
+          self.preview[nodeId] = {
+            loading: false, error: d.error || "",
+            columns: d.columns || [], rows: d.rows || []
+          };
+        });
+      },
+      closePreview: function (nodeId) { delete this.preview[nodeId]; },
+      // ---------- 上游节点列表（供 sql/join 引用提示） ----------
+      upstreamNames: function (nodeId) {
+        // 简单版：所有拓扑序在 nodeId 之前的节点名
+        var order = this.orderedNodes;
+        var idx = -1;
+        for (var i = 0; i < order.length; i++) if (order[i].id === nodeId) { idx = i; break; }
+        if (idx < 0) return [];
+        return order.slice(0, idx).map(function (n) { return n.name; });
+      },
+      loadConnOptions: function () {
+        var self = this;
+        apiGet("/admin/sql/connections").then(function (d) {
+          if (!d || !d.ok) return;
+          self.realConnOptions = (d.connections || []).filter(function (c) {
+            return c.project !== "analysis";
+          }).map(function (c) {
+            return { value: c.project + "/" + c.connection, label: c.project + "/" + c.connection,
+                     env: c.environment };
+          });
+        });
+      }
+    },
+    mounted: function () { this.loadConnOptions(); },
+    template:
+      '<div class="wf-modules">'
+      + '<div v-if="!orderedNodes.length" class="wf-placeholder">还没有节点。切到「蓝图」视图添加节点。</div>'
+      + '<div v-for="(n, idx) in orderedNodes" :key="n.id" class="wf-mod-card" :class="n.type">'
+      +   '<div class="wf-mod-hd" @click="toggle(n.id)">'
+      +     '<span class="wf-mod-step">{{ idx + 1 }}</span>'
+      +     '<span class="wf-mod-ty">{{ typeLabel(n.type) }}</span>'
+      +     '<b class="wf-mod-nm">{{ n.name }}</b>'
+      +     '<span class="wf-mod-caret">{{ expanded[n.id] ? "▾" : "▸" }}</span>'
+      +   '</div>'
+      +   '<div v-if="expanded[n.id]" class="wf-mod-body">'
+      // 上游 schema 显示
+      +     '<div v-if="n.type !== \'source\' && n.type !== \'file\'" class="wf-mod-schema">'
+      +       '<div class="wf-mod-schema-hd">'
+      +         '<span>上游列</span>'
+      +         '<button class="dg-btn sm" @click="loadSchema(n.id, true)" title="强制重跑上游依赖，重新读列">↻</button>'
+      +       '</div>'
+      +       '<div v-if="upstreamCol(n.id).loading" class="wf-mod-schema-msg">读取中…</div>'
+      +       '<div v-else-if="upstreamCol(n.id).error" class="wf-mod-schema-err">{{ upstreamCol(n.id).error }}</div>'
+      +       '<div v-else-if="upstreamCol(n.id).columns.length" class="wf-mod-cols">'
+      +         '<span v-for="c in upstreamCol(n.id).columns" :key="c.name" class="wf-mod-col" '
+      +           ':title="c.type + \'（点击追加到 ON/WHERE/聚合表达式）\'">'
+      +           '<b>{{ c.name }}</b><i>{{ c.type }}</i>'
+      +         '</span>'
+      +       '</div>'
+      +       '<div v-else class="wf-mod-schema-msg">（无上游或未连线）</div>'
+      +     '</div>'
+      // 节点表单
+      +     '<div class="wf-mod-form">'
+      +       '<div class="row"><label>名字</label><input v-model="n.name" @change="persist" spellcheck="false"></div>'
+      +       '<template v-if="n.type===\'source\'">'
+      +         '<div class="row"><label>连接</label><dg-select :model-value="n.cfg.conn" :options="realConnOptions" '
+      +           'placeholder="选择连接…" @update:model-value="v => { n.cfg.conn = v; persist(); }"/></div>'
+      +         '<div class="row"><label>取数 SQL</label><textarea v-model="n.cfg.sql" rows="4" @change="persist" '
+      +           'spellcheck="false" placeholder="SELECT * FROM t WHERE ..."></textarea></div>'
+      +         '<div class="row"><label>行数上限</label><input type="number" v-model.number="n.cfg.limit" @change="persist" placeholder="默认 20 万"></div>'
+      +         '<div class="row"><label>schema</label><input v-model="n.cfg.schema" @change="persist" placeholder="未绑库连接需指定"></div>'
+      +       '</template>'
+      +       '<template v-else-if="n.type===\'file\'">'
+      +         '<div class="row"><label>文件路径</label><input v-model="n.cfg.path" @change="persist" placeholder="/path/data.csv"></div>'
+      +       '</template>'
+      +       '<template v-else-if="n.type===\'filter\'">'
+      +         '<div class="row"><label>WHERE</label><textarea v-model="n.cfg.where" rows="3" @change="persist" '
+      +           'spellcheck="false" placeholder="status = \'paid\' AND amount > 100"></textarea></div>'
+      +       '</template>'
+      +       '<template v-else-if="n.type===\'join\'">'
+      +         '<div class="row"><label>类型</label><dg-select :model-value="n.cfg.kind || \'INNER\'" :options="joinKindOptions" '
+      +           '@update:model-value="v => { n.cfg.kind = v; persist(); }"/></div>'
+      +         '<div class="row"><label>输入端口数 <span class="wf-hint">{{ joinPortsCount(n) }}/8</span></label>'
+      +           '<div class="wf-btn-grp">'
+      +             '<button class="dg-btn sm" @click="delJoinPort(n)" :disabled="joinPortsCount(n)<=2">−</button>'
+      +             '<span class="wf-port-cnt">{{ joinPortsCount(n) }}</span>'
+      +             '<button class="dg-btn sm" @click="addJoinPort(n)" :disabled="joinPortsCount(n)>=8">＋</button>'
+      +           '</div>'
+      +         '</div>'
+      +         '<div class="row"><label>ON</label><input v-model="n.cfg.on" @change="persist" spellcheck="false" '
+      +           ':placeholder="joinPortsCount(n) === 2 ? \'a.uid = b.id\' : \'a.x=b.x AND b.y=c.y ...\'"></div>'
+      +         '<div class="row"><label>SELECT</label><input v-model="n.cfg.select" @change="persist" spellcheck="false" '
+      +           'placeholder="留空即 a.*, b.*, c.*..."></div>'
+      +       '</template>'
+      +       '<template v-else-if="n.type===\'aggregate\'">'
+      +         '<div class="row"><label>GROUP BY</label><input v-model="n.cfg.group" @change="persist" spellcheck="false" placeholder="留空 = 全局聚合"></div>'
+      +         '<div class="row"><label>聚合表达式</label><textarea v-model="n.cfg.aggs" rows="3" @change="persist" '
+      +           'spellcheck="false" placeholder="count(*) AS n, sum(amount) AS total"></textarea></div>'
+      +       '</template>'
+      +       '<template v-else-if="n.type===\'sql\'">'
+      +         '<div class="row">'
+      +           '<label>SQL <span v-if="upstreamNames(n.id).length" class="wf-hint">上游节点：{{ upstreamNames(n.id).join(", ") }}</span></label>'
+      +           '<textarea v-model="n.cfg.sql" rows="6" @change="persist" spellcheck="false" '
+      +             'placeholder="SELECT ...（直接用上游节点名作表名）"></textarea>'
+      +         '</div>'
+      +       '</template>'
+      +       '<template v-else-if="n.type===\'output\'">'
+      +         '<div class="row"><label>ORDER BY</label><input v-model="n.cfg.order_by" @change="persist" spellcheck="false" placeholder="total DESC"></div>'
+      +         '<div class="row"><label>LIMIT</label><input type="number" v-model.number="n.cfg.limit" @change="persist" placeholder="1000"></div>'
+      +       '</template>'
+      +     '</div>'
+      // 查看输出
+      +     '<div class="wf-mod-preview">'
+      +       '<button class="dg-btn sm" @click="runPreview(n.id)">👁 查看输出（前 100 行）</button>'
+      +       '<div v-if="preview[n.id]" class="wf-mod-preview-out">'
+      +         '<div class="wf-mod-preview-hd">'
+      +           '<span v-if="preview[n.id].loading">运行中…</span>'
+      +           '<span v-else-if="preview[n.id].error" class="wf-err">{{ preview[n.id].error }}</span>'
+      +           '<span v-else>{{ preview[n.id].rows.length }} 行 · {{ preview[n.id].columns.length }} 列</span>'
+      +           '<button class="dg-btn sm" @click="closePreview(n.id)">✕</button>'
+      +         '</div>'
+      +         '<div v-if="!preview[n.id].loading && !preview[n.id].error" class="wf-mod-preview-tbl">'
+      +           '<table><thead><tr><th v-for="c in preview[n.id].columns">{{ c }}</th></tr></thead>'
+      +             '<tbody><tr v-for="(r, ri) in preview[n.id].rows.slice(0, 20)" :key="ri">'
+      +               '<td v-for="(v, ci) in r" :key="ci">{{ v == null ? "" : String(v).slice(0, 80) }}</td>'
+      +             '</tr></tbody></table>'
+      +           '<div v-if="preview[n.id].rows.length > 20" class="wf-mod-preview-more">'
+      +             '（仅显示前 20 行；总共 {{ preview[n.id].rows.length }} 行）</div>'
+      +         '</div>'
+      +       '</div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+      + '</div>'
+  };
+
   // ---------- 主 App ----------
   var App = {
-    components: { "wf-blueprint": Blueprint },
+    components: { "wf-blueprint": Blueprint, "wf-modules": Modules },
     data: function () {
       return {
         route: parseHash(),
@@ -632,9 +895,8 @@
       +   '<div v-else class="wf-detail-body">'
       +     '<wf-blueprint v-if="viewMode===\'blueprint\'" :graph="current.graph" :conn="\'analysis/\' + current.workspace" '
       +       '@update:graph="onGraphUpdate" @run="runCurrent"/>'
-      +     '<div v-else class="wf-modules">'
-      +       '<div class="wf-placeholder">模块视图（拓扑序卡片链 + schema 感知）— 下一 task 会实现</div>'
-      +     '</div>'
+      +     '<wf-modules v-else :graph="current.graph" :workspace="current.workspace" '
+      +       '@update:graph="onGraphUpdate"/>'
       +     '<div v-if="runErr" class="wf-run-out"><h3>运行失败</h3><pre>{{ runErr }}</pre></div>'
       +     '<div v-if="runOut" class="wf-run-out">'
       +       '<h3>运行结果</h3>'
