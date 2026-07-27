@@ -197,7 +197,13 @@ class DbmService:
         self.settings = None   # SettingsStore（serve 时注入）
         self.analysis = None   # AnalysisStore（serve 时注入；未启用则分析功能不可用）
         self.workflows = None  # WorkflowStore（serve 时注入）
+        self.schedules = None  # WorkflowScheduleStore（serve 时注入）
+        self.runs = None       # WorkflowRunStore（serve 时注入）
         self._housekeeping_stop: threading.Event | None = None
+        self._scheduler_stop: threading.Event | None = None
+        # 记录本进程周期内已经为哪一分钟执行过（防止 30s tick 在同一分钟触发两次）
+        self._sched_ticked_minute: set[tuple[str, str]] = set()  # {(name, "YYYY-MM-DD HH:MM")}
+        self.data_dir = None   # serve 时注入，供 xlsx 产物落盘
 
     # ---------- 元信息 ----------
 
@@ -1655,7 +1661,7 @@ class DbmService:
         """执行一轮维护，返回统计（供测试与日志）。单项失败不影响其他项。"""
         from .inbox import DEFAULT_RETENTION_DAYS as INBOX_RETENTION
         stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0,
-                 "changes_purged": 0, "notifications_purged": 0}
+                 "changes_purged": 0, "notifications_purged": 0, "workflow_runs_purged": 0}
         for key, fn in (
             ("engines_reaped", self.pool.reap_idle),
             ("redis_reaped", self.redis_pool.reap_idle),
@@ -1665,6 +1671,8 @@ class DbmService:
             # 通知短保留（7 天）：审批提醒/exhausted 告警不必久存
             ("notifications_purged",
              (lambda: self.inbox.purge_old(INBOX_RETENTION)) if self.inbox else (lambda: 0)),
+            # workflow_run：30 天保留；同时清理 xlsx 产物目录
+            ("workflow_runs_purged", self._purge_workflow_runs),
         ):
             try:
                 stats[key] = fn()
@@ -1674,10 +1682,231 @@ class DbmService:
             logger.info("housekeeping: %s", stats)
         return stats
 
+    def _purge_workflow_runs(self, days: int = 30) -> int:
+        """清 30 天前的 workflow_run 记录 + 顺手删对应 xlsx 目录。"""
+        if self.runs is None:
+            return 0
+        paths = self.runs.purge_older_than(days)
+        if not paths or not self.data_dir:
+            return len(paths)
+        import shutil
+        from pathlib import Path
+        for rel in paths:
+            try:
+                full = Path(self.data_dir) / rel
+                if full.parent.is_dir():
+                    shutil.rmtree(full.parent, ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                logger.exception("清理 xlsx 目录失败：%s", rel)
+        return len(paths)
+
+    # ---------- 调度：CRUD + tick 循环 ----------
+
+    def workflow_schedule_upsert(self, name: str, cron_type: str, cron_value: str,
+                                 enabled: bool = True, notify_on: str = "failure",
+                                 attach_kinds: list[str] | None = None) -> dict:
+        """增/改一条调度配置。校验 cron 语法和 notify_on/attach_kinds 值域。"""
+        if self.schedules is None:
+            raise RuntimeError("调度存储未初始化（需 serve 模式运行）")
+        # workflow 存在性检查（调度只能挂在已有 workflow 上）
+        if self.workflows is None or not any(w.name == name for w in self.workflows.list()):
+            raise ValueError(f"workflow {name!r} 不存在")
+        return self.schedules.upsert(name, cron_type, cron_value, enabled=enabled,
+                                     notify_on=notify_on, attach_kinds=attach_kinds)
+
+    def workflow_schedule_get(self, name: str) -> dict | None:
+        if self.schedules is None:
+            return None
+        return self.schedules.get(name)
+
+    def workflow_schedule_delete(self, name: str) -> None:
+        if self.schedules is None:
+            return
+        self.schedules.delete(name)
+
+    def workflow_schedule_list(self) -> list[dict]:
+        if self.schedules is None:
+            return []
+        return self.schedules.list()
+
+    # ---------- 运行历史（供详情页 & 通知 deeplink 用）----------
+
+    def workflow_runs_list(self, name: str, limit: int = 50) -> list[dict]:
+        if self.runs is None:
+            return []
+        return self.runs.list_by_name(name, limit)
+
+    def workflow_run_get(self, run_id: int) -> dict | None:
+        if self.runs is None:
+            return None
+        return self.runs.get(run_id)
+
+    # ---------- 调度触发的一次执行 ----------
+
+    def _run_scheduled(self, name: str) -> None:
+        """一次调度触发：新建 workflow_run → 后台跑 → 更新状态 → 按 notify_on 发通知。
+
+        同名 workflow 上一次尚未完成 → 跳过本次（防堆积；对齐"安静即正常"红线）。
+        任何异常吞掉（scheduler tick 不应因单个 workflow 失败而挂）。
+        """
+        if self.runs is None or self.workflows is None:
+            return
+        try:
+            if self.runs.running_for(name):
+                logger.warning("scheduler: workflow %s 上次未完成，跳过本次调度", name)
+                return
+            sched = self.schedules.get(name) if self.schedules is not None else None
+            run_id = self.runs.start(name, triggered_by="schedule")
+            # 走既有 workflow_run（此处 caller 用 scheduler；审计记录里区分）
+            sched_caller = CallerInfo(agent="scheduler", session_id=f"sched-{run_id}")
+            try:
+                out = self.workflow_run(name, sched_caller)
+                ok = out.get("ok") is True
+                # 输出预览：只留可控大小（保存整个 rows 的话表膨胀），前 100 行
+                op = out.get("output") or None
+                op_saved: dict = {}
+                if op:
+                    op_saved = {"columns": op.get("columns") or [],
+                                "rows": (op.get("rows") or [])[:100],
+                                "row_count": op.get("row_count", 0)}
+                # xlsx 产物：attach_kinds 含 xlsx_link 才生成
+                xlsx_path: str | None = None
+                attach_kinds = (sched or {}).get("attach_kinds") or []
+                if ok and op and "xlsx_link" in attach_kinds and self.data_dir:
+                    xlsx_path = self._save_run_xlsx(run_id, op)
+                self.runs.finish(run_id, "ok" if ok else "failed",
+                                 steps=out.get("steps") or [],
+                                 output_preview=op_saved,
+                                 error="" if ok else (
+                                     (out.get("steps") or [{}])[-1].get("error", "") or "运行失败"),
+                                 xlsx_path=xlsx_path)
+            except Exception as e:  # noqa: BLE001
+                self.runs.finish(run_id, "failed", error=f"{type(e).__name__}: {e}")
+                ok = False
+            # 更新 schedule 元数据
+            if self.schedules is not None:
+                try:
+                    self.schedules.mark_ran(name, "ok" if ok else "failed")
+                except Exception:  # noqa: BLE001
+                    logger.exception("mark_ran 失败：%s", name)
+            # 通知
+            self._notify_scheduled_run(name, run_id, sched)
+        except Exception:  # noqa: BLE001
+            logger.exception("_run_scheduled 未预期失败：%s", name)
+
+    def _save_run_xlsx(self, run_id: int, output: dict) -> str | None:
+        """把 workflow_run 的输出落成 xlsx，返回相对 data_dir 的路径（或 None）。"""
+        from pathlib import Path
+
+        from . import export
+        try:
+            cols = output.get("columns") or []
+            rows = output.get("rows") or []
+            if not cols:
+                return None
+            rel = f"workflow_runs/{run_id}/output.xlsx"
+            full = Path(self.data_dir) / rel
+            full.parent.mkdir(parents=True, exist_ok=True)
+            data = export.to_xlsx(cols, rows)
+            full.write_bytes(data)
+            return rel
+        except Exception:  # noqa: BLE001
+            logger.exception("生成 xlsx 失败：run_id=%s", run_id)
+            return None
+
+    def _notify_scheduled_run(self, name: str, run_id: int, sched: dict | None) -> None:
+        """按 notify_on 决定是否发通知；富通知走 render_workflow_notification。"""
+        if not sched:
+            return
+        notify_on = sched.get("notify_on") or "failure"
+        if notify_on == "none":
+            return
+        run = self.runs.get(run_id) if self.runs is not None else None
+        if not run:
+            return
+        ok = run.get("status") == "ok"
+        if notify_on == "success" and not ok:
+            return
+        if notify_on == "failure" and ok:
+            return
+        try:
+            from .notify import render_workflow_notification
+            settings = self.get_settings() if self.settings is not None else {}
+            admin_base_url = (settings.get("admin_base_url") or "").strip()
+            download_path = None
+            if run.get("xlsx_path"):
+                download_path = f"/admin/workflows/runs/{run_id}/download/output.xlsx"
+            payload = render_workflow_notification(
+                name, run, sched.get("attach_kinds") or ["summary"],
+                admin_base_url=admin_base_url, download_path=download_path)
+            self.notifier.send(payload["title"], payload["body"], meta=payload["meta"])
+        except Exception:  # noqa: BLE001
+            logger.exception("workflow 通知发送失败：run_id=%s", run_id)
+
+    def start_scheduler(self, interval_s: int = 30) -> None:
+        """启动调度器 daemon 线程。tick 粒度 30s（下拉最小 1min，抖动 ≤30s）。
+
+        安静即正常红线：__init__ 默认不启动（测试路径永不真跑），只 _cmd_serve 显式调。
+        启动时先扫一遍 workflow_run 把 1h 前还挂 running 的记录标 failed（防重启阻塞）。
+        """
+        if self._scheduler_stop is not None or self.schedules is None or self.runs is None:
+            return
+        try:
+            swept = self.runs.sweep_stale_running(older_than_hours=1)
+            if swept:
+                logger.info("scheduler: sweep %d stale running", swept)
+        except Exception:  # noqa: BLE001
+            logger.exception("scheduler: sweep stale 失败")
+        stop = threading.Event()
+        self._scheduler_stop = stop
+
+        def _loop() -> None:
+            while not stop.wait(interval_s):
+                try:
+                    self._scheduler_tick()
+                except Exception:  # noqa: BLE001
+                    logger.exception("scheduler tick 失败")
+
+        threading.Thread(target=_loop, daemon=True, name="dbm-scheduler").start()
+
+    def _scheduler_tick(self) -> None:
+        """遍历 enabled 调度 → cron_matches(now) → 触发。同分钟内每个 workflow 只跑一次。"""
+        if self.schedules is None:
+            return
+        from datetime import datetime
+
+        from .workflows import cron_from_dropdown, cron_matches
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d %H:%M")
+        for sched in self.schedules.list_enabled():
+            name = sched["name"]
+            key = (name, stamp)
+            if key in self._sched_ticked_minute:
+                continue
+            try:
+                cron_expr = cron_from_dropdown(sched["cron_type"], sched["cron_value"])
+            except ValueError:
+                logger.exception("scheduler: 非法 cron %s / %s / %s",
+                                 name, sched["cron_type"], sched["cron_value"])
+                continue
+            if not cron_matches(cron_expr, now):
+                continue
+            self._sched_ticked_minute.add(key)
+            # 清理旧分钟条目（防内存增长）
+            if len(self._sched_ticked_minute) > 10000:
+                self._sched_ticked_minute.clear()
+            # 后台线程跑，别阻塞 tick 循环
+            threading.Thread(
+                target=self._run_scheduled, args=(name,),
+                daemon=True, name=f"dbm-wf-run-{name}").start()
+
     def close(self) -> None:
         if self._housekeeping_stop is not None:
             self._housekeeping_stop.set()
             self._housekeeping_stop = None
+        if self._scheduler_stop is not None:
+            self._scheduler_stop.set()
+            self._scheduler_stop = None
         self.health.stop()
         self.pool.dispose()
         self.redis_pool.dispose()
@@ -1692,3 +1921,7 @@ class DbmService:
             self.settings.close()
         if self.inbox is not None:
             self.inbox.close()
+        if self.schedules is not None:
+            self.schedules.close()
+        if self.runs is not None:
+            self.runs.close()
