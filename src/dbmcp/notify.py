@@ -318,3 +318,108 @@ def build_default_notifier() -> Notifier:
     以支持"改设置即时生效"。
     """
     return MacOsNotifier() if is_macos() else NoopNotifier()
+
+
+# =========================================================
+# workflow 富通知：三级产物
+# =========================================================
+# 通知渠道能力差异大：Bark 只文本+url；wecom markdown 4096B；feishu post 有限；
+# macOS 桌面只文本+url。策略：拼一段文本 body（可含 markdown 表），加 deeplink 到
+# 运行详情页；产物（xlsx）挂到详情页里下载，通知只带链接。
+
+
+def truncate_notification_body(body: str, max_bytes: int = 3000) -> str:
+    """按 UTF-8 字节安全截断（不切半个字符）+ 尾部加省略号。
+
+    用于 wecom markdown 4096B / bark body 几百字 / feishu post 有限 的统一兜底。
+    """
+    if not body:
+        return ""
+    enc = body.encode("utf-8")
+    if len(enc) <= max_bytes:
+        return body
+    ellipsis = "\n\n…（已截断）"
+    reserve = len(ellipsis.encode("utf-8"))
+    # 从 max_bytes-reserve 处回退到 UTF-8 字符边界
+    cut = max_bytes - reserve
+    if cut <= 0:
+        return ellipsis
+    truncated = enc[:cut]
+    # 回退到最后一个不切字符的位置
+    while truncated and (truncated[-1] & 0xC0) == 0x80:
+        truncated = truncated[:-1]
+    # 若最后一个字节是多字节字符的起始，也回退
+    if truncated and (truncated[-1] & 0xE0) == 0xC0:
+        truncated = truncated[:-1]
+    elif truncated and (truncated[-1] & 0xF0) == 0xE0:
+        truncated = truncated[:-1]
+    elif truncated and (truncated[-1] & 0xF8) == 0xF0:
+        truncated = truncated[:-1]
+    return truncated.decode("utf-8", errors="ignore") + ellipsis
+
+
+def render_markdown_table(columns: list[str], rows: list[list], max_rows: int = 20) -> str:
+    """把结果集前 N 行渲染为 markdown 表（三种 provider 都能承载）。"""
+    if not columns:
+        return "（无输出列）"
+    head = "| " + " | ".join(str(c) for c in columns) + " |"
+    sep = "| " + " | ".join(["---"] * len(columns)) + " |"
+    body_rows = []
+    for r in (rows or [])[:max_rows]:
+        cells = ["" if v is None else str(v).replace("|", "\\|").replace("\n", " ") for v in r]
+        body_rows.append("| " + " | ".join(cells) + " |")
+    out = "\n".join([head, sep] + body_rows)
+    total = len(rows or [])
+    if total > max_rows:
+        out += f"\n\n（仅显示前 {max_rows} 行；总共 {total} 行）"
+    return out
+
+
+def render_workflow_notification(
+    workflow_name: str, run: dict, attach_kinds: list[str],
+    admin_base_url: str = "", download_path: str | None = None,
+) -> dict:
+    """把 workflow 运行结果拼装为通知 payload。
+
+    - kinds 含 'summary'（默认必发）：一行摘要 + deeplink
+    - kinds 含 'markdown_table'：把 output.rows_preview 前 20 行拼 markdown 表进 body
+    - kinds 含 'xlsx_link'（且 download_path 有值）：body 附下载链接
+    - body 统一 3000 字节兜底
+    """
+    ok = run.get("status") == "ok"
+    icon = "✓" if ok else "✗"
+    title = f"[Quay] workflow「{workflow_name}」{'完成' if ok else '失败'}"
+    lines: list[str] = []
+    summary_line = f"{icon} 状态 {run.get('status')}"
+    output = run.get("output_preview") or {}
+    if ok and output:
+        rows = output.get("rows") or output.get("rows_preview") or []
+        cols = output.get("columns") or output.get("cols") or []
+        summary_line += f" · 输出 {len(rows)} 行 × {len(cols)} 列"
+    elif not ok and run.get("error"):
+        summary_line += f" · {run.get('error')}"
+    lines.append(summary_line)
+
+    run_id = run.get("id")
+    deeplink = None
+    if run_id is not None and admin_base_url:
+        deeplink = f"{admin_base_url.rstrip('/')}/admin/workflows/runs/{run_id}"
+        lines.append(f"查看详情：{deeplink}")
+
+    if "markdown_table" in attach_kinds and ok and output:
+        rows = output.get("rows") or output.get("rows_preview") or []
+        cols = output.get("columns") or output.get("cols") or []
+        if cols and rows:
+            lines.append("")
+            lines.append(render_markdown_table(cols, rows))
+
+    if "xlsx_link" in attach_kinds and download_path and admin_base_url:
+        dl = f"{admin_base_url.rstrip('/')}{download_path}"
+        lines.append(f"\n下载完整结果：{dl}")
+
+    body = truncate_notification_body("\n".join(lines))
+    meta: dict = {"kind": "workflow_run", "workflow": workflow_name, "run_id": run_id,
+                  "status": run.get("status")}
+    if deeplink:
+        meta["deeplink"] = deeplink
+    return {"title": title, "body": body, "meta": meta}
