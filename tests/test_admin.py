@@ -734,6 +734,64 @@ def test_ai_route_generates_when_enabled(client, monkeypatch):
     assert d["session_id"] == "sid-9"
 
 
+def test_workflow_preview_columns_http(client, tmp_path):
+    """preview_columns 路由：成功返回列/类型；参数缺失 400；graph 非法 400。"""
+    import json as _json
+
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    g = {"nodes": [
+        {"id": "a", "type": "source", "name": "u",
+         "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}},
+        {"id": "b", "type": "filter", "name": "flt", "cfg": {"where": "id >= 1"}}],
+        "edges": [{"from": "a", "to": "b", "port": "in"}]}
+    r = tc.post("/admin/workflows/preview_columns",
+                data={"workspace": "ws1", "node": "b", "graph": _json.dumps(g)})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert {c["name"] for c in d["columns"]} >= {"id", "name"}
+    # 参数缺失
+    r2 = tc.post("/admin/workflows/preview_columns", data={"node": "b"})
+    assert r2.status_code == 400
+    # graph 非法 JSON
+    r3 = tc.post("/admin/workflows/preview_columns",
+                 data={"workspace": "ws1", "node": "b", "graph": "not-json"})
+    assert r3.status_code == 400
+
+
+def test_workflow_preview_node_http(client, tmp_path):
+    """preview_node 路由：拿前 N 行数据，走 analysis 沙箱。"""
+    import json as _json
+
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    g = {"nodes": [{"id": "a", "type": "source", "name": "u",
+                    "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}}],
+         "edges": []}
+    r = tc.post("/admin/workflows/preview_node",
+                data={"workspace": "ws1", "node": "a", "graph": _json.dumps(g), "limit": "5"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["ok"] is True
+    assert set(d["columns"]) >= {"id", "name"}
+    assert d["row_count"] >= 1
+
+
+def test_workflow_workspaces_http(client, tmp_path):
+    """workspaces 列表路由：analysis 未初始化时应友好错误，初始化后能列出。"""
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    # 未初始化 analysis → analysis_overview 抛
+    r = tc.get("/admin/workflows/workspaces")
+    assert r.status_code == 400
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    r2 = tc.get("/admin/workflows/workspaces")
+    assert r2.status_code == 200 and r2.json()["ok"] is True
+
+
 def test_workflow_ai_gated_and_generates(client, monkeypatch):
     """流程 AI 路由：未开启 403；开启后返回校验通过的 graph（假 ai.generate_workflow）。"""
     from dbmcp import ai

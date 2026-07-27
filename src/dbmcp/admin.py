@@ -2178,6 +2178,73 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         job_id = _jobmgr.submit(_solo_key(), _work_graph)
         return JSONResponse({"ok": True, "job_id": job_id})
 
+    @mcp.custom_route("/admin/workflows/preview_columns", methods=["POST"])
+    @guard
+    async def _wf_preview_columns(req: Request) -> JSONResponse:
+        """拿目标节点输出的列 schema（编译到该节点前依赖，DESCRIBE 该 view）。
+
+        Body: graph=<json>, workspace, node, refresh?=0/1。
+        返回 {ok, columns:[{name,type}]} 或 {ok, columns:[], error:"..."}。
+        """
+        import json as _json
+        f = await req.form()
+        workspace = str(f.get("workspace") or "").strip()
+        node_id = str(f.get("node") or "").strip()
+        refresh = str(f.get("refresh") or "").strip() in ("1", "true", "yes")
+        if not workspace or not node_id:
+            return JSONResponse({"ok": False, "error": "workspace 与 node 必填"}, status_code=400)
+        try:
+            graph = _json.loads(str(f.get("graph") or ""))
+            if not isinstance(graph, dict):
+                raise ValueError("graph 必须是对象")
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": f"graph JSON 非法：{e}"}, status_code=400)
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: service.workflow_preview_columns(workspace, graph, node_id,
+                                                        _caller(req), refresh))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/workflows/preview_node", methods=["POST"])
+    @guard
+    async def _wf_preview_node(req: Request) -> JSONResponse:
+        """预览目标节点输出的前 N 行（模块视图「查看输出」）。"""
+        import json as _json
+        f = await req.form()
+        workspace = str(f.get("workspace") or "").strip()
+        node_id = str(f.get("node") or "").strip()
+        try:
+            limit = int(str(f.get("limit") or "100"))
+        except ValueError:
+            limit = 100
+        if not workspace or not node_id:
+            return JSONResponse({"ok": False, "error": "workspace 与 node 必填"}, status_code=400)
+        try:
+            graph = _json.loads(str(f.get("graph") or ""))
+            if not isinstance(graph, dict):
+                raise ValueError("graph 必须是对象")
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": f"graph JSON 非法：{e}"}, status_code=400)
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: service.workflow_preview_node(workspace, graph, node_id, _caller(req),
+                                                     limit))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/workflows/workspaces", methods=["GET"])
+    @guard
+    async def _wf_workspaces(_req: Request) -> JSONResponse:
+        """列已有工作区（新页新建 workflow 时下拉用）。"""
+        try:
+            out = await anyio.to_thread.run_sync(service.analysis_overview)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "workspaces": out})
+
     @mcp.custom_route("/admin/sql/search_tables", methods=["GET"])
     @guard
     async def _sql_search_tables(req: Request) -> JSONResponse:

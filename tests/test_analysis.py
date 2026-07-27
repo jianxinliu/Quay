@@ -380,6 +380,66 @@ class TestGraph:
         prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
         assert prev["rows"][0][0] == 2
 
+    def test_preview_columns_lazy_and_refresh(self, service, tmp_path):
+        """preview_columns：懒建模式复用已存 view；refresh=True 强制重建。"""
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30"),
+                _node("c", "aggregate", "stats", group="", aggs="count(*) AS n")],
+             "edges": [{"from": "a", "to": "b", "port": "in"},
+                       {"from": "b", "to": "c", "port": "in"}]}
+        # 首次预览 b：懒建应从空工作区物化 source a + step b
+        out = service.workflow_preview_columns("ws1", g, "b", CALLER)
+        assert out["columns"] and {c["name"] for c in out["columns"]} == {"id", "name", "age"}
+        assert "error" not in out
+        # 第二次同节点：懒模式命中已建 view，直接 DESCRIBE
+        out2 = service.workflow_preview_columns("ws1", g, "b", CALLER)
+        assert out2 == out
+        # 预览 c：会追加建 c，b 已存不再重跑
+        outc = service.workflow_preview_columns("ws1", g, "c", CALLER)
+        assert {c["name"] for c in outc["columns"]} == {"n"}
+        # refresh=True 强制重建
+        out_r = service.workflow_preview_columns("ws1", g, "b", CALLER, refresh=True)
+        assert out_r == out
+
+    def test_preview_columns_missing_node(self, service):
+        g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users")],
+             "edges": []}
+        out = service.workflow_preview_columns("ws1", g, "not-exist", CALLER)
+        assert out["columns"] == [] and "不在流程中" in out["error"]
+
+    def test_preview_columns_compile_error(self, service):
+        """编译失败 → 返回 {columns:[], error}，不抛异常。"""
+        g = {"nodes": [_node("a", "filter", "f", where="x")], "edges": []}
+        out = service.workflow_preview_columns("ws1", g, "a", CALLER)
+        assert out["columns"] == [] and "编译流程失败" in out["error"]
+
+    def test_preview_columns_upstream_error(self, service):
+        """上游连接不存在 → error 携带节点名，不抛。"""
+        g = {"nodes": [
+                _node("a", "source", "bad_src", conn="nope/nope", sql="SELECT 1"),
+                _node("b", "filter", "flt", where="1=1")],
+             "edges": [{"from": "a", "to": "b", "port": "in"}]}
+        out = service.workflow_preview_columns("ws1", g, "b", CALLER)
+        assert out["columns"] == [] and "bad_src" in out["error"]
+
+    def test_preview_node_returns_rows(self, service):
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30")],
+             "edges": [{"from": "a", "to": "b", "port": "in"}]}
+        out = service.workflow_preview_node("ws1", g, "b", CALLER, limit=10)
+        assert set(out["columns"]) == {"id", "name", "age"}
+        # alice(30) + carol(41) 两行
+        assert out["row_count"] == 2
+
+    def test_preview_node_limit_clamped(self, service):
+        g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users")],
+             "edges": []}
+        out = service.workflow_preview_node("ws1", g, "a", CALLER, limit=10000)
+        # 上限 1000，clamp 不抛
+        assert out["row_count"] <= 1000
+
     def test_agent_save_workflow_guard(self, service, tmp_path):
         """agent 侧保存（allow_replace_graph=False）：可建/覆盖脚本式，不可覆盖人画的 DAG。"""
         from dbmcp.workflows import WorkflowStore

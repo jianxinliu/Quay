@@ -96,6 +96,66 @@ def _layout_graph(graph: dict) -> None:
         n["y"] = 30 + row * 100
 
 
+def _plan_node_name(plan: dict, node_id: str, graph: dict) -> str | None:
+    """从编译后的 plan 找目标节点的名字（=工作区里的表/视图名）。
+
+    plan 里 sources 有 node/dataset，steps 有 node/name；这些都是 compile_graph 输出。
+    output 节点是虚 output_sql 无独立 view，此时回退取 graph.nodes[node_id].name。
+    """
+    for src in plan.get("sources") or []:
+        if src.get("node") == node_id:
+            return src.get("dataset")
+    for st in plan.get("steps") or []:
+        if st.get("node") == node_id:
+            return st.get("name")
+    for n in graph.get("nodes") or []:
+        if n.get("id") == node_id:
+            return (n.get("name") or "").strip() or None
+    return None
+
+
+def _plan_prefix_for(plan: dict, target_name: str) -> dict:
+    """从 plan 里挑出「构建 target_name 所必需的」sources + steps（按 plan 顺序，保拓扑序）。
+
+    简单实现：走 SQL 里的 FROM/JOIN 关联反向追依赖太脆；这里保守起见——
+    截到 target 在 steps 中出现的位置为止（含），sources 全带上（不多也不害事）。
+    """
+    sources = list(plan.get("sources") or [])
+    steps: list[dict] = []
+    for st in plan.get("steps") or []:
+        steps.append(st)
+        if st.get("name") == target_name:
+            break
+    return {"sources": sources, "steps": steps}
+
+
+def _dataset_exists(store, workspace: str, name: str) -> bool:
+    """工作区中是否已存在同名 table 或 view。"""
+    try:
+        con = store._connect(workspace, must_exist=False)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        row = con.execute(
+            "SELECT 1 FROM information_schema.tables"
+            " WHERE table_schema='main' AND table_name = ? LIMIT 1",
+            [name]).fetchone()
+        return row is not None
+    finally:
+        con.close()
+
+
+def _describe_columns(store, workspace: str, name: str) -> list[dict]:
+    """DuckDB DESCRIBE 拿列名/类型。"""
+    con = store._connect(workspace)
+    try:
+        rows = con.execute(f'DESCRIBE "{name}"').fetchall()
+    finally:
+        con.close()
+    # DESCRIBE 返回 (column_name, column_type, null, key, default, extra)
+    return [{"name": r[0], "type": r[1]} for r in rows]
+
+
 @dataclass
 class CallerInfo:
     agent: str = "unknown"
@@ -651,6 +711,80 @@ class DbmService:
             return {"workflow": None, "ok": False, "output": None,
                     "steps": [{"step": "编译流程", "ok": False, "error": str(e)}]}
         return {"workflow": None, **self._run_plan(workspace, plan["sources"], plan["steps"], caller)}
+
+    def workflow_preview_columns(self, workspace: str, graph: dict, node_id: str,
+                                 caller: CallerInfo, refresh: bool = False) -> dict:
+        """拿目标节点输出的列 schema（供上游 schema 感知用）。
+
+        懒建策略：目标节点在工作区里已有对应 view/table 就直接 DESCRIBE；
+        否则递归确保它依赖的 sources 已导入 + 前置 steps 已建 view，再 DESCRIBE。
+        refresh=True 时强制重建（用于用户点「刷新 schema」）。
+        编译异常或上游取数失败 → 返回 {columns:[], error:...} 而非抛（让前端友好提示）。
+        """
+        from .workflows import WorkflowError, compile_graph
+        try:
+            plan = compile_graph(graph)
+        except WorkflowError as e:
+            return {"columns": [], "error": f"编译流程失败：{e}"}
+        target_name = _plan_node_name(plan, node_id, graph)
+        if not target_name:
+            return {"columns": [], "error": f"节点 {node_id!r} 不在流程中"}
+        store = self._require_analysis()
+        # 懒模式：目标已存在直接 DESCRIBE
+        if not refresh and _dataset_exists(store, workspace, target_name):
+            return {"columns": _describe_columns(store, workspace, target_name)}
+        # 递归物化：只做目标依赖链上的 sources/steps
+        needed = _plan_prefix_for(plan, target_name)
+        for src in needed["sources"]:
+            dataset = src["dataset"]
+            if not refresh and _dataset_exists(store, workspace, dataset):
+                continue
+            try:
+                if src.get("kind") == "file":
+                    self.analysis_import_file(workspace, dataset, src["path"], caller)
+                else:
+                    self.analysis_import(workspace, dataset, src["project"], src["connection"],
+                                         src["sql"], caller,
+                                         limit=src.get("limit"), schema=src.get("schema"))
+            except Exception as e:  # noqa: BLE001
+                return {"columns": [], "error": f"上游节点「{dataset}」取数失败：{e}"}
+        for st in needed["steps"]:
+            step_name = st.get("name")
+            if not step_name:
+                continue
+            if not refresh and _dataset_exists(store, workspace, step_name):
+                continue
+            try:
+                self.analysis_sql(workspace, st["sql"], caller)
+            except Exception as e:  # noqa: BLE001
+                return {"columns": [], "error": f"节点「{step_name}」构建失败：{e}"}
+        return {"columns": _describe_columns(store, workspace, target_name)}
+
+    def workflow_preview_node(self, workspace: str, graph: dict, node_id: str,
+                              caller: CallerInfo, limit: int = 100) -> dict:
+        """预览目标节点的输出前 N 行（模块视图「查看输出」按钮）。
+
+        先确保依赖链已物化（复用 preview_columns 的懒模式），再 SELECT * LIMIT N。
+        返回 analysis_sql 的标准 dict（columns/rows/row_count）或 {error}。
+        """
+        cols_result = self.workflow_preview_columns(workspace, graph, node_id, caller)
+        if cols_result.get("error"):
+            return {"columns": [], "rows": [], "row_count": 0, "error": cols_result["error"]}
+        from .workflows import compile_graph
+        try:
+            plan = compile_graph(graph)
+        except Exception as e:  # noqa: BLE001
+            return {"columns": [], "rows": [], "row_count": 0, "error": str(e)}
+        target_name = _plan_node_name(plan, node_id, graph)
+        if not target_name:
+            return {"columns": [], "rows": [], "row_count": 0,
+                    "error": f"节点 {node_id!r} 不在流程中"}
+        try:
+            n = max(1, min(int(limit or 100), 1000))
+        except (TypeError, ValueError):
+            n = 100
+        return self.analysis_sql(workspace,
+                                 f'SELECT * FROM "{target_name}" LIMIT {n}', caller)
 
     def _run_plan(self, workspace: str, sources: list[dict], steps: list[dict],
                   caller: CallerInfo) -> dict:
