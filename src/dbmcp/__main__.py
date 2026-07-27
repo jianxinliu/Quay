@@ -101,11 +101,15 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     service.snippets = SnippetStore(db_path)
     from .analysis import AnalysisStore
     from .examples import seed_examples
-    from .workflows import WorkflowStore
+    from .workflows import WorkflowRunStore, WorkflowScheduleStore, WorkflowStore
     service.analysis = AnalysisStore(Path(args.data_dir) / "analysis")
     service.workflows = WorkflowStore(db_path)
+    service.schedules = WorkflowScheduleStore(db_path)
+    service.runs = WorkflowRunStore(db_path)
+    service.data_dir = args.data_dir  # xlsx 产物落到 data_dir/workflow_runs/{run_id}/
     seed_examples(service.workflows, args.data_dir)  # 首次启动播种示例 workflow
     service.start_housekeeping(retention_days=args.retention_days)
+    service.start_scheduler(interval_s=30)  # 每 30s tick 一次；对齐下拉最小 1 分钟粒度
     mcp = build_mcp(service)
 
     try:
