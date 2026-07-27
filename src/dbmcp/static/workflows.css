@@ -1,0 +1,70 @@
+/* 流程独立页样式：复用 console.css 的 --dg-* 变量与 .dg-btn/.dg-sel */
+@import url("/admin/static/console.css");
+
+.wf-root {
+  --wf-pad: 24px;
+  height: 100vh;
+  overflow: auto;
+  background: var(--dg-bg);
+  color: var(--dg-text);
+  font: 13px/1.5 -apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif;
+}
+
+/* ---------- 列表页 ---------- */
+.wf-list { padding: var(--wf-pad); max-width: 1200px; }
+.wf-list-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.wf-list-hd h2 { margin: 0; font-size: 20px; font-weight: 600; color: var(--dg-text); }
+.wf-err { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c;
+  padding: 8px 12px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
+.wf-empty { color: var(--dg-muted); padding: 40px 0; text-align: center; font-size: 13px; }
+
+.wf-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.wf-card { background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px;
+  padding: 14px 16px; cursor: pointer; transition: border-color .12s, transform .12s; }
+.wf-card:hover { border-color: var(--dg-accent); transform: translateY(-1px); }
+.wf-card-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.wf-card-hd b { font-size: 14px; color: var(--dg-text); }
+.wf-ws { color: var(--dg-muted); font-size: 11px; padding: 2px 6px; background: var(--dg-panel-dim); border-radius: 3px; }
+.wf-card-meta { display: flex; justify-content: space-between; color: var(--dg-muted); font-size: 11px; margin-bottom: 10px; }
+.wf-card-acts { display: flex; gap: 6px; }
+.wf-card-acts .dg-btn { flex: 1; }
+
+/* ---------- 新建页 ---------- */
+.wf-new { padding: var(--wf-pad); max-width: 600px; }
+.wf-new-hd { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.wf-new-hd h2 { margin: 0; font-size: 20px; color: var(--dg-text); }
+.wf-new-hd a { color: var(--dg-accent); text-decoration: none; font-size: 13px; }
+.wf-form { background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px; padding: 20px; }
+.wf-form label { display: block; margin-top: 12px; margin-bottom: 4px; font-size: 12px; color: var(--dg-muted); }
+.wf-form label:first-child { margin-top: 0; }
+.wf-form input { width: 100%; padding: 7px 9px; background: var(--dg-input); border: 1px solid var(--dg-border);
+  border-radius: 4px; color: var(--dg-text); font-size: 13px; box-sizing: border-box; }
+.wf-form input:focus { outline: none; border-color: var(--dg-accent); }
+.wf-form .dg-sel { width: 100%; }
+.wf-new-ws { display: flex; gap: 8px; margin-top: 6px; }
+.wf-new-ws input { flex: 1; }
+.wf-form-acts { margin-top: 20px; display: flex; gap: 8px; }
+
+/* ---------- 详情页 ---------- */
+.wf-detail { padding: var(--wf-pad); display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+.wf-detail-hd { display: flex; align-items: center; gap: 14px; padding-bottom: 12px;
+  border-bottom: 1px solid var(--dg-border); flex: none; }
+.wf-detail-hd a { color: var(--dg-accent); text-decoration: none; font-size: 13px; }
+.wf-detail-hd b { font-size: 16px; color: var(--dg-text); }
+.wf-detail-hd .wf-ws { margin-right: auto; }
+.wf-tabs { display: flex; gap: 2px; background: var(--dg-panel-dim); border-radius: 6px; padding: 3px; }
+.wf-tabs button { background: transparent; border: none; color: var(--dg-muted); padding: 5px 14px;
+  border-radius: 4px; cursor: pointer; font-size: 12px; }
+.wf-tabs button.active { background: var(--dg-panel); color: var(--dg-text); }
+.wf-detail-body { flex: 1; overflow: auto; padding-top: 14px; }
+.wf-placeholder { color: var(--dg-muted); padding: 60px 0; text-align: center; font-size: 13px;
+  background: var(--dg-panel-dim); border-radius: 8px; }
+.wf-run-out { margin-top: 20px; background: var(--dg-panel); border: 1px solid var(--dg-border);
+  border-radius: 8px; padding: 14px; }
+.wf-run-out h3 { margin: 0 0 10px; font-size: 13px; color: var(--dg-text); font-weight: 600; }
+.wf-run-out pre { margin: 0; padding: 12px; background: var(--dg-input); border-radius: 4px;
+  color: var(--dg-text); font-size: 12px; max-height: 400px; overflow: auto;
+  font-family: ui-monospace,'SF Mono',Menlo,monospace; }
+
+/* ---------- 通用按钮补齐（.dg-btn / .dg-btn.run / .dg-btn.danger 已在 console.css） ---------- */
+.dg-btn.sm { padding: 4px 10px; font-size: 12px; }

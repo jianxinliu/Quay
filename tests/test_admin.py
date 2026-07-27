@@ -734,6 +734,17 @@ def test_ai_route_generates_when_enabled(client, monkeypatch):
     assert d["session_id"] == "sid-9"
 
 
+def test_workflow_new_page_and_list_route(client):
+    """新页 GET /admin/workflows 返 HTML shell（含 Vue 挂载点）；老 JSON 迁到 /list。"""
+    tc, _ = client
+    r = tc.get("/admin/workflows")
+    assert r.status_code == 200
+    assert 'id="wf-app"' in r.text and "workflows.js" in r.text
+    # 老 JSON 端点被搬到 /list
+    r2 = tc.get("/admin/workflows/list")
+    assert r2.status_code == 200 and r2.json()["ok"] is True
+
+
 def test_workflow_preview_columns_http(client, tmp_path):
     """preview_columns 路由：成功返回列/类型；参数缺失 400；graph 非法 400。"""
     import json as _json
@@ -790,6 +801,25 @@ def test_workflow_workspaces_http(client, tmp_path):
     svc.analysis = AnalysisStore(tmp_path / "analysis")
     r2 = tc.get("/admin/workflows/workspaces")
     assert r2.status_code == 200 and r2.json()["ok"] is True
+
+
+def test_workflow_workspace_create_http(client, tmp_path):
+    """workspace_create 路由：建成功后能被 workspaces 列表返回；重名幂等。"""
+    from dbmcp.analysis import AnalysisStore
+    tc, svc = client
+    svc.analysis = AnalysisStore(tmp_path / "analysis")
+    # 空名 400
+    r0 = tc.post("/admin/workflows/workspace_create", data={"name": ""})
+    assert r0.status_code == 400
+    # 建成功
+    r = tc.post("/admin/workflows/workspace_create", data={"name": "ws_test"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # 列表能看到
+    ws = tc.get("/admin/workflows/workspaces").json()["workspaces"]
+    assert any(w["workspace"] == "ws_test" for w in ws)
+    # 幂等（DuckDB 里再连一次即可，不报错）
+    r2 = tc.post("/admin/workflows/workspace_create", data={"name": "ws_test"})
+    assert r2.status_code == 200
 
 
 def test_workflow_ai_gated_and_generates(client, monkeypatch):

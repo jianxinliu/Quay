@@ -184,6 +184,7 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
   <nav>
    <a href="/admin/sql"><span class="nico nico-sql"></span>查询台</a>
    <a href="/admin/redis"><span class="nico nico-redis"></span>Redis</a>
+   <a href="/admin/workflows"><span class="nico nico-flow"></span>流程</a>
    <a href="/admin/approvals"><span class="nico nico-approve"></span>审批中心{nav_badge}</a>
    <a href="/admin/audit"><span class="nico nico-audit"></span>操作审计</a>
    <a href="/admin/settings"><span class="nico nico-settings"></span>系统设置</a>
@@ -684,6 +685,8 @@ def _console_body() -> str:
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         # MySQL 内置函数文档（编辑器 hover 用），须先于 console.js 加载
         '<script src="/admin/static/sqlfuncs.js"></script>'
+        # 共享自绘下拉（console/redis/workflows 三页共用），须先于 console.js
+        '<script src="/admin/static/dg-select.js"></script>'
         '<script src="/admin/static/console.js"></script>'
     )
 
@@ -696,6 +699,7 @@ def _redis_body() -> str:
         '<div id="dbm-redis"></div>'
         '<script src="/admin/static/vue.global.prod.js"></script>'
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
+        '<script src="/admin/static/dg-select.js"></script>'
         '<script src="/admin/static/redis.js"></script>'
     )
 
@@ -2083,10 +2087,21 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 + _settings_tabs(tab) + content)
         return _shell("系统设置", body)
 
-    @mcp.custom_route("/admin/workflows", methods=["GET"])
+    @mcp.custom_route("/admin/workflows/list", methods=["GET"])
     @guard
     async def _wf_list(_req: Request) -> JSONResponse:
         return JSONResponse({"ok": True, "workflows": service.workflow_list()})
+
+    @mcp.custom_route("/admin/workflows", methods=["GET"])
+    @guard
+    async def _wf_page(_req: Request) -> HTMLResponse:
+        """流程独立页——Vue 挂载点，SPA 内部路由（列表页 / 详情页）由 workflows.js 判断。"""
+        body = ('<div id="wf-app"></div>'
+                '<link rel="stylesheet" href="/admin/static/workflows.css">'
+                '<script src="/admin/static/vue.global.prod.js"></script>'
+                '<script src="/admin/static/dg-select.js"></script>'
+                '<script src="/admin/static/workflows.js"></script>')
+        return _shell("流程", body, doc=False)
 
     @mcp.custom_route("/admin/workflows/save", methods=["POST"])
     @guard
@@ -2244,6 +2259,21 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "workspaces": out})
+
+    @mcp.custom_route("/admin/workflows/workspace_create", methods=["POST"])
+    @guard
+    async def _wf_workspace_create(req: Request) -> JSONResponse:
+        """新建分析工作区（新页新建 workflow 时的「＋ 新建工作区…」入口）。"""
+        f = await req.form()
+        name = str(f.get("name") or "").strip()
+        if not name:
+            return JSONResponse({"ok": False, "error": "工作区名不能为空"}, status_code=400)
+        try:
+            store = service._require_analysis()  # noqa: SLF001
+            await anyio.to_thread.run_sync(store.create_workspace, name)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "workspace": name})
 
     @mcp.custom_route("/admin/sql/search_tables", methods=["GET"])
     @guard
