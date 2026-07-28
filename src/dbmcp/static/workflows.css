@@ -330,8 +330,16 @@
 .wf-run-preview { margin-top: 20px; }
 
 /* ---------- 节点编辑抽屉（右滑） ---------- */
+/* 遮罩 + 抽屉：点遮罩空白关闭；抽屉本体靠右滑入 */
+.wf-drawer-overlay {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(0, 0, 0, .35);
+  display: flex; justify-content: flex-end;
+  animation: wf-drawer-fade .18s ease-out;
+}
+@keyframes wf-drawer-fade { from { background: rgba(0,0,0,0); } to { background: rgba(0,0,0,.35); } }
 .wf-drawer {
-  position: fixed; top: 0; right: 0; bottom: 0; width: 540px; max-width: 90vw; z-index: 90;
+  width: 540px; max-width: 90vw;
   background: var(--dg-panel); border-left: 1px solid var(--dg-border);
   box-shadow: -8px 0 24px rgba(0, 0, 0, .35);
   animation: wf-drawer-in .18s ease-out;
@@ -361,8 +369,9 @@
   border-radius: 4px; cursor: pointer; font-size: 12px;
 }
 .wf-drawer-tabs button.active { background: var(--dg-panel); color: var(--dg-text); }
-.wf-drawer-x { cursor: pointer; color: var(--dg-muted); padding: 4px 8px; font-size: 14px; }
-.wf-drawer-x:hover { color: var(--dg-red); }
+/* 关闭按钮：显眼的 dg-btn 风格 + 深色悬浮 */
+.wf-drawer-close { font-size: 12px; }
+.wf-drawer-close:hover { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
 .wf-drawer-body { flex: 1; overflow: auto; padding: 16px 18px; }
 .wf-drawer-form .row { margin-bottom: 14px; }
 .wf-drawer-form .row label { display: block; font-size: 11px; color: var(--dg-muted); margin-bottom: 4px; }
