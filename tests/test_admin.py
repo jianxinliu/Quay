@@ -1119,3 +1119,28 @@ def test_workflow_schedule_trigger_route_no_workflow(client, tmp_path):
     r = tc.post("/admin/workflows/schedule/trigger", data={"name": "ghost"})
     assert r.status_code == 400
     assert "workflow" in r.json()["error"].lower() or "不存在" in r.json()["error"]
+
+
+def test_workflows_js_no_chinese_in_vue_bindings():
+    """回归：Vue 的 :xxx="..." 是 JS 表达式，把中文短语当值会在浏览器抛
+    SyntaxError: Unexpected identifier '中文'。静态检测所有 :attr="..." 值中
+    出现的中文字符（含标点），撞上就报错并给出改法提示（去掉冒号或用 '字符串'）。
+    """
+    import re
+    from pathlib import Path
+    js = Path("src/dbmcp/static/workflows.js").read_text(encoding="utf-8")
+    # 匹配所有 :some-attr="..." 中的值（不匹配 http:// 之类）
+    pattern = re.compile(r'[\s\'"]:(\w[\w-]*)="([^"]*)"')
+    offenders = []
+    for m in pattern.finditer(js):
+        attr, val = m.group(1), m.group(2)
+        # 允许值里含引号包裹的中文（是合法 JS 字符串字面量）；只报"裸中文"
+        # 快速判：去掉所有 '...' / "..." 包裹的字符串字面量后仍有中文 = 有裸中文
+        stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "", val)
+        if re.search(r"[一-鿿　-〿＀-￯]", stripped):
+            offenders.append(f":{attr}=\"{val}\"")
+    assert not offenders, (
+        "workflows.js 的 Vue :attr 绑定里有裸中文（会被解释为 JS 表达式 → SyntaxError）："
+        f"\n  {chr(10).join(offenders)}\n"
+        "改法：去掉冒号（静态值 title=\"...\"），或把中文加单/双引号变成字符串字面量。"
+    )

@@ -1421,7 +1421,7 @@
       +         '</td>'
       +         '<td>'
       +           '<a v-if="s.workflow_exists" :href="\'#name=\'+encodeURIComponent(s.name)"><b>{{ s.name }}</b></a>'
-      +           '<span v-else class="wf-sched-missing" :title="workflow 已删除，请删除此调度">'
+      +           '<span v-else class="wf-sched-missing" title="workflow 已删除，请删除此调度">'
       +             '<b>{{ s.name }}</b> <em>（流程已删）</em>'
       +           '</span>'
       +           '<span v-if="s.running" class="wf-sched-running">运行中</span>'
