@@ -1797,6 +1797,41 @@ class DbmService:
             return []
         return self.schedules.list()
 
+    def workflow_schedules_enriched(self) -> list[dict]:
+        """定时任务全局列表：每条 schedule 附上 workflow 是否存在、是否有正在跑的实例。
+
+        供 /admin/workflows/schedules 管理页用；纯只读，不改任何状态。
+        """
+        if self.schedules is None:
+            return []
+        scheds = self.schedules.list()
+        wf_names = set()
+        if self.workflows is not None:
+            wf_names = {w.name for w in self.workflows.list()}
+        out = []
+        for s in scheds:
+            name = s.get("name")
+            running = False
+            if self.runs is not None and name:
+                running = bool(self.runs.running_for(name))
+            out.append({**s, "workflow_exists": name in wf_names, "running": running})
+        return out
+
+    def workflow_schedule_trigger_now(self, name: str) -> None:
+        """手动立即触发一次调度（后台线程跑，不阻塞调用方）。
+
+        走完全跟 cron 到点相同的链路：入 workflow_run → 后台跑 → 通知。
+        与用户在流程详情页 ▶ 运行的区别：那个是前台同步、不入 workflow_run 表、不发通知；
+        这个是把「计划本来会自动跑的一次」提前到现在。
+        """
+        if self.workflows is None or self.workflows.get(name) is None:
+            raise ValueError(f"workflow 不存在：{name!r}")
+        if self.schedules is None or self.schedules.get(name) is None:
+            raise ValueError(f"调度配置不存在：{name!r}")
+        threading.Thread(
+            target=self._run_scheduled, args=(name,),
+            daemon=True, name=f"dbm-wf-run-{name}").start()
+
     # ---------- 运行历史（供详情页 & 通知 deeplink 用）----------
 
     def workflow_runs_list(self, name: str, limit: int = 50) -> list[dict]:

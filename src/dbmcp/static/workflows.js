@@ -39,6 +39,7 @@
     if (m) return { view: "run", runId: parseInt(m[1], 10) };
     if (!h) return { view: "list" };
     if (h === "new") return { view: "new" };
+    if (h === "schedules") return { view: "schedules" };
     var m2 = /^name=(.+)$/.exec(h);
     if (m2) return { view: "detail", name: decodeURIComponent(m2[1]) };
     return { view: "list" };
@@ -963,6 +964,12 @@
                      notify_on: "failure", attach_kinds: ["summary"] },
         schedLoading: false,
         schedError: "",
+        schedEditName: "",  // 编辑哪个 workflow 的调度（详情页=当前 workflow，列表页=从表行传入）
+        // 定时任务管理页
+        schedulesList: [],
+        schedulesLoading: false,
+        schedulesErr: "",
+        triggerBusy: {},  // {name: true} 立即触发按钮 loading
         // 运行历史
         runsList: [],
         runsLoading: false,
@@ -1025,15 +1032,19 @@
         if (this.route.view === "detail") this.loadOne(this.route.name);
         if (this.route.view === "new") this.refreshWorkspaces();
         if (this.route.view === "run") this.loadRun(this.route.runId);
+        if (this.route.view === "schedules") { this.refreshSchedules(); this.refreshRunning(); }
       },
       // ---------- 调度浮层 ----------
-      openSchedule: function () {
-        if (!this.current) return;
+      openSchedule: function (nameOverride) {
+        // 详情页调用不传参 → 用 current；列表页/schedules 页传 name 进来
+        var name = nameOverride || (this.current && this.current.name);
+        if (!name) return;
+        this.schedEditName = name;
         this.schedOpen = true;
         this.schedError = "";
         this.schedLoading = true;
         var self = this;
-        apiGet(API + "/schedule?name=" + encodeURIComponent(this.current.name))
+        apiGet(API + "/schedule?name=" + encodeURIComponent(name))
           .then(function (d) {
             self.schedLoading = false;
             if (d && d.ok && d.schedule) {
@@ -1053,11 +1064,12 @@
           });
       },
       saveSchedule: function () {
-        if (!this.current) return;
+        var name = this.schedEditName || (this.current && this.current.name);
+        if (!name) return;
         var self = this;
         self.schedError = "";
         apiPost(API + "/schedule", {
-          name: self.current.name,
+          name: name,
           cron_type: self.schedForm.cron_type,
           cron_value: self.schedForm.cron_value,
           enabled: self.schedForm.enabled ? "1" : "0",
@@ -1066,16 +1078,90 @@
         }).then(function (d) {
           if (!d.ok) { self.schedError = d.error || "保存失败"; return; }
           self.schedOpen = false;
+          // 从 schedules 页发起的编辑，保存后刷新列表
+          if (self.route.view === "schedules") self.refreshSchedules();
         });
       },
       deleteSchedule: function () {
-        if (!this.current) return;
-        if (!window.confirm("确认删除该 workflow 的调度？")) return;
+        var name = this.schedEditName || (this.current && this.current.name);
+        if (!name) return;
+        if (!window.confirm("确认删除「" + name + "」的调度？")) return;
         var self = this;
-        apiPost(API + "/schedule/delete", { name: self.current.name }).then(function () {
+        apiPost(API + "/schedule/delete", { name: name }).then(function () {
           self.schedOpen = false;
+          if (self.route.view === "schedules") self.refreshSchedules();
         });
       },
+      // ---------- 定时任务管理页（schedules） ----------
+      refreshSchedules: function () {
+        var self = this;
+        self.schedulesLoading = true;
+        apiGet(API + "/schedules").then(function (d) {
+          self.schedulesLoading = false;
+          if (d && d.ok) {
+            self.schedulesList = d.schedules || [];
+            self.schedulesErr = "";
+          } else {
+            self.schedulesList = [];
+            self.schedulesErr = (d && d.error) || "加载失败";
+          }
+        });
+      },
+      toggleScheduleEnabled: function (s) {
+        // 直接改 enabled 字段（保留 cron/notify_on/attach_kinds 原值）
+        var self = this;
+        apiPost(API + "/schedule", {
+          name: s.name,
+          cron_type: s.cron_type,
+          cron_value: s.cron_value,
+          enabled: s.enabled ? "0" : "1",  // 翻转
+          notify_on: s.notify_on,
+          attach_kinds: JSON.stringify(s.attach_kinds || [])
+        }).then(function (d) {
+          if (!d.ok) { alert(d.error || "切换失败"); return; }
+          self.refreshSchedules();
+        });
+      },
+      deleteScheduleRow: function (s) {
+        if (!window.confirm("确认删除「" + s.name + "」的调度？（不删 workflow 本身）")) return;
+        var self = this;
+        apiPost(API + "/schedule/delete", { name: s.name }).then(function () {
+          self.refreshSchedules();
+        });
+      },
+      triggerScheduleNow: function (s) {
+        if (s.running) { alert("上一次运行还没完成，跳过本次触发"); return; }
+        if (!window.confirm("立即触发「" + s.name + "」一次？（会入运行历史 + 按 notify_on 发通知）")) return;
+        var self = this;
+        var busy = Object.assign({}, self.triggerBusy);
+        busy[s.name] = true;
+        self.triggerBusy = busy;
+        apiPost(API + "/schedule/trigger", { name: s.name }).then(function (d) {
+          var b = Object.assign({}, self.triggerBusy);
+          delete b[s.name];
+          self.triggerBusy = b;
+          if (!d.ok) { alert(d.error || "触发失败"); return; }
+          setTimeout(function () { self.refreshSchedules(); }, 800);
+        });
+      },
+      fmtCron: function (s) {
+        // cron_type / cron_value → 人类可读
+        var t = s.cron_type, v = s.cron_value;
+        if (t === "interval") return "每 " + v + " 分钟";
+        if (t === "daily") return "每天 " + v;
+        if (t === "weekly") {
+          var parts = (v || "").split(" ");
+          var wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+          return "每" + (wd[parseInt(parts[0], 10)] || "?") + " " + (parts[1] || "");
+        }
+        if (t === "monthly") {
+          var pp = (v || "").split(" ");
+          return "每月 " + pp[0] + " 日 " + (pp[1] || "");
+        }
+        return "cron " + v;
+      },
+      goToSchedulesTab: function () { location.hash = "schedules"; },
+      goToListTab: function () { location.hash = ""; },
       toggleAttach: function (kind) {
         var kinds = this.schedForm.attach_kinds || [];
         var idx = kinds.indexOf(kind);
@@ -1259,10 +1345,12 @@
       this.refreshRunning();
       var self = this;
       this.runningTimer = setInterval(function () {
-        if (self.route.view === "list") self.refreshRunning();
+        // 定时任务 tab 显示运行中面板；流程 tab 不显示但仍需要角标数据可选保留
+        if (self.route.view === "schedules") self.refreshRunning();
       }, 5000);
       if (this.route.view === "detail") this.loadOne(this.route.name);
       if (this.route.view === "run") this.loadRun(this.route.runId);
+      if (this.route.view === "schedules") { this.refreshSchedules(); this.refreshRunning(); }
     },
     unmounted: function () {
       window.removeEventListener("hashchange", this.onHashChange);
@@ -1270,26 +1358,19 @@
     },
     template:
       '<div class="wf-root">'
-      // ============ 列表页 ============
-      + '<div v-if="route.view===\'list\'" class="wf-list">'
+      // ============ 列表页（流程 / 定时任务 二级 tab）============
+      + '<div v-if="route.view===\'list\'||route.view===\'schedules\'" class="wf-list">'
       +   '<div class="wf-list-hd">'
-      +     '<h2>流程</h2>'
-      +     '<button class="dg-btn run" @click="openNew">＋ 新建流程</button>'
-      +   '</div>'
-      +   '<div v-if="runningList.length" class="wf-running-panel">'
-      +     '<div class="wf-running-hd">'
-      +       '<span class="wf-running-title"><span class="wf-running-dot"></span> 正在运行 ({{ runningList.length }})</span>'
-      +       '<span class="wf-running-sub">每 5 秒自动刷新 · 仅列调度触发</span>'
+      +     '<div class="wf-tabs2">'
+      +       '<a href="#" :class="{active: route.view===\'list\'}" @click.prevent="goToListTab">流程</a>'
+      +       '<a href="#schedules" :class="{active: route.view===\'schedules\'}" @click.prevent="goToSchedulesTab">'
+      +         '定时任务 <span v-if="schedulesList.length" class="wf-tabs2-badge">{{ schedulesList.length }}</span>'
+      +       '</a>'
       +     '</div>'
-      +     '<div class="wf-running-list">'
-      +       '<div v-for="r in runningList" :key="r.id" class="wf-running-row" @click="openRunDetail(r.id)">'
-      +         '<b>{{ r.name }}</b>'
-      +         '<span class="wf-running-tag">{{ r.triggered_by }}</span>'
-      +         '<span class="wf-running-elap">已运行 {{ fmtElapsed(r.elapsed_s) }}</span>'
-      +         '<a class="wf-running-link" @click.stop="openRunDetail(r.id)">查看 →</a>'
-      +       '</div>'
-      +     '</div>'
+      +     '<button v-if="route.view===\'list\'" class="dg-btn run" @click="openNew">＋ 新建流程</button>'
       +   '</div>'
+      // ---- 流程 tab ----
+      + '<div v-if="route.view===\'list\'">'
       +   '<div v-if="err" class="wf-err">{{ err }}</div>'
       +   '<div v-if="!wfs.length && !loading" class="wf-empty">还没有流程。点右上「＋ 新建流程」创建。</div>'
       +   '<div class="wf-cards">'
@@ -1305,6 +1386,68 @@
       +       '</div>'
       +     '</div>'
       +   '</div>'
+      + '</div>'
+      // ---- 定时任务 tab ----
+      + '<div v-else class="wf-schedules">'
+      +   '<div v-if="runningList.length" class="wf-running-panel">'
+      +     '<div class="wf-running-hd">'
+      +       '<span class="wf-running-title"><span class="wf-running-dot"></span> 正在运行 ({{ runningList.length }})</span>'
+      +       '<span class="wf-running-sub">每 5 秒自动刷新</span>'
+      +     '</div>'
+      +     '<div class="wf-running-list">'
+      +       '<div v-for="r in runningList" :key="r.id" class="wf-running-row" @click="openRunDetail(r.id)">'
+      +         '<b>{{ r.name }}</b>'
+      +         '<span class="wf-running-tag">{{ r.triggered_by }}</span>'
+      +         '<span class="wf-running-elap">已运行 {{ fmtElapsed(r.elapsed_s) }}</span>'
+      +         '<a class="wf-running-link" @click.stop="openRunDetail(r.id)">查看 →</a>'
+      +       '</div>'
+      +     '</div>'
+      +   '</div>'
+      +   '<div v-if="schedulesErr" class="wf-err">{{ schedulesErr }}</div>'
+      +   '<div v-if="!schedulesList.length && !schedulesLoading" class="wf-empty">还没有定时任务。在流程详情页点「⚙ 调度」建。</div>'
+      +   '<table v-if="schedulesList.length" class="wf-sched-tbl">'
+      +     '<thead><tr>'
+      +       '<th style="width:36px"></th>'
+      +       '<th>流程</th><th>触发规则</th><th>通知</th><th>产物</th>'
+      +       '<th>上次运行</th><th style="text-align:right">操作</th>'
+      +     '</tr></thead>'
+      +     '<tbody>'
+      +       '<tr v-for="s in schedulesList" :key="s.name" :class="{disabled: !s.enabled, missing: !s.workflow_exists}">'
+      +         '<td>'
+      +           '<label class="wf-sw" :title="s.enabled?\'点击停用\':\'点击启用\'">'
+      +             '<input type="checkbox" :checked="s.enabled" @change.stop="toggleScheduleEnabled(s)">'
+      +             '<span></span>'
+      +           '</label>'
+      +         '</td>'
+      +         '<td>'
+      +           '<a v-if="s.workflow_exists" :href="\'#name=\'+encodeURIComponent(s.name)"><b>{{ s.name }}</b></a>'
+      +           '<span v-else class="wf-sched-missing" :title="workflow 已删除，请删除此调度">'
+      +             '<b>{{ s.name }}</b> <em>（流程已删）</em>'
+      +           '</span>'
+      +           '<span v-if="s.running" class="wf-sched-running">运行中</span>'
+      +         '</td>'
+      +         '<td class="mono">{{ fmtCron(s) }}</td>'
+      +         '<td class="mono">{{ s.notify_on }}</td>'
+      +         '<td class="mono">{{ (s.attach_kinds||[]).join(", ") || "—" }}</td>'
+      +         '<td class="mono">'
+      +           '<span v-if="s.last_run_at">{{ fmtTime(s.last_run_at) }}'
+      +             '<span v-if="s.last_status===\'ok\'" class="wf-sched-ok">✓</span>'
+      +             '<span v-else-if="s.last_status===\'failed\'" class="wf-sched-err">✗</span>'
+      +           '</span>'
+      +           '<span v-else class="wf-muted">—</span>'
+      +         '</td>'
+      +         '<td style="text-align:right; white-space:nowrap">'
+      +           '<button class="dg-btn sm" :disabled="triggerBusy[s.name]||!s.workflow_exists" '
+      +             '@click.stop="triggerScheduleNow(s)" title="立即触发一次（走跟 cron 到点一样的链路）">'
+      +             '{{ triggerBusy[s.name] ? "触发中…" : "▶ 立即" }}'
+      +           '</button>'
+      +           '<button class="dg-btn sm" @click.stop="openSchedule(s.name)" title="编辑">编辑</button>'
+      +           '<button class="dg-btn sm danger" @click.stop="deleteScheduleRow(s)">删除</button>'
+      +         '</td>'
+      +       '</tr>'
+      +     '</tbody>'
+      +   '</table>'
+      + '</div>'
       + '</div>'
       // ============ 新建页 ============
       + '<div v-else-if="route.view===\'new\'" class="wf-new">'

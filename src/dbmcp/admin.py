@@ -2340,6 +2340,34 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True})
 
+    # ---------- 定时任务全局管理 ----------
+
+    @mcp.custom_route("/admin/workflows/schedules", methods=["GET"])
+    @guard
+    async def _wf_schedules_list(req: Request) -> JSONResponse:
+        """所有定时任务列表（附 workflow_exists / running 标记）。定时任务管理页用。"""
+        try:
+            rows = await anyio.to_thread.run_sync(service.workflow_schedules_enriched)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "schedules": rows})
+
+    @mcp.custom_route("/admin/workflows/schedule/trigger", methods=["POST"])
+    @guard
+    async def _wf_schedule_trigger(req: Request) -> JSONResponse:
+        """立即触发一次调度（后台线程跑，走跟 cron 到点相同的链路）。"""
+        form = await req.form()
+        name = (form.get("name") or "").strip()
+        if not name:
+            return JSONResponse({"ok": False, "error": "name 必填"}, status_code=400)
+        try:
+            await anyio.to_thread.run_sync(service.workflow_schedule_trigger_now, name)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True})
+
     # ---------- 运行历史 & 详情 & xlsx 下载 ----------
 
     @mcp.custom_route("/admin/workflows/running", methods=["GET"])

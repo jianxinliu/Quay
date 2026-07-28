@@ -536,3 +536,68 @@
 .wf-running-elap { color: var(--dg-muted); font-family: var(--dg-mono); }
 .wf-running-link { margin-left: auto; color: var(--dg-accent); text-decoration: none; font-size: 11px; }
 .wf-running-link:hover { text-decoration: underline; }
+
+/* ---------- 列表页二级 tab ---------- */
+.wf-tabs2 { display: inline-flex; gap: 0; align-items: baseline; }
+.wf-tabs2 a {
+  padding: 6px 14px; margin-right: 4px; border-radius: 4px 4px 0 0;
+  color: var(--dg-muted); text-decoration: none; font-size: 13px; font-weight: 600;
+  border-bottom: 2px solid transparent;
+}
+.wf-tabs2 a:hover { color: var(--dg-text); }
+.wf-tabs2 a.active { color: var(--dg-text); border-bottom-color: var(--dg-accent); }
+.wf-tabs2-badge {
+  display: inline-block; padding: 1px 7px; margin-left: 4px;
+  background: var(--dg-accent); color: #fff; border-radius: 10px;
+  font-size: 10px; font-weight: 700; vertical-align: middle;
+}
+
+/* ---------- 定时任务表格 ---------- */
+.wf-schedules { padding: 8px 0; }
+.wf-sched-tbl {
+  width: 100%; border-collapse: collapse; margin-top: 12px;
+  background: var(--dg-panel-2); border: 1px solid var(--dg-border); border-radius: 4px;
+  overflow: hidden; font-size: 12px;
+}
+.wf-sched-tbl thead th {
+  padding: 8px 12px; background: var(--dg-panel); border-bottom: 1px solid var(--dg-border);
+  text-align: left; font-weight: 600; color: var(--dg-muted); font-size: 11px;
+  text-transform: none;  /* 覆盖 admin-doc.css 的 uppercase */
+}
+.wf-sched-tbl tbody td {
+  padding: 10px 12px; border-bottom: 1px solid var(--dg-border);
+  vertical-align: middle; color: var(--dg-text);
+}
+.wf-sched-tbl tbody tr:last-child td { border-bottom: none; }
+.wf-sched-tbl tbody tr.disabled td { opacity: 0.5; }
+.wf-sched-tbl tbody tr.missing td { background: rgba(255, 90, 90, 0.05); }
+.wf-sched-tbl tbody tr:hover td { background: var(--dg-panel); }
+.wf-sched-tbl a { color: var(--dg-text); text-decoration: none; }
+.wf-sched-tbl a:hover { color: var(--dg-accent); }
+.wf-sched-tbl .mono { font-family: var(--dg-mono); font-size: 11px; color: var(--dg-muted); }
+.wf-sched-tbl td button + button { margin-left: 6px; }
+
+.wf-sched-missing em { color: #f5a3a3; font-size: 11px; margin-left: 4px; }
+.wf-sched-running {
+  display: inline-block; margin-left: 8px; padding: 1px 8px;
+  background: var(--dg-accent); color: #fff; border-radius: 10px;
+  font-size: 10px; font-weight: 600;
+}
+.wf-sched-ok { color: var(--dg-green); margin-left: 6px; font-weight: 700; }
+.wf-sched-err { color: var(--dg-red); margin-left: 6px; font-weight: 700; }
+.wf-muted { color: var(--dg-muted); }
+
+/* ---------- 启停开关 ---------- */
+.wf-sw { display: inline-block; position: relative; width: 34px; height: 18px; cursor: pointer; }
+.wf-sw input { opacity: 0; width: 0; height: 0; }
+.wf-sw span {
+  position: absolute; inset: 0; background: var(--dg-border);
+  border-radius: 10px; transition: background 0.15s;
+}
+.wf-sw span::before {
+  content: ""; position: absolute; left: 2px; top: 2px;
+  width: 14px; height: 14px; background: #fff; border-radius: 50%;
+  transition: transform 0.15s;
+}
+.wf-sw input:checked + span { background: var(--dg-accent); }
+.wf-sw input:checked + span::before { transform: translateX(16px); }
