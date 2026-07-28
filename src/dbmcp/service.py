@@ -810,7 +810,10 @@ class DbmService:
             except Exception as e:  # noqa: BLE001
                 done.append({"step": label, "node": node, "ok": False, "error": str(e)})
                 return {"steps": done, "output": None, "ok": False}
+        # output 保留旧语义（最后一个有 columns 的结果作主输出预览，向后兼容脚本式 workflow）
+        # outputs 是新增的多 output 收集：只包含图上真正的 output 节点，供前端展示每个副产出
         output = None
+        outputs: list[dict] = []
         for st in steps:
             label = f"{st['name']}: {st['sql'][:60]}"
             try:
@@ -819,10 +822,13 @@ class DbmService:
                              "rows": res["row_count"]})
                 if res["columns"]:
                     output = res
+                # 只把图里的 output 节点收集进 outputs（compile_graph 标了 is_output）
+                if st.get("is_output") and res.get("columns"):
+                    outputs.append({"node": st.get("node"), "name": st.get("name"), **res})
             except Exception as e:  # noqa: BLE001
                 done.append({"step": label, "node": st.get("node"), "ok": False, "error": str(e)})
-                return {"steps": done, "output": output, "ok": False}
-        return {"steps": done, "output": output, "ok": True}
+                return {"steps": done, "output": output, "outputs": outputs, "ok": False}
+        return {"steps": done, "output": output, "outputs": outputs, "ok": True}
 
     # ---------- SQL 片段库（查询台保存/加载）----------
 

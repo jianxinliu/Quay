@@ -352,11 +352,112 @@
     return order.slice(0, idx).map(function (n) { return n.name; });
   }
 
+  // ---------- 图表：结果集 → ECharts option（借鉴查询台 renderChart） ----------
+  var CHART_PALETTE = ["#5b8dd6", "#57965c", "#d9a343", "#c084fc", "#f472b6", "#60a5fa", "#7ee2a8", "#e8c07a"];
+  function chartRowsFromResult(result, cfg) {
+    var xi = result.columns.indexOf(cfg.x), yi = result.columns.indexOf(cfg.y);
+    if (xi < 0 || yi < 0) return [];
+    function num(v) { return typeof v === "string" && v !== "" && !isNaN(+v) ? +v : v; }
+    if (!cfg.agg) return result.rows.map(function (r) { return [r[xi], num(r[yi])]; });
+    var groups = {}, order = [];
+    result.rows.forEach(function (r) {
+      var k = r[xi] === null ? "NULL" : String(r[xi]);
+      if (!(k in groups)) { groups[k] = []; order.push(k); }
+      groups[k].push(num(r[yi]));
+    });
+    return order.map(function (k) {
+      var vals = groups[k].filter(function (v) { return typeof v === "number"; });
+      var v;
+      if (cfg.agg === "count") v = groups[k].length;
+      else if (!vals.length) v = 0;
+      else if (cfg.agg === "sum") v = vals.reduce(function (a, b) { return a + b; }, 0);
+      else if (cfg.agg === "avg") v = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+      else if (cfg.agg === "min") v = Math.min.apply(null, vals);
+      else v = Math.max.apply(null, vals);
+      return [k, Math.round(v * 1000) / 1000];
+    });
+  }
+  function chartOptionFor(result, cfg) {
+    var data = chartRowsFromResult(result, cfg);
+    var axis = { axisLabel: { color: "#9aa0a8" }, axisLine: { lineStyle: { color: "#45484e" } },
+                 splitLine: { lineStyle: { color: "#2e3033" } } };
+    var opt = { backgroundColor: "transparent", color: CHART_PALETTE, textStyle: { color: "#bcbec4" },
+                tooltip: { trigger: cfg.type === "bar" || cfg.type === "line" ? "axis" : "item",
+                           backgroundColor: "#2b2d30", borderColor: "#393b40",
+                           textStyle: { color: "#bcbec4" } },
+                grid: { left: 16, right: 24, top: 28, bottom: 12, containLabel: true } };
+    if (cfg.type === "pie") {
+      opt.series = [{ type: "pie", radius: ["28%", "66%"], label: { color: "#9aa0a8" },
+                      data: data.map(function (d) { return { name: String(d[0]), value: d[1] }; }) }];
+    } else if (cfg.type === "scatter") {
+      opt.xAxis = Object.assign({ type: "value", name: cfg.x }, axis);
+      opt.yAxis = Object.assign({ type: "value", name: cfg.y }, axis);
+      opt.series = [{ type: "scatter", symbolSize: 9,
+                      data: data.map(function (d) {
+                        var x = typeof d[0] === "number" ? d[0] : +d[0];
+                        return [isNaN(x) ? 0 : x, d[1]];
+                      }) }];
+    } else {
+      opt.xAxis = Object.assign({ type: "category",
+                                  data: data.map(function (d) { return String(d[0]); }) }, axis);
+      opt.yAxis = Object.assign({ type: "value" }, axis);
+      opt.series = [{ type: cfg.type, data: data.map(function (d) { return d[1]; }),
+                      smooth: cfg.type === "line", barMaxWidth: 42 }];
+    }
+    return opt;
+  }
+  function defaultChartCfg(result) {
+    var cols = (result && result.columns) || [];
+    var y = "";
+    if (result && result.rows && result.rows.length) {
+      for (var i = 0; i < cols.length; i++) {
+        if (typeof result.rows[0][i] === "number" && i !== 0) { y = cols[i]; break; }
+      }
+    }
+    return { type: "bar", x: cols[0] || "", y: y || cols[1] || cols[0] || "", agg: "" };
+  }
+
+  // 内嵌图表组件：受控接收 result + cfg，渲染 echarts 到自己的 div
+  var WfChart = {
+    name: "wf-chart",
+    props: ["result", "cfg"],
+    data: function () { return { _inst: null }; },
+    watch: {
+      result: function () { this.rerender(); },
+      cfg: { deep: true, handler: function () { this.rerender(); } }
+    },
+    methods: {
+      rerender: function () {
+        var self = this;
+        this.$nextTick(function () {
+          if (!self.result || !self.result.columns || !window.echarts) return;
+          var el = self.$refs.chartEl;
+          if (!el) return;
+          if (!self._inst) self._inst = window.echarts.init(el);
+          self._inst.setOption(chartOptionFor(self.result, self.cfg), true);
+          self._inst.resize();
+        });
+      }
+    },
+    mounted: function () {
+      this.rerender();
+      var self = this;
+      this._resize = function () { if (self._inst) self._inst.resize(); };
+      window.addEventListener("resize", this._resize);
+    },
+    unmounted: function () {
+      if (this._resize) window.removeEventListener("resize", this._resize);
+      if (this._inst) { this._inst.dispose(); this._inst = null; }
+    },
+    template: '<div class="wf-chart"><div class="wf-chart-el" ref="chartEl"></div></div>'
+  };
+
   // ---------- 节点编辑抽屉组件 ----------
   // 双击画布节点打开：右滑 480-560px 面板；含节点表单 + 上游列（非源节点）+ 预览标签。
   // source 节点：默认 UI 拼装（选表 + 列多选 + WHERE builder + LIMIT），可切自由 SQL。
   var NodeEditor = {
     name: "wf-node-editor",
+    components: { "wf-chart": WfChart },
     props: ["graph", "workspace", "nodeId"],
     emits: ["update:graph", "close", "delete-node"],
     data: function () {
@@ -388,6 +489,11 @@
       maxPorts: function () { return JOIN_MAX_PORTS; },
       upstreamNames: function () {
         return upstreamNamesOf(this.graph, this.nodeId);
+      },
+      // output 节点图表 X/Y 下拉的列源：优先取 preview 已跑过的列；退回上游列（若已加载）
+      previewCols: function () {
+        if (this.preview.columns && this.preview.columns.length) return this.preview.columns;
+        return (this.upstream.columns || []).map(function (c) { return c.name; });
       }
     },
     watch: {
@@ -590,6 +696,17 @@
             return { col: mm[2], op: mm[3].toUpperCase(), val: val };
           }).filter(Boolean);
         }
+      },
+      setOutputView: function (v) {
+        var n = this.node;
+        if (!n || n.type !== "output") return;
+        n.cfg.view = v;
+        // 切到 chart 时懒初始化 cfg.chart（若无）
+        if (v === "chart" && !n.cfg.chart) {
+          n.cfg.chart = { type: "bar", x: this.previewCols[0] || "",
+                          y: this.previewCols[1] || this.previewCols[0] || "", agg: "" };
+        }
+        this.persist();
       }
     },
     mounted: function () {
@@ -754,6 +871,41 @@
       +             ' placeholder="total DESC"></div>'
       +         '<div class="row"><label>LIMIT</label>'
       +           '<input type="number" v-model.number="node.cfg.limit" @change="persist" placeholder="1000"></div>'
+      // 可视化：默认 table，可切 chart（切到 chart 时 preview 标签渲染图表；预览时也能改）
+      +         '<div class="row"><label>展示形式</label>'
+      +           '<div class="wf-mode-tabs">'
+      +             '<button :class="{active: (node.cfg.view||\'table\')===\'table\'}" @click="setOutputView(\'table\')">表格</button>'
+      +             '<button :class="{active: node.cfg.view===\'chart\'}" @click="setOutputView(\'chart\')">图表</button>'
+      +           '</div>'
+      +         '</div>'
+      +         '<template v-if="node.cfg.view===\'chart\'">'
+      +           '<div class="row"><label>图表类型</label>'
+      +             '<select v-model="node.cfg.chart.type" @change="persist" class="wf-chart-cfg-in">'
+      +               '<option value="bar">柱状图</option>'
+      +               '<option value="line">折线图</option>'
+      +               '<option value="pie">饼图</option>'
+      +               '<option value="scatter">散点图</option>'
+      +             '</select></div>'
+      +           '<div class="row"><label>X 轴列</label>'
+      +             '<select v-model="node.cfg.chart.x" @change="persist" class="wf-chart-cfg-in">'
+      +               '<option v-for="c in previewCols" :key="c" :value="c">{{ c }}</option>'
+      +               '<option v-if="!previewCols.length" value="">（先「预览」运行拿到列）</option>'
+      +             '</select></div>'
+      +           '<div class="row"><label>Y 轴列</label>'
+      +             '<select v-model="node.cfg.chart.y" @change="persist" class="wf-chart-cfg-in">'
+      +               '<option v-for="c in previewCols" :key="c" :value="c">{{ c }}</option>'
+      +               '<option v-if="!previewCols.length" value=""></option>'
+      +             '</select></div>'
+      +           '<div class="row"><label>聚合</label>'
+      +             '<select v-model="node.cfg.chart.agg" @change="persist" class="wf-chart-cfg-in">'
+      +               '<option value="">不聚合</option>'
+      +               '<option value="sum">SUM</option>'
+      +               '<option value="avg">AVG</option>'
+      +               '<option value="count">COUNT</option>'
+      +               '<option value="min">MIN</option>'
+      +               '<option value="max">MAX</option>'
+      +             '</select></div>'
+      +         '</template>'
       +       '</template>'
       +     '</div>'
       // ============ 预览 tab ============
@@ -764,7 +916,11 @@
       +         '<span v-else>{{ preview.rows.length }} 行 · {{ preview.columns.length }} 列</span>'
       +         '<button class="dg-btn sm" @click="runPreview">↻ 重新预览</button>'
       +       '</div>'
-      +       '<div v-if="!preview.loading && !preview.error && preview.columns.length" class="wf-mod-preview-tbl">'
+      // output 节点 view=chart 时预览标签渲染图表；其它情况仍是表格
+      +       '<wf-chart v-if="!preview.loading && !preview.error && preview.columns.length'
+      +         ' && node.type===\'output\' && node.cfg.view===\'chart\' && node.cfg.chart"'
+      +         ' :result="preview" :cfg="node.cfg.chart"/>'
+      +       '<div v-else-if="!preview.loading && !preview.error && preview.columns.length" class="wf-mod-preview-tbl">'
       +         '<table><thead><tr><th v-for="c in preview.columns" :key="c">{{ c }}</th></tr></thead>'
       +         '<tbody><tr v-for="(r, ri) in preview.rows.slice(0, 100)" :key="ri">'
       +           '<td v-for="(v, ci) in r" :key="ci">{{ v == null ? "" : String(v).slice(0, 200) }}</td>'
@@ -779,7 +935,7 @@
 
   // ---------- 主 App ----------
   var App = {
-    components: { "wf-blueprint": Blueprint, "wf-node-editor": NodeEditor },
+    components: { "wf-blueprint": Blueprint, "wf-node-editor": NodeEditor, "wf-chart": WfChart },
     data: function () {
       return {
         route: parseHash(),

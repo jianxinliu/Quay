@@ -201,9 +201,8 @@ def compile_graph(graph: dict) -> dict:
 
     sources: list[dict] = []
     steps: list[dict] = []
-    outputs = [n for n in nodes.values() if n.get("type") == "output"]
-    if len(outputs) > 1:
-        raise WorkflowError("最多只能有一个输出节点")
+    # 允许多个 output：每个 output 独立编译一条终点 SQL；output_sql 取第一个作主输出预览
+    # （通知/xlsx/运行结果面板等只需要一个主输出；其他 output 作为副产出在画布上可各自预览）。
     output_sql = None
     last_view = None
 
@@ -317,8 +316,10 @@ def compile_graph(graph: dict) -> dict:
                 sql += f" ORDER BY {cfg['order_by'].strip()}"
             limit = cfg.get("limit")
             sql += f" LIMIT {int(limit)}" if limit else " LIMIT 1000"
-            output_sql = sql
-            steps.append({"node": nid, "name": name, "sql": sql})
+            # 第一个 output 作为主输出预览（多 output 时，其余在 steps 里也会执行）
+            if output_sql is None:
+                output_sql = sql
+            steps.append({"node": nid, "name": name, "sql": sql, "is_output": True})
         else:
             raise WorkflowError(f"未知节点类型 {typ!r}")
 

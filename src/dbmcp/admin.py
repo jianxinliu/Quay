@@ -2098,6 +2098,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         """流程独立页——Vue 挂载点，SPA 内部路由（列表页 / 详情页）由 workflows.js 判断。"""
         body = ('<div id="wf-app"></div>'
                 '<link rel="stylesheet" href="/admin/static/workflows.css">'
+                # echarts UMD 必须先于任何 AMD loader 加载才会挂 window.echarts
+                # （见 CLAUDE.md 里 UMD/AMD 坑记录）；本页无 monaco loader，纯预防
+                '<script src="/admin/static/echarts.min.js"></script>'
                 '<script src="/admin/static/vue.global.prod.js"></script>'
                 '<script src="/admin/static/dg-select.js"></script>'
                 '<script src="/admin/static/workflows.js"></script>')
@@ -2378,6 +2381,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         """运行详情页 HTML shell（Vue 挂载点由 workflows.js 里的 App 处理）。"""
         body = ('<div id="wf-app"></div>'
                 '<link rel="stylesheet" href="/admin/static/workflows.css">'
+                '<script src="/admin/static/echarts.min.js"></script>'
                 '<script src="/admin/static/vue.global.prod.js"></script>'
                 '<script src="/admin/static/dg-select.js"></script>'
                 '<script src="/admin/static/workflows.js"></script>')
