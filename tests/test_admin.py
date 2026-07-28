@@ -1033,3 +1033,89 @@ def test_workflow_running_route_empty(client, tmp_path):
     assert r.status_code == 200
     assert r.json()["ok"] is True
     assert r.json()["runs"] == []
+
+
+# ==============================================================
+# 定时任务全局管理页：GET /schedules + POST /schedule/trigger
+# ==============================================================
+
+
+def test_workflow_schedules_list_route(client, tmp_path):
+    """GET /admin/workflows/schedules → 所有 schedule 附 workflow_exists 标记。"""
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    # 场景 1：空
+    r0 = tc.get("/admin/workflows/schedules")
+    assert r0.status_code == 200 and r0.json()["schedules"] == []
+    # 建两条 schedule：wf_pr2 存在、ghost 对应 workflow 不存在
+    svc.workflow_schedule_upsert("wf_pr2", "interval", "5", enabled=True)
+    # 直接 upsert ghost（先建 workflow 再删）
+    from dbmcp.service import CallerInfo as CI
+    caller = CI(agent="pytest/1.0", session_id="s1")
+    g = {"nodes": [{"id": "a", "type": "source", "name": "u", "x": 0, "y": 0,
+                    "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}}],
+         "edges": []}
+    svc.workflow_save("ghost", "ws_pr2", "", caller, graph=g)
+    svc.workflow_schedule_upsert("ghost", "daily", "09:30", enabled=False)
+    svc.workflow_delete("ghost")
+    r = tc.get("/admin/workflows/schedules")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    rows = {s["name"]: s for s in body["schedules"]}
+    assert rows["wf_pr2"]["workflow_exists"] is True
+    assert rows["wf_pr2"]["enabled"] is True
+    assert rows["ghost"]["workflow_exists"] is False
+    # running 字段存在（本例都无运行中实例）
+    assert "running" in rows["wf_pr2"]
+
+
+def test_workflow_schedule_trigger_route_success(client, tmp_path):
+    """POST /admin/workflows/schedule/trigger → 后台跑一次，入 workflow_run 表。"""
+    import time
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    svc.workflow_schedule_upsert("wf_pr2", "interval", "5", enabled=True)
+    r = tc.post("/admin/workflows/schedule/trigger", data={"name": "wf_pr2"})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # 后台线程跑完（本例 SQL 小、~10ms）
+    for _ in range(30):
+        runs = svc.workflow_runs_list("wf_pr2")
+        if runs and runs[0].get("status") in ("ok", "failed"):
+            break
+        time.sleep(0.05)
+    runs = svc.workflow_runs_list("wf_pr2")
+    assert len(runs) == 1
+    assert runs[0]["triggered_by"] == "schedule"
+    assert runs[0]["status"] == "ok"
+
+
+def test_workflow_schedule_trigger_route_missing_name(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    r = tc.post("/admin/workflows/schedule/trigger", data={"name": ""})
+    assert r.status_code == 400 and r.json()["ok"] is False
+
+
+def test_workflow_schedule_trigger_route_no_schedule(client, tmp_path):
+    """workflow 存在但没建 schedule 时拒绝。"""
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    r = tc.post("/admin/workflows/schedule/trigger", data={"name": "wf_pr2"})
+    assert r.status_code == 400
+    assert "调度配置" in r.json()["error"]
+
+
+def test_workflow_schedule_trigger_route_no_workflow(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    # schedule 系统不允许对不存在的 workflow 建，这里模拟：直接下探到 store
+    svc.schedules._conn.execute(  # noqa: SLF001
+        "INSERT INTO workflow_schedule (name, cron_type, cron_value, enabled, notify_on,"
+        " attach_kinds, notify_channels, created_at, updated_at)"
+        " VALUES ('ghost', 'interval', '5', 1, 'failure', '[\"summary\"]', '[]', "
+        "'2020-01-01T00:00:00', '2020-01-01T00:00:00')")
+    svc.schedules._conn.commit()  # noqa: SLF001
+    r = tc.post("/admin/workflows/schedule/trigger", data={"name": "ghost"})
+    assert r.status_code == 400
+    assert "workflow" in r.json()["error"].lower() or "不存在" in r.json()["error"]
