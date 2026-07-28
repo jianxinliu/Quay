@@ -1036,8 +1036,10 @@
       },
       // ---------- 调度浮层 ----------
       openSchedule: function (nameOverride) {
-        // 详情页调用不传参 → 用 current；列表页/schedules 页传 name 进来
-        var name = nameOverride || (this.current && this.current.name);
+        // 详情页调用不传参（Vue 会传 MouseEvent，忽略掉）→ 用 current；
+        // schedules 页调用传字符串 name → 用它
+        var name = (typeof nameOverride === "string" && nameOverride)
+          || (this.current && this.current.name);
         if (!name) return;
         this.schedEditName = name;
         this.schedOpen = true;

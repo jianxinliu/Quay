@@ -1144,3 +1144,22 @@ def test_workflows_js_no_chinese_in_vue_bindings():
         f"\n  {chr(10).join(offenders)}\n"
         "改法：去掉冒号（静态值 title=\"...\"），或把中文加单/双引号变成字符串字面量。"
     )
+
+
+def test_workflows_js_openschedule_ignores_event_object():
+    """回归：openSchedule 的 nameOverride 参数必须先判 typeof === 'string'
+    再用；否则详情页 @click="openSchedule" 会把 MouseEvent 当 name 传进去，
+    浏览器会把 {isTrusted:true,...} 送到后端报"workflow xxx 不存在"。
+    """
+    from pathlib import Path
+    js = Path("src/dbmcp/static/workflows.js").read_text(encoding="utf-8")
+    # 找 openSchedule 方法体，确认它对 nameOverride 做了字符串类型判定
+    idx = js.find("openSchedule: function")
+    assert idx > 0, "openSchedule 方法不见了"
+    # 截前 400 字符看方法体开头
+    body = js[idx:idx + 400]
+    assert 'typeof nameOverride === "string"' in body or \
+           "typeof nameOverride==='string'" in body.replace(" ", ""), (
+        "openSchedule 必须先判 nameOverride 是字符串再用，否则详情页 @click 传"
+        "的 MouseEvent 会被当成 workflow name 送到后端。"
+    )
