@@ -455,6 +455,41 @@ class TestGraph:
         out = service.workflow_preview_columns("ws1", g, "not-exist", CALLER)
         assert out["columns"] == [] and "不在流程中" in out["error"]
 
+    def test_preview_output_node_returns_upstream_columns(self, service):
+        """output 节点不物化 view（SQL 只是 SELECT ..），预览它=预览它的上游。"""
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30"),
+                _node("o", "output", "report", order_by="age DESC", limit=10)],
+             "edges": [{"from": "a", "to": "b", "port": "in"},
+                       {"from": "b", "to": "o", "port": "in"}]}
+        # 直接预览 output 节点 —— 老版本会 DESCRIBE "report" 报表不存在
+        out = service.workflow_preview_columns("ws1", g, "o", CALLER)
+        assert "error" not in out or not out["error"]
+        # 拿到的是上游 filter 「adults」的列（=users 的所有列）
+        names = {c["name"] for c in out["columns"]}
+        assert names == {"id", "name", "age"}
+
+    def test_preview_node_output_returns_upstream_rows(self, service):
+        """output 节点的预览行 = 上游 filter 后的行数。"""
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("b", "filter", "adults", where="age >= 30"),
+                _node("o", "output", "report", limit=10)],
+             "edges": [{"from": "a", "to": "b", "port": "in"},
+                       {"from": "b", "to": "o", "port": "in"}]}
+        out = service.workflow_preview_node("ws1", g, "o", CALLER, limit=10)
+        assert "error" not in out or not out["error"]
+        # alice(30) + carol(41) 两行 ≥ 30
+        assert out["row_count"] == 2
+
+    def test_preview_output_node_without_upstream_returns_error(self, service):
+        """output 悬空 → compile_graph 先报缺输入连线，返回友好错误不 500。"""
+        g = {"nodes": [_node("o", "output", "report", limit=10)], "edges": []}
+        out = service.workflow_preview_columns("ws1", g, "o", CALLER)
+        assert out["columns"] == []
+        assert "缺少输入连线" in (out.get("error") or "") or "未连接上游" in (out.get("error") or "")
+
     def test_preview_columns_compile_error(self, service):
         """编译失败 → 返回 {columns:[], error}，不抛异常。"""
         g = {"nodes": [_node("a", "filter", "f", where="x")], "edges": []}

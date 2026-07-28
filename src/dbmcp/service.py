@@ -114,6 +114,38 @@ def _plan_node_name(plan: dict, node_id: str, graph: dict) -> str | None:
     return None
 
 
+def _preview_target_for(graph: dict, node_id: str) -> tuple[str, str] | None:
+    """预览节点输出时应该看哪张 view/table。
+
+    普通节点（source/file/filter/join/aggregate/sql）compile 时会 CREATE OR REPLACE
+    VIEW <节点名>，DESCRIBE 节点名即可拿列。
+    **output 节点例外**：SQL 是 `SELECT * FROM 上游 ORDER BY .. LIMIT ..`，不物化
+    成 view；查询 output.name 会报 "Table … does not exist"。预览它=预览它的上游。
+
+    返回 (target_view_name, source_node_id_to_materialize)：
+    - 普通节点：(name, node_id)
+    - output 节点：(上游节点的 name, 上游 node_id)
+    找不到节点或 output 无上游连线 → None。
+    """
+    nodes = {n.get("id"): n for n in (graph.get("nodes") or [])}
+    node = nodes.get(node_id)
+    if not node:
+        return None
+    if node.get("type") != "output":
+        name = (node.get("name") or "").strip()
+        return (name, node_id) if name else None
+    # output 节点：找 in 边指向它的那个上游
+    for e in graph.get("edges") or []:
+        if e.get("to") == node_id:
+            up_id = e.get("from")
+            up = nodes.get(up_id)
+            if up:
+                up_name = (up.get("name") or "").strip()
+                if up_name:
+                    return (up_name, up_id)
+    return None
+
+
 def _plan_prefix_for(plan: dict, target_name: str) -> dict:
     """从 plan 里挑出「构建 target_name 所必需的」sources + steps（按 plan 顺序，保拓扑序）。
 
@@ -732,9 +764,11 @@ class DbmService:
             plan = compile_graph(graph)
         except WorkflowError as e:
             return {"columns": [], "error": f"编译流程失败：{e}"}
-        target_name = _plan_node_name(plan, node_id, graph)
-        if not target_name:
-            return {"columns": [], "error": f"节点 {node_id!r} 不在流程中"}
+        # output 节点没有物化 view，改预览它的上游（"预览这一步输出" 等价于预览上游）
+        target = _preview_target_for(graph, node_id)
+        if target is None:
+            return {"columns": [], "error": f"节点 {node_id!r} 不在流程中或未连接上游"}
+        target_name, _target_node = target
         store = self._require_analysis()
         # 懒模式：目标已存在直接 DESCRIBE
         if not refresh and _dataset_exists(store, workspace, target_name):
@@ -768,23 +802,20 @@ class DbmService:
 
     def workflow_preview_node(self, workspace: str, graph: dict, node_id: str,
                               caller: CallerInfo, limit: int = 100) -> dict:
-        """预览目标节点的输出前 N 行（模块视图「查看输出」按钮）。
+        """预览目标节点的输出前 N 行（抽屉的「预览」标签用）。
 
         先确保依赖链已物化（复用 preview_columns 的懒模式），再 SELECT * LIMIT N。
+        output 节点预览它的上游（output 不物化成 view）。
         返回 analysis_sql 的标准 dict（columns/rows/row_count）或 {error}。
         """
         cols_result = self.workflow_preview_columns(workspace, graph, node_id, caller)
         if cols_result.get("error"):
             return {"columns": [], "rows": [], "row_count": 0, "error": cols_result["error"]}
-        from .workflows import compile_graph
-        try:
-            plan = compile_graph(graph)
-        except Exception as e:  # noqa: BLE001
-            return {"columns": [], "rows": [], "row_count": 0, "error": str(e)}
-        target_name = _plan_node_name(plan, node_id, graph)
-        if not target_name:
+        target = _preview_target_for(graph, node_id)
+        if target is None:
             return {"columns": [], "rows": [], "row_count": 0,
-                    "error": f"节点 {node_id!r} 不在流程中"}
+                    "error": f"节点 {node_id!r} 不在流程中或未连接上游"}
+        target_name, _ = target
         try:
             n = max(1, min(int(limit or 100), 1000))
         except (TypeError, ValueError):
