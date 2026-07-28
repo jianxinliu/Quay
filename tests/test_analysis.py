@@ -334,6 +334,28 @@ class TestGraph:
         sql = compile_graph(g)["steps"][0]["sql"]
         assert 'SELECT a.*, b.*, c.*' in sql
 
+    def test_compile_multi_output(self):
+        """多个 output 节点各自编译一条终点 SQL，共享上游；output_sql 取第一个。"""
+        from dbmcp.workflows import compile_graph
+        g = {"nodes": [
+                _node("s", "source", "orders", conn="p/c", sql="SELECT 1"),
+                _node("o1", "output", "top10", order_by="amt DESC", limit=10),
+                _node("o2", "output", "bottom10", order_by="amt ASC", limit=10)],
+             "edges": [{"from": "s", "to": "o1", "port": "in"},
+                       {"from": "s", "to": "o2", "port": "in"}]}
+        plan = compile_graph(g)
+        # steps 里两个 output 都有
+        output_steps = [s for s in plan["steps"] if s["node"] in ("o1", "o2")]
+        assert len(output_steps) == 2
+        assert {s["name"] for s in output_steps} == {"top10", "bottom10"}
+        # 每个 output 独立 SQL
+        top_sql = next(s["sql"] for s in output_steps if s["name"] == "top10")
+        bot_sql = next(s["sql"] for s in output_steps if s["name"] == "bottom10")
+        assert "ORDER BY amt DESC" in top_sql
+        assert "ORDER BY amt ASC" in bot_sql
+        # output_sql = 第一个 output（拓扑序里 o1 先出）
+        assert plan["output_sql"] == top_sql
+
     def test_compile_errors(self):
         from dbmcp.workflows import WorkflowError, compile_graph
         with pytest.raises(WorkflowError, match="为空"):
@@ -380,6 +402,30 @@ class TestGraph:
         # 中间节点是工作区里的视图，可单独预览
         prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
         assert prev["rows"][0][0] == 2
+
+    def test_graph_multi_output_end_to_end(self, service, tmp_path):
+        """两个 output 节点：都能物化为视图并独立预览；outputs 列表包含两条结果。"""
+        from dbmcp.workflows import WorkflowStore
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [
+                _node("s", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("o1", "output", "top", order_by="age DESC", limit=1),
+                _node("o2", "output", "bottom", order_by="age ASC", limit=1)],
+             "edges": [{"from": "s", "to": "o1", "port": "in"},
+                       {"from": "s", "to": "o2", "port": "in"}]}
+        service.workflow_save("multi_out", "ws_mo", "", CALLER, graph=g)
+        out = service.workflow_run("multi_out", CALLER)
+        assert out["ok"] is True
+        # outputs 数组：两个 output 各自的结果
+        outputs = out.get("outputs", [])
+        by_name = {o["name"]: o for o in outputs}
+        assert "top" in by_name and "bottom" in by_name
+        # top 拿最大年龄（carol=41）；bottom 拿最小（bob=25）
+        top_row = by_name["top"]["rows"][0]
+        bot_row = by_name["bottom"]["rows"][0]
+        age_idx = by_name["top"]["columns"].index("age")
+        assert top_row[age_idx] == 41
+        assert bot_row[age_idx] == 25
 
     def test_preview_columns_lazy_and_refresh(self, service, tmp_path):
         """preview_columns：懒建模式复用已存 view；refresh=True 强制重建。"""
