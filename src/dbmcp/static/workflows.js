@@ -592,9 +592,19 @@
         }
       }
     },
-    mounted: function () { this.initFromNode(); },
+    mounted: function () {
+      this.initFromNode();
+      var self = this;
+      this._escHandler = function (e) { if (e.key === "Escape") self.$emit("close"); };
+      document.addEventListener("keydown", this._escHandler);
+    },
+    unmounted: function () {
+      if (this._escHandler) document.removeEventListener("keydown", this._escHandler);
+    },
     template:
-      '<div class="wf-drawer" v-if="node">'
+      // 半透明遮罩 + 抽屉本体：点遮罩空白 = 关闭；点抽屉里不冒泡上来
+      '<div class="wf-drawer-overlay" v-if="node" @click.self="$emit(\'close\')">'
+      + '<div class="wf-drawer" @click.stop>'
       + '<div class="wf-drawer-bd">'
       +   '<div class="wf-drawer-hd">'
       +     '<span class="wf-drawer-ty">{{ typeLabel(node.type) }}</span>'
@@ -604,7 +614,7 @@
       +       '<button :class="{active: tab===\'preview\'}" @click="runPreview">预览</button>'
       +     '</div>'
       +     '<button class="dg-btn danger sm" @click="$emit(\'delete-node\', node.id)" title="删除节点">删除</button>'
-      +     '<span class="wf-drawer-x" @click="$emit(\'close\')" title="关闭">✕</span>'
+      +     '<button class="dg-btn sm wf-drawer-close" @click="$emit(\'close\')" title="关闭（ESC）">✕ 关闭</button>'
       +   '</div>'
       +   '<div class="wf-drawer-body">'
       // ============ 配置 tab ============
@@ -762,8 +772,9 @@
       +       '</div>'
       +     '</div>'
       +   '</div>'
-      + '</div>'
-      + '</div>'
+      + '</div>'  // wf-drawer-bd 结束
+      + '</div>'  // wf-drawer 结束
+      + '</div>'  // wf-drawer-overlay 结束
   };
 
   // ---------- 主 App ----------
