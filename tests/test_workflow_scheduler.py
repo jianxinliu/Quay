@@ -204,3 +204,59 @@ class TestStartSchedulerLifecycle:
         service._scheduler_tick()  # noqa: SLF001
         time.sleep(0.2)
         assert called == []
+
+
+class TestRunningList:
+    """当前运行中列表：面向管理面板的可观测接口。"""
+
+    def test_store_list_running_default_all(self, service):
+        # 3 条：2 schedule + 1 manual；1 已完成不应出现
+        r1 = service.runs.start("wf1", "schedule")
+        r2 = service.runs.start("wf2", "schedule")
+        r3 = service.runs.start("wf3", "manual")
+        r4 = service.runs.start("wf4", "schedule")
+        service.runs.finish(r4, "ok")
+        all_running = service.runs.list_running()
+        ids = {r["id"] for r in all_running}
+        assert ids == {r1, r2, r3}
+
+    def test_store_list_running_filtered(self, service):
+        r1 = service.runs.start("wf1", "schedule")
+        service.runs.start("wf2", "manual")
+        r3 = service.runs.start("wf3", "schedule")
+        rows = service.runs.list_running(triggered_by="schedule")
+        assert {r["id"] for r in rows} == {r1, r3}
+
+    def test_service_workflow_running_list_shape(self, service):
+        """返回字段：id/name/triggered_by/started_at/elapsed_s（int，非负）。"""
+        run_id = service.runs.start("wf1", "schedule")
+        rows = service.workflow_running_list()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["id"] == run_id
+        assert row["name"] == "wf1"
+        assert row["triggered_by"] == "schedule"
+        assert row["started_at"]
+        assert isinstance(row["elapsed_s"], int)
+        assert row["elapsed_s"] >= 0
+
+    def test_service_workflow_running_list_excludes_manual_by_default(self, service):
+        service.runs.start("wf1", "manual")
+        rows = service.workflow_running_list()
+        assert rows == []
+
+    def test_service_workflow_running_list_all(self, service):
+        service.runs.start("wf1", "manual")
+        service.runs.start("wf2", "schedule")
+        rows = service.workflow_running_list(triggered_by=None)
+        assert len(rows) == 2
+
+    def test_service_running_list_empty_when_no_store(self, tmp_path):
+        """runs 未注入时（默认库路径）应安全返回空。"""
+        cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
+            "engine": "sqlite", "database": ":memory:", "environment": "local"}}}}})
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+        try:
+            assert svc.workflow_running_list() == []
+        finally:
+            svc.close()

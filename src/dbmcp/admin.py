@@ -2342,6 +2342,22 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
 
     # ---------- 运行历史 & 详情 & xlsx 下载 ----------
 
+    @mcp.custom_route("/admin/workflows/running", methods=["GET"])
+    @guard
+    async def _wf_running(req: Request) -> JSONResponse:
+        """当前调度触发正在执行的 workflow 列表。前端 5s 轮询。
+
+        默认只列 triggered_by=schedule（手动触发的用户在前端等结果、不进管理面板）；
+        ?triggered_by=all 可看全部。"""
+        raw = (req.query_params.get("triggered_by") or "schedule").strip()
+        filt: str | None = None if raw == "all" else raw
+        try:
+            runs = await anyio.to_thread.run_sync(
+                lambda: service.workflow_running_list(filt))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "runs": runs})
+
     @mcp.custom_route("/admin/workflows/runs", methods=["GET"])
     @guard
     async def _wf_runs(req: Request) -> JSONResponse:
