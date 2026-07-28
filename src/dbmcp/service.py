@@ -1809,6 +1809,27 @@ class DbmService:
             return None
         return self.runs.get(run_id)
 
+    def workflow_running_list(self, triggered_by: str | None = "schedule") -> list[dict]:
+        """当前正在执行的 workflow 运行列表；默认只列调度触发的（手动/agent 触发的用户在前端等结果，不列）。"""
+        if self.runs is None:
+            return []
+        from datetime import UTC, datetime
+        rows = self.runs.list_running(triggered_by)
+        now_ts = datetime.now(UTC).timestamp()
+        out = []
+        for r in rows:
+            elapsed = None
+            started = r.get("started_at")
+            if started:
+                try:
+                    elapsed = int(now_ts - datetime.fromisoformat(started).timestamp())
+                except ValueError:
+                    elapsed = None
+            out.append({"id": r["id"], "name": r["name"],
+                        "triggered_by": r["triggered_by"],
+                        "started_at": started, "elapsed_s": elapsed})
+        return out
+
     # ---------- 调度触发的一次执行 ----------
 
     def _run_scheduled(self, name: str) -> None:

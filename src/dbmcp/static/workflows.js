@@ -968,7 +968,10 @@
         runsLoading: false,
         // 运行详情（view=run）
         currentRun: null,
-        currentRunErr: ""
+        currentRunErr: "",
+        // 运行中面板（列表页顶部，5s 轮询）
+        runningList: [],
+        runningTimer: null
       };
     },
     computed: {
@@ -996,6 +999,23 @@
         apiGet(API + "/workspaces").then(function (d) {
           self.wsList = d && d.ok ? (d.workspaces || []) : [];
         });
+      },
+      refreshRunning: function () {
+        var self = this;
+        apiGet(API + "/running").then(function (d) {
+          self.runningList = d && d.ok ? (d.runs || []) : [];
+        }).catch(function () { /* 静默失败，下个 tick 再试 */ });
+      },
+      fmtElapsed: function (s) {
+        if (s == null || s < 0) return "-";
+        if (s < 60) return s + "s";
+        var m = Math.floor(s / 60), r = s % 60;
+        if (m < 60) return m + "m " + r + "s";
+        var h = Math.floor(m / 60); m = m % 60;
+        return h + "h " + m + "m";
+      },
+      openRunDetail: function (runId) {
+        window.location.href = "/admin/workflows/runs/" + runId;
       },
       onHashChange: function () {
         this.route = parseHash();
@@ -1235,11 +1255,18 @@
       // 列表页 / 新建页需要 list & workspaces；详情页/运行详情页也顺便刷一下
       this.refresh();
       this.refreshWorkspaces();
+      // 列表页启动运行中轮询（5s）；进入其他视图时停
+      this.refreshRunning();
+      var self = this;
+      this.runningTimer = setInterval(function () {
+        if (self.route.view === "list") self.refreshRunning();
+      }, 5000);
       if (this.route.view === "detail") this.loadOne(this.route.name);
       if (this.route.view === "run") this.loadRun(this.route.runId);
     },
     unmounted: function () {
       window.removeEventListener("hashchange", this.onHashChange);
+      if (this.runningTimer) { clearInterval(this.runningTimer); this.runningTimer = null; }
     },
     template:
       '<div class="wf-root">'
@@ -1248,6 +1275,20 @@
       +   '<div class="wf-list-hd">'
       +     '<h2>流程</h2>'
       +     '<button class="dg-btn run" @click="openNew">＋ 新建流程</button>'
+      +   '</div>'
+      +   '<div v-if="runningList.length" class="wf-running-panel">'
+      +     '<div class="wf-running-hd">'
+      +       '<span class="wf-running-title"><span class="wf-running-dot"></span> 正在运行 ({{ runningList.length }})</span>'
+      +       '<span class="wf-running-sub">每 5 秒自动刷新 · 仅列调度触发</span>'
+      +     '</div>'
+      +     '<div class="wf-running-list">'
+      +       '<div v-for="r in runningList" :key="r.id" class="wf-running-row" @click="openRunDetail(r.id)">'
+      +         '<b>{{ r.name }}</b>'
+      +         '<span class="wf-running-tag">{{ r.triggered_by }}</span>'
+      +         '<span class="wf-running-elap">已运行 {{ fmtElapsed(r.elapsed_s) }}</span>'
+      +         '<a class="wf-running-link" @click.stop="openRunDetail(r.id)">查看 →</a>'
+      +       '</div>'
+      +     '</div>'
       +   '</div>'
       +   '<div v-if="err" class="wf-err">{{ err }}</div>'
       +   '<div v-if="!wfs.length && !loading" class="wf-empty">还没有流程。点右上「＋ 新建流程」创建。</div>'

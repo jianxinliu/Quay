@@ -990,3 +990,46 @@ def test_workflow_run_xlsx_download_missing(client, tmp_path):
     run_id = svc.workflow_runs_list("wf_pr2")[0]["id"]
     r = tc.get(f"/admin/workflows/runs/{run_id}/download/output.xlsx")
     assert r.status_code == 404
+
+
+def test_workflow_running_route_default_schedule_only(client, tmp_path):
+    """GET /admin/workflows/running：默认 triggered_by=schedule 过滤，manual 记录不出现。"""
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    # 起 3 条 running：2 schedule + 1 manual；1 已完成
+    r_sched1 = svc.runs.start("wf_pr2", "schedule")
+    r_sched2 = svc.runs.start("wf_other", "schedule")
+    svc.runs.start("wf_manual", "manual")
+    r_done = svc.runs.start("wf_done", "schedule")
+    svc.runs.finish(r_done, "ok")
+
+    r = tc.get("/admin/workflows/running")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    ids = {row["id"] for row in body["runs"]}
+    assert ids == {r_sched1, r_sched2}
+    # 每行字段齐全
+    row = body["runs"][0]
+    for key in ("id", "name", "triggered_by", "started_at", "elapsed_s"):
+        assert key in row
+    assert row["triggered_by"] == "schedule"
+
+
+def test_workflow_running_route_all(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    svc.runs.start("wf_pr2", "schedule")
+    svc.runs.start("wf_manual", "manual")
+    r = tc.get("/admin/workflows/running?triggered_by=all")
+    assert r.status_code == 200
+    assert len(r.json()["runs"]) == 2
+
+
+def test_workflow_running_route_empty(client, tmp_path):
+    tc, svc = client
+    _prep_pr2_service(svc, tmp_path)
+    r = tc.get("/admin/workflows/running")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["runs"] == []

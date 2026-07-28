@@ -718,6 +718,20 @@ class WorkflowRunStore:
                 (name,)).fetchall()
         return [_run_row(r) for r in rows]
 
+    def list_running(self, triggered_by: str | None = None) -> list[dict]:
+        """所有 status=running 的记录，按 started_at DESC；triggered_by 可过滤（schedule/manual/agent）。"""
+        with self._lock:
+            if triggered_by:
+                rows = self._conn.execute(
+                    "SELECT * FROM workflow_run WHERE status = 'running' AND triggered_by = ?"
+                    " ORDER BY started_at DESC, id DESC",
+                    (triggered_by,)).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM workflow_run WHERE status = 'running'"
+                    " ORDER BY started_at DESC, id DESC").fetchall()
+        return [_run_row(r) for r in rows]
+
     def sweep_stale_running(self, older_than_hours: int = 1) -> int:
         """服务重启清理：把很久前还标 running 的记录标 failed，避免永久阻塞下次调度。"""
         cutoff = datetime.now(UTC).timestamp() - older_than_hours * 3600
