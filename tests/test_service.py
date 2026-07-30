@@ -42,6 +42,7 @@ def service(tmp_path):
         }
     )
     svc = DbmService(cfg, AuditStore(tmp_path / "audit.sqlite3"))
+    svc.data_dir = str(tmp_path / "data")
     yield svc
     svc.close()
 
@@ -206,6 +207,60 @@ class TestSchemaTools:
         # limit 受连接策略 max_rows=2 约束
         assert result["row_count"] == 2
 
+    def test_export_table_selects_fields_limit_and_format(self, service):
+        summary = service.export_table(
+            "demo", "main", "users", ["name", "age"], 2, "csv", CALLER
+        )
+        assert summary["media_type"] == "text/csv; charset=utf-8"
+        assert summary["filename"].endswith(".csv")
+        assert summary["fields"] == ["name", "age"]
+        assert summary["row_count"] == 2
+        assert summary["requested_limit"] == 2
+        token, filename = summary["download_url"].rsplit("/", 2)[-2:]
+        path = service.resolve_mcp_export(token, filename)
+        assert path is not None
+        assert path.read_bytes().startswith(b"\xef\xbb\xbfname,age")
+
+    def test_export_table_rejects_unknown_field(self, service):
+        with pytest.raises(ValueError, match="字段不存在"):
+            service.export_table(
+                "demo", "main", "users", ["name", "password"], 2, "json", CALLER
+            )
+
+    @pytest.mark.parametrize("fmt", ["json", "xlsx"])
+    def test_export_table_structured_preview(self, service, fmt):
+        summary = service.export_table(
+            "demo", "main", "users", ["id", "name"], 2, fmt, CALLER
+        )
+        preview = service.preview_mcp_export(summary["token"])
+        assert preview is not None
+        assert preview["columns"] == ["id", "name"]
+        assert len(preview["rows"]) == 2
+
+    def test_export_table_markdown_text_preview(self, service):
+        summary = service.export_table(
+            "demo", "main", "users", ["id", "name"], 2, "markdown", CALLER
+        )
+        preview = service.preview_mcp_export(summary["token"])
+        assert preview is not None
+        assert "| id | name |" in preview["raw"]
+
+    def test_export_table_respects_connection_row_limit(self, service):
+        with pytest.raises(ValueError, match="连接策略上限"):
+            service.export_table(
+                "demo", "main", "users", None, 3, "json", CALLER
+            )
+
+    def test_export_table_name_not_injectable(self, service):
+        with pytest.raises(ValueError, match="不存在"):
+            service.export_table(
+                "demo", "main", "users; DROP TABLE users", None, 1, "csv", CALLER
+            )
+
+    def test_export_download_rejects_bad_token_and_traversal(self, service):
+        assert service.resolve_mcp_export("not-a-token", "x.csv") is None
+        assert service.resolve_mcp_export("a" * 48, "../audit.sqlite3") is None
+
 
 class TestMeta:
     def test_list_projects_and_connections(self, service):
@@ -320,6 +375,7 @@ class TestConsoleUnmasked:
         cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
             "engine": "sqlite", "database": str(db_file), "environment": "local"}}}}})
         s = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+        s.data_dir = str(tmp_path / "data")
         yield s
         s.close()
 
@@ -331,6 +387,16 @@ class TestConsoleUnmasked:
     def test_console_export_not_masked(self, svc):
         data, _, _ = svc.admin_export("demo", "main", "SELECT name, password FROM accounts", "csv", CALLER)
         assert b"s3cr3t" in data
+
+    def test_agent_table_export_is_masked(self, svc):
+        summary = svc.export_table(
+            "demo", "main", "accounts", ["name", "password"], 10, "csv", CALLER
+        )
+        token, filename = summary["download_url"].rsplit("/", 2)[-2:]
+        data = svc.resolve_mcp_export(token, filename).read_bytes()
+        assert b"s3cr3t" not in data
+        assert b"***MASKED***" in data
+        assert summary["masked_columns"] == ["password"]
 
     def test_agent_query_still_masked(self, svc):
         out = svc.query("demo", "main", "SELECT name, password FROM accounts", CALLER)

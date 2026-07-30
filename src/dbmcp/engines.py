@@ -21,6 +21,7 @@ from typing import Any, Literal
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine as SAEngine
 
+from . import __version__
 from .config import ConnectionConfig, SshIdentity
 from .secrets import resolve_secret
 from .tunnel import SSHTunnel, open_tunnel
@@ -28,6 +29,7 @@ from .tunnel import SSHTunnel, open_tunnel
 # 写操作在审批通过后用 writer 账号建独立引擎；日常查询用 reader。
 Role = Literal["reader", "writer"]
 
+DB_CLIENT_NAME = f"Quay({__version__})"
 DEFAULT_IDLE_RECLAIM_S = 600  # 隧道 + 引擎空闲 10 分钟回收
 
 
@@ -251,6 +253,8 @@ def _create_readonly_engine(
             pool_pre_ping=True,
             connect_args={
                 "connect_timeout": 5,
+                # 展示在 MySQL performance_schema.session_connect_attrs 中
+                "program_name": DB_CLIENT_NAME,
                 # reader 的 read_timeout 加宽限，让服务端 max_execution_time 先于 socket 超时
                 # （否则二者相等时长 SELECT 被打成 2013 Lost connection，而非干净的超时错误）
                 "read_timeout": mysql_read_timeout(stmt_timeout_s, op_timeout_s, readonly),
@@ -292,7 +296,12 @@ def _create_readonly_engine(
         return create_engine(
             url,
             pool_pre_ping=True,
-            connect_args={"connect_timeout": 5, "options": options},
+            connect_args={
+                "connect_timeout": 5,
+                # 展示在 pg_stat_activity.application_name 中
+                "application_name": DB_CLIENT_NAME,
+                "options": options,
+            },
         )
 
     if cfg.engine == "clickhouse":
@@ -316,7 +325,13 @@ def _create_readonly_engine(
             query=query,
         )
         return create_engine(
-            url, pool_pre_ping=True, connect_args={"connect_timeout": 5}
+            url,
+            pool_pre_ping=True,
+            connect_args={
+                "connect_timeout": 5,
+                # 展示在 system.processes / system.query_log 的 client_name 中
+                "client_name": DB_CLIENT_NAME,
+            },
         )
 
     raise UnsupportedEngineError(f"引擎 {cfg.engine!r} 暂不支持直连查询（Redis 适配在 M4）")

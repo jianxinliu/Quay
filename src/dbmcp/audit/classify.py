@@ -23,7 +23,7 @@ _DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
 # 只读语句的顶层节点白名单。
 # SetOperation 覆盖 UNION / UNION ALL / INTERSECT / EXCEPT——顶层是集合运算而非 Select，
 # 但本身只读（各分支若含写操作，仍由下面的整树遍历 _WRITE_NODES 兜住）。
-_READONLY_ROOTS = (exp.Select, exp.Show, exp.Describe, exp.SetOperation)
+_READONLY_ROOTS = (exp.Select, exp.Describe, exp.SetOperation)
 
 # 树中任意位置出现即判写的节点
 _WRITE_NODES = (
@@ -118,6 +118,12 @@ def classify(sql: str, engine: str) -> Verdict:
         if keyword == "EXPLAIN":
             return _classify_explain(sql, engine)
         return Verdict(False, f"无法识别的命令 {keyword or '(空)'}，按写操作处理", kind, tables)
+
+    # MySQL 等方言会把 SHOW（包括 SHOW CREATE TABLE）解析成独立的 Show 节点。
+    # 必须在通用 AST 风险扫描前直接返回只读；SHOW 中的 CREATE/TABLE 等词描述的是
+    # 要展示的元数据，并不代表执行 DDL。其他方言退化成 Command 的情况由上面统一处理。
+    if isinstance(stmt, exp.Show):
+        return Verdict(True, "SHOW 命令", "Show", tables)
 
     if not isinstance(stmt, _READONLY_ROOTS):
         return Verdict(False, f"{kind} 属于写操作/DDL", kind, tables)

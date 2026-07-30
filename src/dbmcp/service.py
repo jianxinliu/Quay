@@ -236,6 +236,7 @@ class DbmService:
         # 记录本进程周期内已经为哪一分钟执行过（防止 30s tick 在同一分钟触发两次）
         self._sched_ticked_minute: set[tuple[str, str]] = set()  # {(name, "YYYY-MM-DD HH:MM")}
         self.data_dir = None   # serve 时注入，供 xlsx 产物落盘
+        self.base_url = ""     # serve 时注入，如 http://127.0.0.1:8100（导出下载链接）
 
     # ---------- 元信息 ----------
 
@@ -531,6 +532,306 @@ class DbmService:
         result = self._read(project, connection, cfg, run_sql, caller,
                             cfg.policy.max_rows, schema=schema, mask=False)
         return export_result(result["columns"], result["rows"], fmt)
+
+    def export_table(
+        self,
+        project: str,
+        connection: str,
+        table: str,
+        fields: list[str] | None,
+        limit: int,
+        fmt: str,
+        caller: CallerInfo,
+        database: str | None = None,
+    ) -> dict:
+        """供 agent 导出单表数据，文件落服务端，仅返回下载链接及摘要。
+
+        表、库和字段均先通过数据库反射校验，再由当前方言引用标识符，不接受任意 SQL，
+        从而避免把导出入口变成查询分类器的旁路。agent 导出沿用敏感字段脱敏策略；
+        文件内容不进入 MCP tool result，避免大文件占用模型上下文。
+        """
+        from .export import SUPPORTED_FORMATS, export_result
+
+        cfg = self.config.get_connection(project, connection)
+        if fmt not in SUPPORTED_FORMATS:
+            raise ValueError(f"不支持的导出格式 {fmt!r}，可选：{', '.join(SUPPORTED_FORMATS)}")
+        if limit < 1:
+            raise ValueError("导出行数必须大于 0")
+        if limit > cfg.policy.max_rows:
+            raise ValueError(
+                f"导出行数 {limit} 超过连接策略上限 {cfg.policy.max_rows}，"
+                "请减少行数或由管理员调整 max_rows"
+            )
+
+        # 兼容 table="库.表"；同时传 database 时要求两者一致，避免含糊选择。
+        if "." in table:
+            table_database, plain_table = table.split(".", 1)
+            if database is not None and database != table_database:
+                raise ValueError(
+                    f"表名中的库 {table_database!r} 与 database={database!r} 不一致"
+                )
+            database, table = table_database, plain_table
+        if not table:
+            raise ValueError("表名不能为空")
+        if database is None and not cfg.database and cfg.engine in (
+            "mysql", "postgres", "clickhouse"
+        ):
+            raise ValueError("此连接未绑定默认库，请通过 database 参数选择要导出的库（schema）")
+
+        engine = self.pool.get(project, connection, cfg, schema=database)
+        info = engines.describe_table(engine, table, database)
+        available = [str(c["name"]) for c in info["columns"]]
+        selected = fields or available
+        if not selected:
+            raise ValueError(f"表 {table!r} 没有可导出的字段")
+        if len(selected) != len(set(selected)):
+            raise ValueError("导出字段不能重复")
+        unknown = [name for name in selected if name not in available]
+        if unknown:
+            raise ValueError(
+                f"字段不存在于表 {table}: {', '.join(unknown)}"
+                f"（可选：{', '.join(available)}）"
+            )
+
+        preparer = engine.dialect.identifier_preparer
+        quoted_fields = ", ".join(preparer.quote(name) for name in selected)
+        quoted_table = (
+            f"{preparer.quote(database)}." if database else ""
+        ) + preparer.quote(table)
+        sql = f"SELECT {quoted_fields} FROM {quoted_table}"
+        run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, limit + 1, 0)
+        result = self._read(
+            project,
+            connection,
+            cfg,
+            run_sql,
+            caller,
+            limit,
+            schema=database,
+            mask=True,
+        )
+        data, media_type, ext = export_result(result["columns"], result["rows"], fmt)
+        summary = {
+            "project": project,
+            "connection": connection,
+            "database": database or cfg.database,
+            "table": table,
+            "fields": result["columns"],
+            "row_count": result["row_count"],
+            "requested_limit": limit,
+            "truncated": result["truncated"],
+            "format": fmt,
+            "masked_columns": result.get("masked_columns", []),
+        }
+        return self._save_mcp_export(data, media_type, ext, summary)
+
+    _MCP_EXPORT_TTL_S = 3600
+
+    def _save_mcp_export(
+        self, data: bytes, media_type: str, ext: str, summary: dict
+    ) -> dict:
+        """保存 MCP 导出产物并返回短期 bearer-token 下载链接。"""
+        import re
+        import secrets
+        import json
+        import time
+        from datetime import UTC, datetime
+        from pathlib import Path
+        from urllib.parse import quote
+
+        if not self.data_dir:
+            raise QueryRejected("导出文件存储未启用（服务未配置 data_dir）")
+        root = Path(self.data_dir) / "mcp_exports"
+        root.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        self.purge_mcp_exports()
+
+        token = secrets.token_hex(24)
+        artifact_dir = root / token
+        artifact_dir.mkdir(mode=0o700)
+        raw_name = "_".join(
+            str(part) for part in (
+                summary.get("connection"), summary.get("database"), summary.get("table")
+            ) if part
+        ) or "quay_export"
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name).strip("._") or "quay_export"
+        filename = f"{safe_name}.{ext}"
+        path = artifact_dir / filename
+        path.write_bytes(data)
+        path.chmod(0o600)
+
+        relative_url = f"/exports/{token}/{quote(filename)}"
+        base = self.base_url.rstrip("/")
+        result = {
+            **summary,
+            "token": token,
+            "filename": filename,
+            "media_type": media_type,
+            "byte_size": len(data),
+            "expires_at": int(now + self._MCP_EXPORT_TTL_S),
+            "download_url": f"{base}{relative_url}" if base else relative_url,
+            "agent_instruction": (
+                "必要时用程序将 download_url 直接下载到目标位置；"
+                "不要读取或把文件内容放入模型上下文。"
+            ),
+        }
+        metadata = {
+            **result,
+            "created_at": datetime.fromtimestamp(now, UTC).isoformat(),
+        }
+        metadata_path = artifact_dir / "metadata.json"
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        metadata_path.chmod(0o600)
+        return result
+
+    def purge_mcp_exports(self) -> int:
+        """删除超过 TTL 的临时导出目录，返回删除数量。"""
+        import shutil
+        import time
+        from pathlib import Path
+
+        if not self.data_dir:
+            return 0
+        root = Path(self.data_dir) / "mcp_exports"
+        if not root.is_dir():
+            return 0
+        now = time.time()
+        removed = 0
+        for child in root.iterdir():
+            try:
+                if child.is_dir() and now - child.stat().st_mtime > self._MCP_EXPORT_TTL_S:
+                    shutil.rmtree(child)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def list_mcp_exports(self) -> list[dict]:
+        """列出尚未过期的临时导出，供管理后台查看。"""
+        import json
+        import time
+        from pathlib import Path
+
+        self.purge_mcp_exports()
+        if not self.data_dir:
+            return []
+        root = Path(self.data_dir) / "mcp_exports"
+        if not root.is_dir():
+            return []
+        out = []
+        for child in root.iterdir():
+            try:
+                meta = json.loads((child / "metadata.json").read_text(encoding="utf-8"))
+                if int(meta.get("expires_at") or 0) <= int(time.time()):
+                    continue
+                # base_url 可能因重启/端口变化而改变，展示时用当前地址重新生成。
+                filename = str(meta["filename"])
+                relative = f"/exports/{child.name}/{filename}"
+                meta["download_url"] = f"{self.base_url.rstrip('/')}{relative}" \
+                    if self.base_url else relative
+                out.append(meta)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return sorted(out, key=lambda item: item.get("created_at", ""), reverse=True)
+
+    def delete_mcp_export(self, token: str) -> bool:
+        """按随机 token 删除一条临时导出。"""
+        import re
+        import shutil
+        from pathlib import Path
+
+        if not self.data_dir or not re.fullmatch(r"[0-9a-f]{48}", token):
+            return False
+        path = Path(self.data_dir) / "mcp_exports" / token
+        if not path.is_dir():
+            return False
+        shutil.rmtree(path)
+        return True
+
+    def preview_mcp_export(self, token: str, max_rows: int = 100) -> dict | None:
+        """读取临时导出供人类后台预览；不会进入 MCP/agent 上下文。"""
+        import csv
+        import io
+        import json
+        import re
+        from pathlib import Path
+
+        if not self.data_dir or not re.fullmatch(r"[0-9a-f]{48}", token):
+            return None
+        artifact_dir = Path(self.data_dir) / "mcp_exports" / token
+        try:
+            meta = json.loads((artifact_dir / "metadata.json").read_text(encoding="utf-8"))
+            filename = str(meta["filename"])
+            path = self.resolve_mcp_export(token, filename)
+            if path is None:
+                return None
+            fmt = str(meta.get("format") or "").lower()
+            columns: list[str] = []
+            rows: list[list] = []
+            raw: str | None = None
+            total = 0
+            if fmt == "csv":
+                parsed = list(csv.reader(io.StringIO(path.read_text(encoding="utf-8-sig"))))
+                columns = parsed[0] if parsed else []
+                total = max(0, len(parsed) - 1)
+                rows = parsed[1:max_rows + 1]
+            elif fmt == "json":
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, list) and data:
+                    columns = list(data[0]) if isinstance(data[0], dict) else ["value"]
+                    total = len(data)
+                    rows = [
+                        [item.get(c) for c in columns] if isinstance(item, dict) else [item]
+                        for item in data[:max_rows]
+                    ]
+            elif fmt == "xlsx":
+                from openpyxl import load_workbook
+
+                wb = load_workbook(path, read_only=True, data_only=True)
+                ws = wb.active
+                iterator = ws.iter_rows(values_only=True)
+                columns = [str(v or "") for v in next(iterator, ())]
+                for row in iterator:
+                    total += 1
+                    if len(rows) < max_rows:
+                        rows.append(list(row))
+                wb.close()
+            else:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                raw = text[:50_000]
+                total = len(text.splitlines())
+            return {
+                "metadata": meta,
+                "columns": columns,
+                "rows": rows,
+                "raw": raw,
+                "total_rows": total,
+                "truncated": total > max_rows or (raw is not None and len(raw) < path.stat().st_size),
+            }
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+
+    def resolve_mcp_export(self, token: str, filename: str):
+        """校验短期下载 token，返回产物路径；任何异常都视为不存在。"""
+        import re
+        import time
+        from pathlib import Path
+
+        if not self.data_dir or not re.fullmatch(r"[0-9a-f]{48}", token):
+            return None
+        if filename != Path(filename).name:
+            return None
+        artifact_dir = Path(self.data_dir) / "mcp_exports" / token
+        path = artifact_dir / filename
+        try:
+            if (
+                not path.is_file()
+                or time.time() - artifact_dir.stat().st_mtime > self._MCP_EXPORT_TTL_S
+            ):
+                return None
+        except OSError:
+            return None
+        return path
 
     def admin_query_history(self, project: str, connection: str, limit: int = 30) -> list[dict]:
         """查询台历史面板：从审计取该连接最近执行过的 SQL，按文本去重保留最新。"""
@@ -1729,7 +2030,8 @@ class DbmService:
         """执行一轮维护，返回统计（供测试与日志）。单项失败不影响其他项。"""
         from .inbox import DEFAULT_RETENTION_DAYS as INBOX_RETENTION
         stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0,
-                 "changes_purged": 0, "notifications_purged": 0, "workflow_runs_purged": 0}
+                 "changes_purged": 0, "notifications_purged": 0,
+                 "workflow_runs_purged": 0, "exports_purged": 0}
         for key, fn in (
             ("engines_reaped", self.pool.reap_idle),
             ("redis_reaped", self.redis_pool.reap_idle),
@@ -1741,6 +2043,8 @@ class DbmService:
              (lambda: self.inbox.purge_old(INBOX_RETENTION)) if self.inbox else (lambda: 0)),
             # workflow_run：30 天保留；同时清理 xlsx 产物目录
             ("workflow_runs_purged", self._purge_workflow_runs),
+            # MCP 临时导出：固定一小时 TTL，与审计保留期无关
+            ("exports_purged", self.purge_mcp_exports),
         ):
             try:
                 stats[key] = fn()

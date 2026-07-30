@@ -7,12 +7,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anyio.to_thread
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+from starlette.requests import Request
+from starlette.responses import FileResponse, Response
 
 from .agent_format import render_agent_result
 from .approvals import ApprovalError
@@ -102,6 +104,9 @@ def build_mcp(service: DbmService) -> FastMCP:
         instructions=(
             "统一的数据库访问服务。先用 list_projects / list_connections 找到目标连接，"
             "用 list_tables / describe_table / sample_rows 探索 schema。"
+            "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
+            "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
+            "不要读取或把文件内容放入模型上下文。"
             "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
             "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：首次提交会生成审批单并返回 change_id，"
             "需人工在管理后台审批；批准后带 change_id 重提相同 SQL 才执行。"
@@ -134,6 +139,20 @@ def build_mcp(service: DbmService) -> FastMCP:
             "`truncated=true` 即没给全——**别重复拉全量**，用 WHERE/LIMIT/聚合收窄，或用分析工作台下推计算。"
         ),
     )
+
+    @mcp.custom_route("/exports/{token:str}/{filename:str}", methods=["GET"])
+    async def _download_export(req: Request) -> Response:
+        """短期随机 token 下载；文件路径只能由 export_table 在专用目录内创建。"""
+        token = req.path_params["token"]
+        filename = req.path_params["filename"]
+        path = service.resolve_mcp_export(token, filename)
+        if path is None:
+            return Response("export not found or expired", status_code=404)
+        return FileResponse(
+            path,
+            filename=filename,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @mcp.tool
     def list_projects() -> list[dict]:
@@ -237,10 +256,31 @@ def build_mcp(service: DbmService) -> FastMCP:
         }
 
     @mcp.tool
-    def list_tables(project: str, connection: str, ctx: Context | None = None) -> list[str]:
-        """列出连接对应数据库中的所有表。"""
+    def list_databases(
+        project: str, connection: str, ctx: Context | None = None
+    ) -> list[str]:
+        """列出连接可选择的库/schema；MySQL/ClickHouse 返回数据库，PostgreSQL 返回 schema。"""
         try:
-            return service.list_tables(project, connection, _caller_from_ctx(ctx))
+            return service.list_databases(project, connection, _caller_from_ctx(ctx))
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
+        except (KeyError, ValueError) as e:
+            raise ToolError(str(e)) from e
+
+    @mcp.tool
+    def list_tables(
+        project: str,
+        connection: str,
+        database: Annotated[
+            str | None, Field(description="库/schema；不传时使用连接默认库")
+        ] = None,
+        ctx: Context | None = None,
+    ) -> list[str]:
+        """列出指定库/schema 中的所有表。"""
+        try:
+            return service.list_tables(
+                project, connection, _caller_from_ctx(ctx), schema=database
+            )
         except ConnectionUnavailable as e:
             raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
@@ -248,11 +288,19 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def describe_table(
-        project: str, connection: str, table: str, ctx: Context | None = None
+        project: str,
+        connection: str,
+        table: str,
+        database: Annotated[
+            str | None, Field(description="库/schema；不传时使用连接默认库")
+        ] = None,
+        ctx: Context | None = None,
     ) -> dict:
         """查看表结构：字段（类型/可空/默认值/注释）、索引、主键。"""
         try:
-            return service.describe_table(project, connection, table, _caller_from_ctx(ctx))
+            return service.describe_table(
+                project, connection, table, _caller_from_ctx(ctx), schema=database
+            )
         except ConnectionUnavailable as e:
             raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
@@ -275,6 +323,48 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise _tool_error_from_unavailable(e) from e
         except (KeyError, ValueError) as e:
             raise ToolError(str(e)) from e
+
+    @mcp.tool
+    async def export_table(
+        project: str,
+        connection: str,
+        table: Annotated[str, Field(description="要导出的表名")],
+        limit: Annotated[
+            int, Field(ge=1, description="最多导出的行数，不能超过连接策略 max_rows")
+        ],
+        fields: Annotated[
+            list[str] | None,
+            Field(description="要导出的字段名列表；不传或空列表表示全部字段"),
+        ] = None,
+        format: Annotated[  # noqa: A002
+            Literal["csv", "json", "markdown", "xlsx"],
+            Field(description="导出格式：csv / json / markdown / xlsx"),
+        ] = "csv",
+        database: Annotated[
+            str | None,
+            Field(description="要导出的库/schema；连接已绑定默认库时可不传"),
+        ] = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """按库、表、字段和行数导出数据，返回短期下载链接。
+
+        不接受任意 SQL；表和字段会先校验并安全引用。导出使用 reader 账号、只读查询与审计，
+        受连接 max_rows 限制，并沿用 agent 敏感字段脱敏策略。文件保存在服务端一小时，
+        tool result 仅含元信息和下载 URL，文件内容不会进入 agent 上下文。
+        """
+        caller = _caller_from_ctx(ctx)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: service.export_table(
+                    project, connection, table, fields, limit, format, caller, database
+                )
+            )
+        except ConnectionUnavailable as e:
+            raise _tool_error_from_unavailable(e) from e
+        except (QueryRejected, KeyError, ValueError) as e:
+            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise ToolError(f"{type(e).__name__}: {e}") from e
 
     @mcp.tool
     def analysis_workspaces() -> dict:

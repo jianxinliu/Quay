@@ -107,6 +107,8 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     service.schedules = WorkflowScheduleStore(db_path)
     service.runs = WorkflowRunStore(db_path)
     service.data_dir = args.data_dir  # xlsx 产物落到 data_dir/workflow_runs/{run_id}/
+    public_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    service.base_url = f"http://{public_host}:{args.port}"
     seed_examples(service.workflows, args.data_dir)  # 首次启动播种示例 workflow
     service.start_housekeeping(retention_days=args.retention_days)
     service.start_scheduler(interval_s=30)  # 每 30s tick 一次；对齐下拉最小 1 分钟粒度

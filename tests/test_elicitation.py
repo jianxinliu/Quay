@@ -28,7 +28,12 @@ def make_service(tmp_path, environment: str):
             "writer": {"user": "x", "password": "plain://unused"},
         }}}}}
     )
-    return DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3"))
+    service = DbmService(
+        cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3")
+    )
+    service.data_dir = str(tmp_path / "data")
+    service.base_url = "http://127.0.0.1:8100"
+    return service
 
 
 def approve_handler(message, response_type, params, context):
@@ -113,5 +118,34 @@ async def test_client_without_elicitation_falls_back(tmp_path):
                 "sql": "UPDATE users SET active = 0 WHERE id = 1",
             })
             assert r.data["status"] == "approval_required"  # 回退审批单
+    finally:
+        svc.close()
+
+
+@pytest.mark.anyio
+async def test_export_table_returns_download_link_without_file_content(tmp_path):
+    svc = make_service(tmp_path, environment="dev")
+    mcp = build_mcp(svc)
+    try:
+        async with Client(mcp) as c:
+            tools = await c.list_tools()
+            assert {"list_databases", "export_table"} <= {tool.name for tool in tools}
+            result = await c.call_tool("export_table", {
+                "project": "demo",
+                "connection": "main",
+                "table": "users",
+                "fields": ["id", "name"],
+                "limit": 1,
+                "format": "csv",
+            })
+            assert result.data["row_count"] == 1
+            assert result.data["download_url"].startswith(
+                "http://127.0.0.1:8100/exports/"
+            )
+            assert result.data["byte_size"] > 0
+            assert "不要读取" in result.data["agent_instruction"]
+            assert all(block.type != "resource" for block in result.content)
+            # tool 文本/结构化结果都不能夹带导出正文
+            assert all("id,name" not in getattr(block, "text", "") for block in result.content)
     finally:
         svc.close()

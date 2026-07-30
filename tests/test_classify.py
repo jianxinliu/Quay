@@ -13,6 +13,7 @@ class TestReadonlyAllowed:
             ("SELECT * FROM users", "postgres"),
             ("SELECT 1", "sqlite"),
             ("SHOW TABLES", "mysql"),
+            ("SHOW CREATE TABLE users", "mysql"),
             ("SHOW server_version", "postgres"),
             ("DESCRIBE users", "mysql"),
             ("EXPLAIN SELECT * FROM users", "mysql"),
@@ -31,6 +32,14 @@ class TestReadonlyAllowed:
     def test_allowed(self, sql, engine):
         verdict = classify(sql, engine)
         assert verdict.readonly, f"{sql!r} 应放行，实际拒绝: {verdict.reason}"
+
+    @pytest.mark.parametrize("engine", ["mysql", "postgres", "sqlite", "clickhouse"])
+    def test_show_create_table_is_always_readonly(self, engine):
+        """回归：Show AST 和退化的 Command AST 都不能误入写审批风险评估。"""
+        verdict = classify("SHOW CREATE TABLE users", engine)
+        assert verdict.readonly is True
+        assert verdict.statement_kind == "Show"
+        assert verdict.reason == "SHOW 命令"
 
 
 class TestSetOperationGuards:

@@ -82,6 +82,7 @@ def service(tmp_path):
         }}}}}
     )
     svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3"))
+    svc.data_dir = str(tmp_path / "data")
     yield svc
     svc.close()
 
@@ -91,7 +92,21 @@ class TestHousekeepOnce:
         stats = service.housekeep_once(retention_days=30)
         assert set(stats) == {"engines_reaped", "redis_reaped", "audit_purged",
                               "changes_purged", "notifications_purged",
-                              "workflow_runs_purged"}
+                              "workflow_runs_purged", "exports_purged"}
+
+    def test_expired_mcp_exports_are_purged(self, service):
+        import os
+        import time
+        from pathlib import Path
+
+        old = Path(service.data_dir) / "mcp_exports" / ("a" * 48)
+        old.mkdir(parents=True)
+        (old / "x.csv").write_text("x", encoding="utf-8")
+        expired = time.time() - service._MCP_EXPORT_TTL_S - 10
+        os.utime(old, (expired, expired))
+        stats = service.housekeep_once()
+        assert stats["exports_purged"] == 1
+        assert not old.exists()
 
     def test_reap_wired(self, service):
         # 用过引擎后把回收阈值调成 0 → housekeep 应回收 1 个

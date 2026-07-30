@@ -34,6 +34,8 @@ def client(tmp_path):
         }}}}}
     )
     svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"), ApprovalStore(tmp_path / "a.sqlite3"))
+    svc.data_dir = str(tmp_path / "data")
+    svc.base_url = "http://testserver"
     from dbmcp.snippets import SnippetStore
     svc.snippets = SnippetStore(tmp_path / "a.sqlite3")
     mcp = build_mcp(svc)
@@ -226,6 +228,42 @@ def test_approvals_list_page(client):
     assert resp.status_code == 200
     assert "待审批" in resp.text
     assert "DELETE FROM users" in resp.text
+
+
+def test_temporary_exports_page_download_and_delete(client):
+    tc, svc = client
+    item = svc._save_mcp_export(
+        b"\xef\xbb\xbfid,name\r\n1,alice\r\n",
+        "text/csv; charset=utf-8",
+        "csv",
+        {
+            "project": "demo", "connection": "main", "database": None,
+            "table": "users", "fields": ["id", "name"], "row_count": 1,
+            "requested_limit": 1, "truncated": False, "format": "csv",
+            "masked_columns": [],
+        },
+    )
+
+    page = tc.get("/admin/exports")
+    assert page.status_code == 200
+    assert item["filename"] in page.text
+    assert "临时导出" in page.text
+
+    preview = tc.get(f"/admin/exports/{item['token']}/preview")
+    assert preview.status_code == 200
+    assert "alice" in preview.text
+
+    download = tc.get(item["download_url"])
+    assert download.status_code == 200
+    assert download.content.startswith(b"\xef\xbb\xbfid,name")
+
+    deleted = tc.post(
+        "/admin/exports/delete",
+        data={"token": item["token"]},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    assert svc.resolve_mcp_export(item["token"], item["filename"]) is None
 
 
 def test_detail_and_approve_flow(client):

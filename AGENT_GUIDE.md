@@ -11,8 +11,9 @@
 | 场景 | 工具 | 说明 |
 |---|---|---|
 | 发现 | `list_projects` / `list_connections` | 找到目标连接（项目 → 连接） |
-| 探索 schema | `list_tables` / `describe_table` / `sample_rows` | 表清单 / 列与索引 / 抽样看数据形状 |
+| 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
+| 数据导出 | `export_table(project, connection, table, fields?, limit?, format?, database?)` | 按库、表、字段和行数导出 CSV/JSON/Markdown/XLSX 文件 |
 | 数据变更 | `execute(project, connection, sql, reason?, change_id?)` + `get_change_status(change_id)` | 拒绝—重提审批流，见下 |
 | 连通性 | `test_connection(project, connection)` | SELECT 1 |
 | 跨源分析 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 本地沙箱，见下 |
@@ -28,6 +29,12 @@
 ```
 list_projects → list_connections(project) → list_tables → describe_table → query
 ```
+
+需要文件时使用 `export_table`。工具只返回文件名、大小、过期时间和短期下载链接，文件正文
+保存在服务端、不进入 agent 上下文。未绑定默认库或需要切换库时，先调用
+`list_databases`，再把选定的 `database` 传给 `list_tables`、`describe_table` 和
+`export_table`。导出文件使用 reader 账号并应用 agent 敏感字段脱敏，行数不能超过连接
+策略的 `max_rows`。
 
 - `query` 只收只读语句，解析失败/多语句一律拒绝（默认拒绝原则）。
 - **`query`/`sample_rows` 返回紧凑 TSV 文本**（非 JSON，省 token）：顶部 `#` 元信息行

@@ -7,8 +7,13 @@ SET 语句导致 1064 语法错误。SQLite 单测跑不到 MySQL 方言，故�
 import datetime as dt
 import decimal
 
-from dbmcp.config import Policy
+import pytest
+
+from dbmcp import __version__
+from dbmcp.config import ConnectionConfig, Policy
 from dbmcp.engines import (
+    DB_CLIENT_NAME,
+    _create_readonly_engine,
     _col_categories,
     _jsonable,
     _value_category,
@@ -17,6 +22,43 @@ from dbmcp.engines import (
     mysql_session_statements,
     role_timeouts,
 )
+
+
+def test_db_client_name_contains_quay_version():
+    assert DB_CLIENT_NAME == f"Quay({__version__})"
+
+
+@pytest.mark.parametrize(
+    ("engine", "client_arg"),
+    [
+        ("mysql", "program_name"),
+        ("postgres", "application_name"),
+        ("clickhouse", "client_name"),
+    ],
+)
+def test_network_db_connections_report_quay_client(monkeypatch, engine, client_arg):
+    captured = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    # MySQL 会在创建引擎后注册 connect 事件；本测试只验证传给 DBAPI 的建连参数。
+    monkeypatch.setattr("dbmcp.engines.create_engine", fake_create_engine)
+    monkeypatch.setattr(
+        "dbmcp.engines.event.listens_for",
+        lambda *_args, **_kwargs: lambda fn: fn,
+    )
+    cfg = ConnectionConfig(
+        engine=engine,
+        host="db.example",
+        user="reader",
+        password="plain://secret",
+    )
+
+    _create_readonly_engine(cfg, "reader", cfg.host, cfg.port)
+
+    assert captured["connect_args"][client_arg] == DB_CLIENT_NAME
 
 
 class TestJsonableBigInt:
