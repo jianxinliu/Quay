@@ -147,6 +147,14 @@ def test_lint_blank_line_separated_statements(client):
     assert errs and errs[0]["line"] == 3
 
 
+def test_lint_mysql_drop_partition_no_paren(client):
+    """回归：MySQL 无括号 DROP PARTITION（正确语法）不应被编辑器标红。
+    sqlglot 只认带括号，归一化后 lint 须返回空错误列表。"""
+    tc, _ = client
+    sql = "ALTER TABLE ad_event DROP PARTITION p20260702, p20260703, p20260704"
+    assert tc.post("/admin/sql/lint", data={"sql": sql, "dialect": "mysql"}).json()["errors"] == []
+
+
 def test_settings_info_tab(client):
     """系统信息 tab：展示路径/运行时/token 指引；token 明文绝不出现在页面。"""
     tc, svc = client

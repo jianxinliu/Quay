@@ -608,10 +608,14 @@ def _lint_one(sql: str, dialect: str) -> list[dict]:
     import sqlglot
     from sqlglot.errors import ParseError, SqlglotError
 
+    from .audit.classify import normalize_sql_for_parse
+
     if not sql.strip():
         return []
     try:
-        sqlglot.parse(sql, read=dialect)
+        # DB 合法但 sqlglot 解析不了的语法（如 MySQL 无括号 DROP PARTITION）先归一化，
+        # 避免编辑器对合法语句误标红波浪线（dialect 名与 engine 名一致）。
+        sqlglot.parse(normalize_sql_for_parse(sql, dialect), read=dialect)
         return []
     except ParseError as e:
         out = []

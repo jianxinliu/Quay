@@ -18,6 +18,8 @@ from typing import Protocol
 import sqlglot
 from sqlglot import exp
 
+from .classify import normalize_sql_for_parse
+
 # 风险等级，数值越大越危险
 LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 _LEVEL_RANK = {lvl: i for i, lvl in enumerate(LEVELS)}
@@ -81,7 +83,8 @@ def assess(sql: str, engine: str, meta_provider: MetaProvider) -> RiskReport:
     """
     dialect = _DIALECTS.get(engine)
     try:
-        statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
+        parse_sql = normalize_sql_for_parse(sql, engine)
+        statements = [s for s in sqlglot.parse(parse_sql, read=dialect) if s is not None]
     except sqlglot.errors.SqlglotError:
         # 解析/分词均失败（含引号不闭合等 TokenizeError）→ 按最高风险处理
         return RiskReport(
@@ -134,6 +137,10 @@ def _assess_one(stmt: exp.Expression, meta_provider: MetaProvider) -> RiskReport
         report.reasons.append("DDL 变更")
         big = _annotate_table_size(report, tables, meta_provider)
         report.level = _bump(report.level, "HIGH" if big else "MEDIUM")
+        # DROP PARTITION 会不可逆地删除整个分区的数据（数据丢失）→ 底线 HIGH，不论表大小
+        if next(stmt.find_all(exp.DropPartition), None) is not None:
+            report.level = _bump(report.level, "HIGH")
+            report.reasons.append("DROP PARTITION 会不可逆地删除整个分区的数据")
         if big:
             report.warnings.append("大表 DDL 可能长时间锁表，建议低峰期或在线 DDL 工具执行")
         return report
