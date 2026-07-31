@@ -2,7 +2,7 @@
 
 import pytest
 
-from dbmcp.audit.classify import classify, fingerprint
+from dbmcp.audit.classify import classify, fingerprint, normalize_sql_for_parse
 
 
 class TestReadonlyAllowed:
@@ -155,6 +155,45 @@ class TestBypassAttemptsRejected:
 
     def test_unknown_engine_rejected(self):
         assert not classify("SELECT 1", "redis").readonly
+
+
+class TestMysqlDropPartition:
+    """回归：MySQL `DROP PARTITION p1, p2`（无括号，MySQL 正确语法）——sqlglot 只认带括号，
+    归一化后须能正确判为 DDL 写操作，而非 ParseError 被后台查询台直接拒执行。"""
+
+    def test_no_paren_drop_partition_classified_as_write(self):
+        v = classify(
+            "ALTER TABLE ad_event DROP PARTITION p20260702, p20260703, p20260704", "mysql"
+        )
+        assert v.readonly is False
+        assert v.statement_kind == "Alter"          # 不再是 ParseError
+        assert "ad_event" in v.tables
+
+    def test_single_partition_no_paren(self):
+        v = classify("ALTER TABLE t DROP PARTITION p1", "mysql")
+        assert v.readonly is False
+        assert v.statement_kind == "Alter"
+
+    def test_normalize_only_affects_parse_copy_not_original(self):
+        # 归一化只产出用于解析的副本（加括号），执行仍走用户原文——两者必须不同
+        sql = "ALTER TABLE t DROP PARTITION p1, p2"
+        norm = normalize_sql_for_parse(sql, "mysql")
+        assert norm == "ALTER TABLE t DROP PARTITION (p1, p2)"
+        assert norm != sql
+
+    def test_already_parenthesized_not_double_wrapped(self):
+        sql = "ALTER TABLE t DROP PARTITION (p1, p2)"
+        assert normalize_sql_for_parse(sql, "mysql") == sql
+
+    def test_normalize_noop_for_non_mysql(self):
+        sql = "ALTER TABLE t DROP PARTITION p1, p2"
+        assert normalize_sql_for_parse(sql, "postgres") == sql
+        assert normalize_sql_for_parse(sql, "clickhouse") == sql
+
+    def test_normalize_preserves_unrelated_sql(self):
+        for sql in ["SELECT 1", "DELETE FROM t WHERE id=1",
+                    "ALTER TABLE t ADD COLUMN c INT"]:
+            assert normalize_sql_for_parse(sql, "mysql") == sql
 
 
 class TestFingerprint:

@@ -20,6 +20,30 @@ from sqlglot import exp
 _DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
              "clickhouse": "clickhouse"}
 
+# sqlglot 的 mysql 方言只认带括号的 `DROP PARTITION (p1, p2)`，但 MySQL 真实语法是**不带
+# 括号**的逗号列表 `DROP PARTITION p1, p2`——两者恰好相反：无括号原文喂给 sqlglot 会 ParseError
+# （classify/risk/lint 三处都因此把合法 DDL 误判/标红、后台查询台直接拒执行），带括号又被 MySQL
+# 按 1064 拒绝。修法：仅在**喂给 sqlglot 做静态解析判定前**把无括号列表临时补上括号；执行永远走
+# 用户原文（split_statements 纯文本切分 + run_write 原样 execute，不经 sqlglot re-render）。
+# 见 CLAUDE.md 经验教训。TRUNCATE PARTITION 无此病（sqlglot 走 Command 回退、不 ParseError）。
+_MYSQL_DROP_PARTITION_NOPAREN = re.compile(
+    r"(\bDROP\s+PARTITION\s+)(?!\()([`\w][`\w,\s]*?)\s*(?=;|\)|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def normalize_sql_for_parse(sql: str, engine: str) -> str:
+    """把「目标 DB 合法但 sqlglot 解析不了」的语法改写成 sqlglot 能解析的等价形式，
+    **仅供 classify / risk.assess / 编辑器 lint 的静态解析判定使用**；执行路径永远用原文。
+
+    目前只处理 MySQL `ALTER TABLE ... DROP PARTITION p1, p2`（无括号分区列表）。
+    改写不改变语义分类（仍是 Alter/DDL 写操作），只让 sqlglot 能解析出 AST。
+    """
+    if engine != "mysql":
+        return sql
+    return _MYSQL_DROP_PARTITION_NOPAREN.sub(
+        lambda m: f"{m.group(1)}({m.group(2).strip()})", sql)
+
 # 只读语句的顶层节点白名单。
 # SetOperation 覆盖 UNION / UNION ALL / INTERSECT / EXCEPT——顶层是集合运算而非 Select，
 # 但本身只读（各分支若含写操作，仍由下面的整树遍历 _WRITE_NODES 兜住）。
@@ -83,7 +107,8 @@ def classify(sql: str, engine: str) -> Verdict:
         return Verdict(False, f"引擎 {engine!r} 不支持 SQL 分类")
 
     try:
-        statements = [s for s in sqlglot.parse(sql, read=dialect) if s is not None]
+        parse_sql = normalize_sql_for_parse(sql, engine)
+        statements = [s for s in sqlglot.parse(parse_sql, read=dialect) if s is not None]
     except sqlglot.errors.SqlglotError as e:
         # 解析/分词均失败（含引号不闭合等 TokenizeError）→ 默认拒绝，按写操作处理。
         # statement_kind=ParseError 让上层（后台查询台）能把"语法错误"与"真写操作"区分开，

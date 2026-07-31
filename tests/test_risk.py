@@ -46,6 +46,25 @@ class TestCritical:
         assert r.level == "CRITICAL" and r.statement_kind == "Unparseable"
 
 
+class TestMysqlDropPartition:
+    """回归：MySQL 无括号 DROP PARTITION 归一化后能正常评估，不再落 Unparseable/CRITICAL 兜底。"""
+
+    def test_no_paren_drop_partition_assessed(self):
+        r = assess(
+            "ALTER TABLE ad_event DROP PARTITION p20260702, p20260703", "mysql", provider({})
+        )
+        assert r.statement_kind == "Alter"        # 不再是 Unparseable
+        assert "ad_event" in r.tables
+        # DROP PARTITION 删整个分区数据 → 底线 HIGH（即便表无行数元数据）
+        assert r.level == "HIGH"
+        assert any("DROP PARTITION" in x for x in r.reasons)
+
+    def test_ordinary_alter_stays_medium(self):
+        # 对照：普通 ADD COLUMN 不该被误提到 HIGH（小表）
+        r = assess("ALTER TABLE t ADD COLUMN c INT", "mysql", provider({}))
+        assert r.level == "MEDIUM"
+
+
 class TestMultiStatement:
     """多语句批量：逐条评估、等级取最高、逐条列出理由。"""
 
