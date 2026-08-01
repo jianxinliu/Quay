@@ -240,6 +240,25 @@ class DbmService:
 
     # ---------- 元信息 ----------
 
+    def begin_session(self, caller: CallerInfo, title: str, note: str = "") -> dict:
+        """登记当前 agent 会话的名字/简介，供后台按会话回溯其跑过的 SQL。
+
+        之后同一 MCP 会话（session_id 相同）里跑的所有 SQL 都能在审计页按此会话归类。
+        幂等：同一会话重复调用覆盖标题/简介。title 必填、非空。
+        """
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("会话名字 title 不能为空")
+        note = (note or "").strip()
+        sid = caller.session_id
+        self.store.upsert_session(sid, caller.agent or "unknown", title, note)
+        return {
+            "session_id": sid,
+            "title": title,
+            # session_id 为空时（如某些 stdio 客户端无会话 id）无法按会话归类，明确告知
+            "note": "" if sid else "当前客户端未提供会话 id，本次会话的 SQL 将无法按会话归类回溯",
+        }
+
     def list_projects(self) -> list[dict]:
         # 对 agent 隐藏 Redis 连接（Redis 只供人通过 /admin/redis 操作）；
         # 只剩 Redis 连接的项目也不出现
