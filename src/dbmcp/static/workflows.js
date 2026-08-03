@@ -113,7 +113,9 @@
       persist: function () { this.$emit("update:graph", this.graph); },
       typeLabel: function (t) {
         return { source: "取数", file: "文件", filter: "过滤", join: "JOIN",
-                 aggregate: "聚合", sql: "SQL", output: "输出" }[t] || t;
+                 aggregate: "聚合", sql: "SQL", output: "输出",
+                 describe: "描述", distinct: "去重", percentile: "分位",
+                 correlate: "相关", pivot: "透视" }[t] || t;
       },
       nodeDesc: function (n) {
         var c = n.cfg || {};
@@ -129,11 +131,20 @@
         if (n.type === "sql") return c.sql || "（写 SQL）";
         if (n.type === "output") return (c.order_by ? "ORDER BY " + c.order_by + " " : "")
                                        + "LIMIT " + (c.limit || 1000);
+        if (n.type === "describe") return "描述 " + (c.cols || "全部数值列");
+        if (n.type === "distinct") return "DISTINCT " + (c.cols || "*");
+        if (n.type === "percentile")
+          return "分位 " + (c.col || "?") + " · " + (c.quantiles || "0.25,0.5,0.75,0.95");
+        if (n.type === "correlate") return "相关 " + (c.cols || "（选列）");
+        if (n.type === "pivot")
+          return "PIVOT " + (c.on || "?") + " USING " + (c.using || "?");
         return "";
       },
       addNode: function (type) {
         var prefix = { source: "src", file: "file", filter: "flt", join: "join",
-                       aggregate: "agg", sql: "sql", output: "out" }[type] || "n";
+                       aggregate: "agg", sql: "sql", output: "out",
+                       describe: "desc", distinct: "dist", percentile: "pct",
+                       correlate: "corr", pivot: "pv" }[type] || "n";
         var i = 1;
         var names = {};
         (this.graph.nodes || []).forEach(function (n) { names[n.name] = 1; });
@@ -142,6 +153,11 @@
         var cfg = type === "join" ? { kind: "INNER", on: "", select: "", ports_n: 2 }
                 : type === "aggregate" ? { group: "", aggs: "" }
                 : type === "source" ? { conn: "", sql: "", limit: null }
+                : type === "describe" ? { cols: "" }
+                : type === "distinct" ? { cols: "" }
+                : type === "percentile" ? { col: "", quantiles: "0.25,0.5,0.75,0.95", group: "" }
+                : type === "correlate" ? { cols: "" }
+                : type === "pivot" ? { on: "", using: "sum(amount)", group: "" }
                 : {};
         var count = (this.graph.nodes || []).length;
         this.graph.nodes = (this.graph.nodes || []).concat([{
@@ -272,6 +288,11 @@
       +   '<button class="dg-btn" @click="addNode(\'filter\')">＋过滤</button>'
       +   '<button class="dg-btn" @click="addNode(\'join\')">＋JOIN</button>'
       +   '<button class="dg-btn" @click="addNode(\'aggregate\')">＋聚合</button>'
+      +   '<button class="dg-btn" @click="addNode(\'distinct\')" title="去重">＋去重</button>'
+      +   '<button class="dg-btn" @click="addNode(\'describe\')" title="描述统计（count/mean/std/min/25%/50%/75%/max）">＋描述</button>'
+      +   '<button class="dg-btn" @click="addNode(\'percentile\')" title="分位数（quantile_cont）">＋分位</button>'
+      +   '<button class="dg-btn" @click="addNode(\'correlate\')" title="Pearson 相关系数（两两）">＋相关</button>'
+      +   '<button class="dg-btn" @click="addNode(\'pivot\')" title="透视表（DuckDB PIVOT）">＋透视</button>'
       +   '<button class="dg-btn" @click="addNode(\'sql\')" title="自由 SQL（直接引用上游节点名）">＋SQL</button>'
       +   '<button class="dg-btn" @click="addNode(\'output\')">＋输出</button>'
       +   '<span class="wf-bp-hint">拖节点右缘圆点 → 下一节点左缘连线 · 点 ✕ 删连线 · 工作区 {{ (conn||"").split("/")[1] }}</span>'
@@ -378,19 +399,152 @@
       return [k, Math.round(v * 1000) / 1000];
     });
   }
+  // ---- 多 Y（stacked/grouped/area）：cfg.ys = "col1, col2, col3" ----
+  function multiRowsFromResult(result, cfg) {
+    var xi = result.columns.indexOf(cfg.x);
+    var ys = (cfg.ys || "").split(/[,\s]+/).filter(Boolean);
+    if (xi < 0 || !ys.length) return null;
+    var yis = ys.map(function (y) { return result.columns.indexOf(y); });
+    if (yis.some(function (i) { return i < 0; })) return null;
+    function num(v) { return typeof v === "string" && v !== "" && !isNaN(+v) ? +v : v; }
+    return {
+      cats: result.rows.map(function (r) { return String(r[xi]); }),
+      seriesData: ys.map(function (y, si) {
+        return { name: y, data: result.rows.map(function (r) { return num(r[yis[si]]); }) };
+      })
+    };
+  }
+  // ---- histogram：单列数值分箱 ----
+  function histBins(vals, nb) {
+    vals = vals.filter(function (v) { return typeof v === "number" && !isNaN(v); });
+    if (!vals.length) return { cats: [], counts: [] };
+    var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+    if (mn === mx) return { cats: [String(mn)], counts: [vals.length] };
+    var n = nb || Math.min(30, Math.max(5, Math.ceil(Math.sqrt(vals.length))));
+    var w = (mx - mn) / n;
+    var counts = new Array(n).fill(0);
+    vals.forEach(function (v) {
+      var i = Math.min(n - 1, Math.floor((v - mn) / w));
+      counts[i]++;
+    });
+    var cats = counts.map(function (_, i) {
+      var lo = mn + i * w; return lo.toFixed(2);
+    });
+    return { cats: cats, counts: counts };
+  }
   function chartOptionFor(result, cfg) {
-    var data = chartRowsFromResult(result, cfg);
     var axis = { axisLabel: { color: "#9aa0a8" }, axisLine: { lineStyle: { color: "#45484e" } },
                  splitLine: { lineStyle: { color: "#2e3033" } } };
     var opt = { backgroundColor: "transparent", color: CHART_PALETTE, textStyle: { color: "#bcbec4" },
-                tooltip: { trigger: cfg.type === "bar" || cfg.type === "line" ? "axis" : "item",
+                tooltip: { trigger: /^(pie|scatter|heatmap|funnel)$/.test(cfg.type) ? "item" : "axis",
                            backgroundColor: "#2b2d30", borderColor: "#393b40",
                            textStyle: { color: "#bcbec4" } },
-                grid: { left: 16, right: 24, top: 28, bottom: 12, containLabel: true } };
-    if (cfg.type === "pie") {
+                grid: { left: 16, right: 24, top: 40, bottom: 12, containLabel: true } };
+    var t = cfg.type;
+
+    // ---- 多 Y 系列（stacked/grouped/area/multi-line）----
+    if (t === "stacked" || t === "grouped" || t === "multi_line" || t === "multi_area") {
+      var m = multiRowsFromResult(result, cfg);
+      if (!m) return _emptyOpt(opt, "多列 chart 需要在 cfg.ys 里指定 2+ 列");
+      opt.legend = { textStyle: { color: "#bcbec4" }, top: 6 };
+      opt.grid.top = 34;
+      opt.xAxis = Object.assign({ type: "category", data: m.cats }, axis);
+      opt.yAxis = Object.assign({ type: "value" }, axis);
+      opt.series = m.seriesData.map(function (s) {
+        var base = { name: s.name, data: s.data };
+        if (t === "stacked") return Object.assign({ type: "bar", stack: "total" }, base);
+        if (t === "grouped") return Object.assign({ type: "bar", barMaxWidth: 28 }, base);
+        if (t === "multi_line") return Object.assign({ type: "line", smooth: true }, base);
+        return Object.assign({ type: "line", smooth: true, areaStyle: {}, stack: "total" }, base);
+      });
+      return opt;
+    }
+
+    // ---- heatmap（相关系数矩阵最合适）----
+    if (t === "heatmap") {
+      // 期待 result 是 correlate 输出格式：只有 a__b 这样的两列名列
+      var cells = [];
+      var vars = {};
+      result.columns.forEach(function (c, ci) {
+        var m2 = /^(.+?)__(.+)$/.exec(c);
+        if (!m2 || !result.rows.length) return;
+        var val = result.rows[0][ci];
+        var v = typeof val === "number" ? val : +val;
+        if (isNaN(v)) return;
+        vars[m2[1]] = 1; vars[m2[2]] = 1;
+        cells.push({ a: m2[1], b: m2[2], v: v });
+      });
+      var names = Object.keys(vars);
+      names.forEach(function (n) { cells.push({ a: n, b: n, v: 1 }); });          // 对角线
+      cells.slice(0, cells.length).forEach(function (c) {
+        cells.push({ a: c.b, b: c.a, v: c.v });                                    // 对称
+      });
+      var data = cells.map(function (c) {
+        return [names.indexOf(c.a), names.indexOf(c.b), Math.round(c.v * 1000) / 1000];
+      });
+      opt.xAxis = Object.assign({ type: "category", data: names }, axis);
+      opt.yAxis = Object.assign({ type: "category", data: names }, axis);
+      opt.visualMap = { min: -1, max: 1, calculable: true, orient: "horizontal",
+                        left: "center", bottom: "0",
+                        inRange: { color: ["#3b7cff", "#f5f5f5", "#ef4444"] },
+                        textStyle: { color: "#bcbec4" } };
+      opt.grid.bottom = 50;
+      opt.series = [{
+        type: "heatmap", data: data,
+        label: { show: true, color: "#111", fontSize: 11,
+                 formatter: function (p) { return p.data[2]; } }
+      }];
+      return opt;
+    }
+
+    // ---- histogram（单数值列的分布）----
+    if (t === "histogram") {
+      var yi = result.columns.indexOf(cfg.y);
+      if (yi < 0) return _emptyOpt(opt, "histogram 需要选一个数值列 (cfg.y)");
+      var vals = result.rows.map(function (r) { return typeof r[yi] === "string" ? +r[yi] : r[yi]; });
+      var h = histBins(vals, cfg.bins || 0);
+      opt.xAxis = Object.assign({ type: "category", data: h.cats, name: cfg.y }, axis);
+      opt.yAxis = Object.assign({ type: "value", name: "count" }, axis);
+      opt.series = [{ type: "bar", data: h.counts, barMaxWidth: 42 }];
+      return opt;
+    }
+
+    // ---- funnel（漏斗）----
+    if (t === "funnel") {
+      var data0 = chartRowsFromResult(result, cfg);
+      opt.series = [{ type: "funnel", left: "10%", top: 30, bottom: 10, width: "80%",
+                      label: { color: "#bcbec4" },
+                      data: data0.map(function (d) { return { name: String(d[0]), value: d[1] }; }) }];
+      return opt;
+    }
+
+    // ---- boxplot：期待 percentile 节点输出（含 p25/p50/p75，可选 p05/p95）----
+    if (t === "boxplot") {
+      var cols = result.columns || [];
+      // 找 p05/p25/p50/p75/p95 索引；缺 p05/p95 用 p25/p75 代替
+      var idx = {};
+      ["p05", "p25", "p50", "p75", "p95"].forEach(function (k) { idx[k] = cols.indexOf(k); });
+      if (idx.p25 < 0 || idx.p50 < 0 || idx.p75 < 0)
+        return _emptyOpt(opt, "boxplot 需要上游有 p25 / p50 / p75 列（用「分位数」节点）");
+      var catIdx = cols.indexOf(cfg.x);
+      var rows = result.rows.map(function (r, i) {
+        var cat = catIdx >= 0 ? String(r[catIdx]) : "组 " + (i + 1);
+        var p05 = idx.p05 >= 0 ? +r[idx.p05] : +r[idx.p25];
+        var p95 = idx.p95 >= 0 ? +r[idx.p95] : +r[idx.p75];
+        return { cat: cat, box: [p05, +r[idx.p25], +r[idx.p50], +r[idx.p75], p95] };
+      });
+      opt.xAxis = Object.assign({ type: "category", data: rows.map(function (r) { return r.cat; }) }, axis);
+      opt.yAxis = Object.assign({ type: "value" }, axis);
+      opt.series = [{ type: "boxplot", data: rows.map(function (r) { return r.box; }) }];
+      return opt;
+    }
+
+    // ---- 老的 bar/line/pie/scatter/area ----
+    var data = chartRowsFromResult(result, cfg);
+    if (t === "pie") {
       opt.series = [{ type: "pie", radius: ["28%", "66%"], label: { color: "#9aa0a8" },
                       data: data.map(function (d) { return { name: String(d[0]), value: d[1] }; }) }];
-    } else if (cfg.type === "scatter") {
+    } else if (t === "scatter") {
       opt.xAxis = Object.assign({ type: "value", name: cfg.x }, axis);
       opt.yAxis = Object.assign({ type: "value", name: cfg.y }, axis);
       opt.series = [{ type: "scatter", symbolSize: 9,
@@ -402,10 +556,19 @@
       opt.xAxis = Object.assign({ type: "category",
                                   data: data.map(function (d) { return String(d[0]); }) }, axis);
       opt.yAxis = Object.assign({ type: "value" }, axis);
-      opt.series = [{ type: cfg.type, data: data.map(function (d) { return d[1]; }),
-                      smooth: cfg.type === "line", barMaxWidth: 42 }];
+      var s = { data: data.map(function (d) { return d[1]; }), barMaxWidth: 42 };
+      if (t === "area") { s.type = "line"; s.smooth = true; s.areaStyle = {}; }
+      else if (t === "line") { s.type = "line"; s.smooth = true; }
+      else { s.type = "bar"; }
+      opt.series = [s];
     }
     return opt;
+  }
+  function _emptyOpt(baseOpt, msg) {
+    baseOpt.series = [];
+    baseOpt.graphic = { type: "text", left: "center", top: "middle",
+                        style: { text: msg, fill: "#8a8f96", font: "12px sans-serif" } };
+    return baseOpt;
   }
   function defaultChartCfg(result) {
     var cols = (result && result.columns) || [];
@@ -465,12 +628,17 @@
       return {
         tab: "form",                // form | preview
         realConnOptions: [],
+        realConnMeta: {},           // conn value -> {engine, database, environment}
         upstream: { loading: false, error: "", columns: [] },
         preview: { loading: false, error: "", columns: [], rows: [] },
         // source SQL builder 状态
         sourceMode: "builder",       // builder | sql
+        srcDbs: [],                  // 未绑库连接需选库
+        srcDbsLoading: false,
+        srcDbsErr: "",
         srcTables: [],
         srcTablesLoading: false,
+        srcTablesErr: "",
         srcSchemaCols: [],
         srcSchemaLoading: false,
         srcTable: "",
@@ -495,6 +663,13 @@
       previewCols: function () {
         if (this.preview.columns && this.preview.columns.length) return this.preview.columns;
         return (this.upstream.columns || []).map(function (c) { return c.name; });
+      },
+      // 当前 source 连接是否需要先选库（MySQL/PG/CH 未绑默认库时反射会崩，须显式选库）
+      srcNeedsDb: function () {
+        var n = this.node; if (!n || n.type !== "source" || !n.cfg.conn) return false;
+        var m = this.realConnMeta[n.cfg.conn]; if (!m) return false;
+        if (!(m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse")) return false;
+        return !m.database;
       }
     },
     watch: {
@@ -510,7 +685,9 @@
     methods: {
       typeLabel: function (t) {
         return { source: "取数", file: "文件", filter: "过滤", join: "JOIN",
-                 aggregate: "聚合", sql: "SQL", output: "输出" }[t] || t;
+                 aggregate: "聚合", sql: "SQL", output: "输出",
+                 describe: "描述", distinct: "去重", percentile: "分位",
+                 correlate: "相关", pivot: "透视" }[t] || t;
       },
       persist: function () { this.$emit("update:graph", this.graph); },
       joinPortsCount: function (n) { return joinPortsN(n); },
@@ -567,40 +744,103 @@
         var n = this.node;
         if (!n) return;
         if (n.type === "source") {
-          this.loadRealConns();
           this.parseSourceSql();
-          if ((n.cfg.conn || "").indexOf("/") >= 0) this.loadSrcTables();
+          this.loadRealConns();
+          // loadRealConns 拿到 meta 后会按 srcNeedsDb 自动 loadSrcDbs（若需要且未选库）。
+          // 已有 schema 或不需要库时先尝试列表（meta 未到 srcNeedsDb=false 也 OK：有 schema 就带上）
+          if ((n.cfg.conn || "").indexOf("/") >= 0) {
+            this._tryLoadTablesWhenReady();
+            // 已保存的 source 节点：parseSourceSql 抽出了 srcTable，主动拉表结构填「列」区
+            if (this.srcTable) this.loadSrcTableCols(this.srcTable);
+          }
         } else {
           this.loadUpstream(false);
+        }
+      },
+      _tryLoadTablesWhenReady: function () {
+        // meta 就绪前谨慎：若 meta 未就绪且节点有保存的 schema，直接带 schema 拉；
+        // meta 未就绪且无 schema，等 loadRealConns 回调再决定
+        var n = this.node; if (!n) return;
+        if (this.realConnOptions.length === 0) {
+          // meta 未就绪；loadRealConns 完成后自会补拉
+          if (n.cfg.schema) this.loadSrcTables();
+          return;
+        }
+        if (this.srcNeedsDb) {
+          this.loadSrcDbs();
+          if (n.cfg.schema) this.loadSrcTables();
+        } else {
+          this.loadSrcTables();
         }
       },
       loadRealConns: function () {
         var self = this;
         apiGet("/admin/sql/connections").then(function (d) {
           if (!d || !d.ok) return;
+          var meta = {};
           self.realConnOptions = (d.connections || []).filter(function (c) {
             return c.project !== "analysis";
           }).map(function (c) {
-            return { value: c.project + "/" + c.connection,
-                     label: c.project + "/" + c.connection, env: c.environment };
+            var v = c.project + "/" + c.connection;
+            meta[v] = { engine: c.engine, database: c.database, environment: c.environment };
+            return { value: v, label: v, env: c.environment };
           });
+          self.realConnMeta = meta;
+          // meta 就绪：按当前节点状态决定后续动作
+          if (self.node && self.node.type === "source" && self.node.cfg.conn) {
+            if (self.srcNeedsDb) {
+              self.loadSrcDbs();
+              if (self.node.cfg.schema) self.loadSrcTables();
+            } else {
+              self.loadSrcTables();
+            }
+          }
         });
       },
       onSourceConnChange: function (v) {
         this.node.cfg.conn = v;
+        this.node.cfg.schema = "";                  // 换连接就清 schema
+        this.srcTable = ""; this.srcCols = []; this.srcSchemaCols = [];
+        this.srcDbs = []; this.srcDbsErr = ""; this.srcTables = []; this.srcTablesErr = "";
+        this.persist();
+        if (this.srcNeedsDb) this.loadSrcDbs();
+        else this.loadSrcTables();
+      },
+      loadSrcDbs: function () {
+        var self = this;
+        var conn = self.node && self.node.cfg.conn;
+        if (!conn) return;
+        self.srcDbsLoading = true; self.srcDbsErr = "";
+        apiGet("/admin/sql/databases?conn=" + encodeURIComponent(conn)).then(function (d) {
+          self.srcDbsLoading = false;
+          if (d && d.ok) self.srcDbs = d.databases || [];
+          else self.srcDbsErr = (d && d.error) || "无法列出库";
+        }).catch(function (e) { self.srcDbsLoading = false; self.srcDbsErr = String(e); });
+      },
+      onSrcDbChange: function (v) {
+        if (!this.node) return;
+        this.node.cfg.schema = v || "";
         this.srcTable = ""; this.srcCols = []; this.srcSchemaCols = [];
         this.persist();
         this.loadSrcTables();
       },
       loadSrcTables: function () {
         var self = this;
-        var conn = self.node && self.node.cfg.conn;
+        var n = self.node; if (!n) return;
+        var conn = n.cfg.conn;
         if (!conn) return;
-        self.srcTablesLoading = true;
-        apiGet("/admin/sql/tables?conn=" + encodeURIComponent(conn)).then(function (d) {
+        // 未绑库连接必须带 schema
+        if (self.srcNeedsDb && !n.cfg.schema) { self.srcTables = []; return; }
+        self.srcTablesLoading = true; self.srcTablesErr = "";
+        var url = "/admin/sql/tables?conn=" + encodeURIComponent(conn);
+        if (n.cfg.schema) url += "&schema=" + encodeURIComponent(n.cfg.schema);
+        apiGet(url).then(function (d) {
           self.srcTablesLoading = false;
-          self.srcTables = (d && d.ok) ? (d.tables || []) : [];
-        }).catch(function () { self.srcTablesLoading = false; });
+          if (d && d.ok) { self.srcTables = d.tables || []; }
+          else { self.srcTables = []; self.srcTablesErr = (d && d.error) || "无法列出表"; }
+        }).catch(function (e) {
+          self.srcTablesLoading = false; self.srcTables = []; self.srcTablesErr = String(e);
+        });
       },
       onSrcTableChange: function (v) {
         this.srcTable = v;
@@ -612,8 +852,10 @@
         if (!tbl || !this.node || !this.node.cfg.conn) return;
         var self = this;
         self.srcSchemaLoading = true;
-        apiGet("/admin/sql/table?conn=" + encodeURIComponent(this.node.cfg.conn)
-               + "&table=" + encodeURIComponent(tbl)).then(function (d) {
+        var url = "/admin/sql/table?conn=" + encodeURIComponent(this.node.cfg.conn)
+                + "&table=" + encodeURIComponent(tbl);
+        if (this.node.cfg.schema) url += "&schema=" + encodeURIComponent(this.node.cfg.schema);
+        apiGet(url).then(function (d) {
           self.srcSchemaLoading = false;
           if (!d || !d.ok) { self.srcSchemaCols = []; return; }
           self.srcSchemaCols = (d.columns || []).map(function (c) {
@@ -731,8 +973,16 @@
       +       '<button :class="{active: tab===\'form\'}" @click="tab=\'form\'">配置</button>'
       +       '<button :class="{active: tab===\'preview\'}" @click="runPreview">预览</button>'
       +     '</div>'
-      +     '<button class="dg-btn danger sm" @click="$emit(\'delete-node\', node.id)" title="删除节点">删除</button>'
-      +     '<button class="dg-btn sm wf-drawer-close" @click="$emit(\'close\')" title="关闭（ESC）">✕ 关闭</button>'
+      +     '<button class="wf-drawer-icon wf-drawer-del" @click="$emit(\'delete-node\', node.id)" title="删除节点" aria-label="删除节点">'
+      +       '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">'
+      +         '<path d="M3 4h10M6.5 4V2.5h3V4M5 4l.5 9a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1L11 4M7 7v4M9 7v4"/>'
+      +       '</svg>'
+      +     '</button>'
+      +     '<button class="wf-drawer-icon wf-drawer-close" @click="$emit(\'close\')" title="关闭（ESC）" aria-label="关闭">'
+      +       '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">'
+      +         '<path d="M4 4l8 8M12 4l-8 8"/>'
+      +       '</svg>'
+      +     '</button>'
       +   '</div>'
       +   '<div class="wf-drawer-body">'
       // ============ 配置 tab ============
@@ -761,11 +1011,21 @@
       +           '<button :class="{active: sourceMode===\'sql\'}" @click="sourceMode=\'sql\'">SQL 高级</button>'
       +         '</div>'
       +         '<template v-if="sourceMode===\'builder\'">'
+      +           '<div v-if="srcNeedsDb" class="row">'
+      +             '<label>库 <span v-if="srcDbsLoading" class="wf-hint">加载中…</span></label>'
+      +             '<dg-select :model-value="node.cfg.schema || \'\'" '
+      +                ':options="srcDbs.map(x => ({value: x, label: x}))"'
+      +                ' :placeholder="srcDbsLoading ? \'加载库…\' : \'选择库…（此连接未绑定默认库）\'"'
+      +                ' @update:model-value="onSrcDbChange"/>'
+      +             '<div v-if="srcDbsErr" class="wf-mod-schema-err">{{ srcDbsErr }}</div>'
+      +           '</div>'
       +           '<div class="row"><label>表</label>'
       +             '<dg-select :model-value="srcTable" '
       +                ':options="srcTables.map(t => ({value: t, label: t}))"'
-      +                ' :placeholder="srcTablesLoading ? \'加载表…\' : (node.cfg.conn ? \'选择表…\' : \'先选连接\')"'
-      +                ' @update:model-value="onSrcTableChange"/></div>'
+      +                ' :placeholder="srcTablesLoading ? \'加载表…\' : (srcNeedsDb && !node.cfg.schema ? \'先选库\' : (node.cfg.conn ? \'选择表…\' : \'先选连接\'))"'
+      +                ' @update:model-value="onSrcTableChange"/>'
+      +             '<div v-if="srcTablesErr" class="wf-mod-schema-err">{{ srcTablesErr }}</div>'
+      +           '</div>'
       +           '<div v-if="srcTable" class="row">'
       +             '<label>列 <a href="#" @click.prevent="srcAllCols" class="wf-hint-link">选全部</a></label>'
       +             '<div v-if="srcSchemaLoading" class="wf-mod-schema-msg">读列…</div>'
@@ -800,7 +1060,7 @@
       +           '</div>'
       +           '<div class="row"><label>行数上限</label>'
       +             '<input type="number" v-model.number="node.cfg.limit" @change="persist" placeholder="默认 20 万"></div>'
-      +           '<div class="row"><label>schema（未绑库连接需填）</label>'
+      +           '<div v-if="!srcNeedsDb" class="row"><label>schema（未绑库连接需填）</label>'
       +             '<input v-model="node.cfg.schema" @change="persist" placeholder="留空使用默认库"></div>'
       +           '<div class="wf-sql-preview">'
       +             '<div class="wf-sql-preview-hd">生成的 SQL <span class="wf-hint">（切「SQL 高级」可直接修改）</span></div>'
@@ -857,6 +1117,57 @@
       +           '<textarea v-model="node.cfg.aggs" @change="persist" rows="3" spellcheck="false"'
       +             ' placeholder="count(*) AS n, sum(amount) AS total"></textarea></div>'
       +       '</template>'
+      // ---- describe 节点 ----
+      +       '<template v-else-if="node.type===\'describe\'">'
+      +         '<div class="row"><label>数值列（必填，逗号分隔）</label>'
+      +           '<input v-model="node.cfg.cols" @change="persist" spellcheck="false"'
+      +             ' placeholder="amount, revenue"></div>'
+      +         '<div class="wf-hint" style="margin-top:6px">'
+      +           '输出每列一行：<code>column_name / n / nulls / min / max / avg / std / q25 / q50 / q75</code>'
+      +         '</div>'
+      +       '</template>'
+      // ---- distinct 节点 ----
+      +       '<template v-else-if="node.type===\'distinct\'">'
+      +         '<div class="row"><label>去重列（可选，留空 = SELECT DISTINCT *）</label>'
+      +           '<input v-model="node.cfg.cols" @change="persist" spellcheck="false"'
+      +             ' placeholder="user_id, day"></div>'
+      +       '</template>'
+      // ---- percentile 节点 ----
+      +       '<template v-else-if="node.type===\'percentile\'">'
+      +         '<div class="row"><label>目标数值列</label>'
+      +           '<input v-model="node.cfg.col" @change="persist" spellcheck="false"'
+      +             ' placeholder="amount"></div>'
+      +         '<div class="row"><label>分位数（0-1 间，逗号分隔）</label>'
+      +           '<input v-model="node.cfg.quantiles" @change="persist" spellcheck="false"'
+      +             ' placeholder="0.25, 0.5, 0.75, 0.95"></div>'
+      +         '<div class="row"><label>分组列（可选）</label>'
+      +           '<input v-model="node.cfg.group" @change="persist" spellcheck="false"'
+      +             ' placeholder="channel"></div>'
+      +       '</template>'
+      // ---- correlate 节点 ----
+      +       '<template v-else-if="node.type===\'correlate\'">'
+      +         '<div class="row"><label>相关列（至少 2 列，逗号分隔）</label>'
+      +           '<input v-model="node.cfg.cols" @change="persist" spellcheck="false"'
+      +             ' placeholder="amount, revenue, cost"></div>'
+      +         '<div class="wf-hint" style="margin-top:6px">'
+      +           'Pearson 相关系数，两两组合输出为 <code>a__b</code>、<code>a__c</code>、<code>b__c</code> 等列（值域 -1 ~ 1）'
+      +         '</div>'
+      +       '</template>'
+      // ---- pivot 节点 ----
+      +       '<template v-else-if="node.type===\'pivot\'">'
+      +         '<div class="row"><label>透视列（ON）</label>'
+      +           '<input v-model="node.cfg.on" @change="persist" spellcheck="false"'
+      +             ' placeholder="channel"></div>'
+      +         '<div class="row"><label>聚合表达式（USING）</label>'
+      +           '<input v-model="node.cfg.using" @change="persist" spellcheck="false"'
+      +             ' placeholder="sum(amount)"></div>'
+      +         '<div class="row"><label>行分组（GROUP BY，可选）</label>'
+      +           '<input v-model="node.cfg.group" @change="persist" spellcheck="false"'
+      +             ' placeholder="day"></div>'
+      +         '<div class="wf-hint" style="margin-top:6px">'
+      +           '编译为 DuckDB 原生 <code>PIVOT</code>；透视列的每个不同值成为一列'
+      +         '</div>'
+      +       '</template>'
       // ---- sql 节点 ----
       +       '<template v-else-if="node.type===\'sql\'">'
       +         '<div class="row">'
@@ -882,22 +1193,44 @@
       +         '<template v-if="node.cfg.view===\'chart\'">'
       +           '<div class="row"><label>图表类型</label>'
       +             '<select v-model="node.cfg.chart.type" @change="persist" class="wf-chart-cfg-in">'
-      +               '<option value="bar">柱状图</option>'
-      +               '<option value="line">折线图</option>'
-      +               '<option value="pie">饼图</option>'
-      +               '<option value="scatter">散点图</option>'
+      +               '<optgroup label="基础">'
+      +                 '<option value="bar">柱状图</option>'
+      +                 '<option value="line">折线图</option>'
+      +                 '<option value="area">面积图</option>'
+      +                 '<option value="pie">饼图</option>'
+      +                 '<option value="scatter">散点图</option>'
+      +               '</optgroup>'
+      +               '<optgroup label="多列">'
+      +                 '<option value="stacked">堆叠柱状</option>'
+      +                 '<option value="grouped">分组柱状</option>'
+      +                 '<option value="multi_line">多折线</option>'
+      +                 '<option value="multi_area">堆叠面积</option>'
+      +               '</optgroup>'
+      +               '<optgroup label="统计">'
+      +                 '<option value="histogram">直方图（单列分布）</option>'
+      +                 '<option value="heatmap">热力图（相关矩阵）</option>'
+      +                 '<option value="boxplot">箱线图（分位数）</option>'
+      +               '</optgroup>'
+      +               '<optgroup label="业务">'
+      +                 '<option value="funnel">漏斗图</option>'
+      +               '</optgroup>'
       +             '</select></div>'
-      +           '<div class="row"><label>X 轴列</label>'
+      +           '<div class="row"><label>X 轴列<span class="wf-hint">（boxplot 用作分组、heatmap 忽略）</span></label>'
       +             '<select v-model="node.cfg.chart.x" @change="persist" class="wf-chart-cfg-in">'
+      +               '<option value="">（不选）</option>'
       +               '<option v-for="c in previewCols" :key="c" :value="c">{{ c }}</option>'
       +               '<option v-if="!previewCols.length" value="">（先「预览」运行拿到列）</option>'
       +             '</select></div>'
-      +           '<div class="row"><label>Y 轴列</label>'
+      +           '<div class="row" v-if="!/^(stacked|grouped|multi_)/.test(node.cfg.chart.type||\'\') && node.cfg.chart.type!==\'heatmap\' && node.cfg.chart.type!==\'boxplot\'"><label>Y 轴列</label>'
       +             '<select v-model="node.cfg.chart.y" @change="persist" class="wf-chart-cfg-in">'
       +               '<option v-for="c in previewCols" :key="c" :value="c">{{ c }}</option>'
       +               '<option v-if="!previewCols.length" value=""></option>'
       +             '</select></div>'
-      +           '<div class="row"><label>聚合</label>'
+      +           '<div class="row" v-if="/^(stacked|grouped|multi_)/.test(node.cfg.chart.type||\'\')"><label>Y 列（逗号分隔多列）</label>'
+      +             '<input v-model="node.cfg.chart.ys" @change="persist" spellcheck="false" placeholder="revenue, cost, roi"></div>'
+      +           '<div class="row" v-if="node.cfg.chart.type===\'histogram\'"><label>分箱数</label>'
+      +             '<input type="number" v-model.number="node.cfg.chart.bins" @change="persist" placeholder="留空自动（√N）"></div>'
+      +           '<div class="row" v-if="!/^(heatmap|boxplot|histogram|multi_|stacked|grouped)$/.test(node.cfg.chart.type||\'\')"><label>聚合</label>'
       +             '<select v-model="node.cfg.chart.agg" @change="persist" class="wf-chart-cfg-in">'
       +               '<option value="">不聚合</option>'
       +               '<option value="sum">SUM</option>'
@@ -1235,9 +1568,10 @@
         if (!name) { alert("workflow 名称不能为空"); return; }
         if (!ws || ws === "__new__") { alert("请选择或新建一个工作区"); return; }
         var self = this;
-        var graph = { nodes: [], edges: [] };
+        // 空图会被后端 compile_graph 拒为「流程为空」——传 script="-- 空流程，请添加节点"
+        // 走脚本分支落库，进入详情页后由用户搭画布，onGraphUpdate 会覆盖存图
         apiPost(API + "/save", {
-          name: name, workspace: ws, script: "", graph: JSON.stringify(graph)
+          name: name, workspace: ws, script: "-- 空流程，请添加节点"
         }).then(function (d) {
           if (!d.ok) { alert("创建失败：" + (d.error || "")); return; }
           location.hash = "#name=" + encodeURIComponent(name);
@@ -1336,7 +1670,7 @@
         if (this.selectedNodeId === nodeId) this.selectedNodeId = null;
         this.drawerNodeId = null;
         this.onGraphUpdate(this.current.graph);
-      }
+      },
     },
     mounted: function () {
       window.addEventListener("hashchange", this.onHashChange);
@@ -1548,62 +1882,6 @@
       +       '@close="closeNodeDrawer" '
       +       '@delete-node="onDrawerDeleteNode"/>'
       +   '</div>'
-      // 调度浮层
-      +   '<div v-if="schedOpen" class="wf-sched-overlay" @click.self="schedOpen=false">'
-      +     '<div class="wf-sched-card">'
-      +       '<div class="wf-sched-hd">'
-      +         '<b>⚙ 调度设置</b>'
-      +         '<span class="x" @click="schedOpen=false">✕</span>'
-      +       '</div>'
-      +       '<div v-if="schedLoading" class="wf-empty">加载中…</div>'
-      +       '<div v-else class="wf-sched-body">'
-      +         '<div class="row">'
-      +           '<label>频率</label>'
-      +           '<div class="wf-sched-cron">'
-      +             '<select v-model="schedForm.cron_type">'
-      +               '<option value="interval">每 N 分钟</option>'
-      +               '<option value="daily">每天</option>'
-      +               '<option value="weekly">每周</option>'
-      +               '<option value="monthly">每月</option>'
-      +               '<option value="cron">Cron 表达式（高级）</option>'
-      +             '</select>'
-      +             '<input v-model="schedForm.cron_value" '
-      +                ':placeholder="schedForm.cron_type===\'interval\'?\'5\':'
-      +                'schedForm.cron_type===\'daily\'?\'09:30\':'
-      +                'schedForm.cron_type===\'weekly\'?\'1 09:30（1=周一，0=周日）\':'
-      +                'schedForm.cron_type===\'monthly\'?\'15 09:00（每月15日）\':\'*/5 * * * *\'">'
-      +           '</div>'
-      +         '</div>'
-      +         '<div class="row"><label><input type="checkbox" v-model="schedForm.enabled"> 启用</label></div>'
-      +         '<div class="row">'
-      +           '<label>通知策略</label>'
-      +           '<select v-model="schedForm.notify_on">'
-      +             '<option value="failure">仅失败时（推荐）</option>'
-      +             '<option value="success">仅成功时</option>'
-      +             '<option value="always">每次都通知</option>'
-      +             '<option value="none">不通知</option>'
-      +           '</select>'
-      +         '</div>'
-      +         '<div class="row">'
-      +           '<label>通知产物</label>'
-      +           '<div class="wf-attach">'
-      +             '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'summary\')>=0"'
-      +               ' @change="toggleAttach(\'summary\')"> 摘要 + 链接</label>'
-      +             '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'markdown_table\')>=0"'
-      +               ' @change="toggleAttach(\'markdown_table\')"> Markdown 表格</label>'
-      +             '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'xlsx_link\')>=0"'
-      +               ' @change="toggleAttach(\'xlsx_link\')"> xlsx 下载链接</label>'
-      +           '</div>'
-      +         '</div>'
-      +         '<div v-if="schedError" class="wf-err">{{ schedError }}</div>'
-      +         '<div class="wf-sched-foot">'
-      +           '<button class="dg-btn danger" @click="deleteSchedule">删除调度</button>'
-      +           '<button class="dg-btn" @click="schedOpen=false">取消</button>'
-      +           '<button class="dg-btn run" @click="saveSchedule">保存</button>'
-      +         '</div>'
-      +       '</div>'
-      +     '</div>'
-      +   '</div>'
       + '</div>'
       // ============ 运行详情页 ============
       + '<div v-else-if="route.view===\'run\'" class="wf-run-page">'
@@ -1644,6 +1922,62 @@
       +         '<tbody><tr v-for="(r, ri) in currentRun.output_preview.rows.slice(0, 50)" :key="ri">'
       +           '<td v-for="(v, ci) in r" :key="ci">{{ v == null ? "" : String(v).slice(0, 80) }}</td>'
       +         '</tr></tbody></table></div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+      // ============ 调度浮层（顶层，任何视图下都可弹出）============
+      + '<div v-if="schedOpen" class="wf-sched-overlay" @click.self="schedOpen=false">'
+      +   '<div class="wf-sched-card">'
+      +     '<div class="wf-sched-hd">'
+      +       '<b>⚙ 调度设置</b>'
+      +       '<span class="x" @click="schedOpen=false">✕</span>'
+      +     '</div>'
+      +     '<div v-if="schedLoading" class="wf-empty">加载中…</div>'
+      +     '<div v-else class="wf-sched-body">'
+      +       '<div class="row">'
+      +         '<label>频率</label>'
+      +         '<div class="wf-sched-cron">'
+      +           '<select v-model="schedForm.cron_type">'
+      +             '<option value="interval">每 N 分钟</option>'
+      +             '<option value="daily">每天</option>'
+      +             '<option value="weekly">每周</option>'
+      +             '<option value="monthly">每月</option>'
+      +             '<option value="cron">Cron 表达式（高级）</option>'
+      +           '</select>'
+      +           '<input v-model="schedForm.cron_value" '
+      +              ':placeholder="schedForm.cron_type===\'interval\'?\'5\':'
+      +              'schedForm.cron_type===\'daily\'?\'09:30\':'
+      +              'schedForm.cron_type===\'weekly\'?\'1 09:30（1=周一，0=周日）\':'
+      +              'schedForm.cron_type===\'monthly\'?\'15 09:00（每月15日）\':\'*/5 * * * *\'">'
+      +         '</div>'
+      +       '</div>'
+      +       '<div class="row"><label><input type="checkbox" v-model="schedForm.enabled"> 启用</label></div>'
+      +       '<div class="row">'
+      +         '<label>通知策略</label>'
+      +         '<select v-model="schedForm.notify_on">'
+      +           '<option value="failure">仅失败时（推荐）</option>'
+      +           '<option value="success">仅成功时</option>'
+      +           '<option value="always">每次都通知</option>'
+      +           '<option value="none">不通知</option>'
+      +         '</select>'
+      +       '</div>'
+      +       '<div class="row">'
+      +         '<label>通知产物</label>'
+      +         '<div class="wf-attach">'
+      +           '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'summary\')>=0"'
+      +             ' @change="toggleAttach(\'summary\')"> 摘要 + 链接</label>'
+      +           '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'markdown_table\')>=0"'
+      +             ' @change="toggleAttach(\'markdown_table\')"> Markdown 表格</label>'
+      +           '<label><input type="checkbox" :checked="schedForm.attach_kinds.indexOf(\'xlsx_link\')>=0"'
+      +             ' @change="toggleAttach(\'xlsx_link\')"> xlsx 下载链接</label>'
+      +         '</div>'
+      +       '</div>'
+      +       '<div v-if="schedError" class="wf-err">{{ schedError }}</div>'
+      +       '<div class="wf-sched-foot">'
+      +         '<button class="dg-btn danger" @click="deleteSchedule">删除调度</button>'
+      +         '<button class="dg-btn" @click="schedOpen=false">取消</button>'
+      +         '<button class="dg-btn run" @click="saveSchedule">保存</button>'
+      +       '</div>'
       +     '</div>'
       +   '</div>'
       + '</div>'

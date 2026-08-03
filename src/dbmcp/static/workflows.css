@@ -73,8 +73,13 @@
 /* ---------- 蓝图视图（DAG 画布） ---------- */
 .wf-blueprint { display: flex; flex-direction: column; height: 100%; }
 .wf-bp-bar {
-  flex: none; display: flex; gap: 6px; align-items: center; padding: 6px 10px;
+  flex: none; display: flex; gap: 4px; align-items: center; padding: 6px 10px;
   border-bottom: 1px solid var(--dg-border); background: var(--dg-panel-2);
+  flex-wrap: wrap;                       /* 节点类型多时允许折行到下一行 */
+}
+.wf-bp-bar .dg-btn {
+  padding: 4px 9px; font-size: 12px; white-space: nowrap;   /* 按钮内文本不折行 */
+  flex: none;
 }
 .wf-bp-bar .wf-bp-hint { color: var(--dg-faint); font-size: 11px; margin-left: auto; }
 .wf-bp-body { flex: 1; display: flex; min-height: 0; }
@@ -110,6 +115,7 @@
 .wf-fnode .ty {
   flex: none; font-size: 9px; padding: 0 4px; border-radius: 3px; line-height: 14px;
   background: var(--dg-accent-soft); color: #cfe0ff;
+  white-space: nowrap;                   /* 中文双字徽章别被挤成竖排 */
 }
 .wf-fnode.source .ty, .wf-fnode.file .ty { background: #1e3a2f; color: #7ee2a8; }
 .wf-fnode.output .ty { background: #3a2c1e; color: #e8c07a; }
@@ -371,9 +377,18 @@
   border-radius: 4px; cursor: pointer; font-size: 12px;
 }
 .wf-drawer-tabs button.active { background: var(--dg-panel); color: var(--dg-text); }
-/* 关闭按钮：显眼的 dg-btn 风格 + 深色悬浮 */
-.wf-drawer-close { font-size: 12px; }
-.wf-drawer-close:hover { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
+/* 关闭/删除：紧凑的图标按钮 */
+.wf-drawer-icon {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; background: transparent;
+  border: 1px solid var(--dg-border); border-radius: 6px;
+  color: var(--dg-muted); cursor: pointer; transition: color .12s, background .12s, border-color .12s;
+}
+.wf-drawer-icon:hover { color: var(--dg-text); background: var(--dg-bg); }
+.wf-drawer-icon:active { transform: scale(.94); }
+.wf-drawer-icon svg { display: block; }
+.wf-drawer-del:hover { color: var(--dg-red); border-color: var(--dg-red); background: rgba(239,68,68,.08); }
+.wf-drawer-close:hover { color: var(--dg-text); }
 .wf-drawer-body { flex: 1; overflow: auto; padding: 16px 18px; }
 .wf-drawer-form .row { margin-bottom: 14px; }
 .wf-drawer-form .row label { display: block; font-size: 11px; color: var(--dg-muted); margin-bottom: 4px; }

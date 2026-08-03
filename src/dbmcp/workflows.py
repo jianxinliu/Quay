@@ -134,13 +134,19 @@ def _row(row: sqlite3.Row) -> Workflow:
 #
 # graph = {"nodes": [...], "edges": [{"from": id, "to": id, "port": "in|left|right"}]}
 # 节点 = {"id", "type", "name", "x", "y", "cfg": {...}}，type ∈：
-#   source    cfg: {conn: "project/connection", sql, limit?, schema?}   → 导入为数据集
-#   file      cfg: {path}                                               → 文件导入为数据集
-#   filter    cfg: {where}          输入 1（in）
-#   join      cfg: {kind, on, select?, ports_n?}  输入 N（端口 in_1..in_N，SQL 别名 a/b/c/...；老图 left/right 兼容为 in_1/in_2）
-#   aggregate cfg: {group, aggs}    输入 1
-#   sql       cfg: {sql}            输入任意（直接按上游节点名引用）
-#   output    cfg: {order_by?, limit?}  输入 1，终点（最多一个）
+#   source     cfg: {conn: "project/connection", sql, limit?, schema?}   → 导入为数据集
+#   file       cfg: {path}                                               → 文件导入为数据集
+#   filter     cfg: {where}                     输入 1（in）
+#   join       cfg: {kind, on, select?, ports_n?}  输入 N（端口 in_1..in_N，SQL 别名 a/b/c/...；老图 left/right 兼容为 in_1/in_2）
+#   aggregate  cfg: {group, aggs}               输入 1
+#   sql        cfg: {sql}                       输入任意（直接按上游节点名引用）
+#   output     cfg: {order_by?, limit?}         输入 1，终点（最多一个）
+# 统计/整理节点（都是输入 1，编译为 CREATE OR REPLACE VIEW；DuckDB SQL）：
+#   describe   cfg: {cols?}                     描述统计（count/mean/std/min/25%/50%/75%/max），DuckDB SUMMARIZE
+#   distinct   cfg: {cols?}                     去重（未指定 cols=SELECT DISTINCT *）
+#   percentile cfg: {col, quantiles, group?}    分位数：quantile_cont 展开为 p{Q*100} 列
+#   correlate  cfg: {cols}                      两两相关系数（Pearson corr()）
+#   pivot      cfg: {on, using, group?}         DuckDB 原生 PIVOT
 # 非 source/file 节点编译为 CREATE OR REPLACE VIEW "节点名" AS ...，按拓扑序执行；
 # 中间结果都是工作区里的视图，可单独预览。
 
@@ -149,6 +155,39 @@ _NODE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 
 def _q(name: str) -> str:
     return '"' + name + '"'
+
+
+def _qcol(col: str) -> str:
+    """引用列名。col 已经带引号或包含点（如 a.b）时不额外加引号，交给用户。"""
+    c = (col or "").strip()
+    if not c:
+        return c
+    if c.startswith('"') or c.startswith("`") or "." in c or "(" in c or " " in c:
+        return c
+    return '"' + c.replace('"', '""') + '"'
+
+
+def _split_cols(raw: str | None) -> list[str]:
+    """把逗号/空格分隔的列名字符串拆成列表；去空白、去空项、保留顺序。"""
+    if not raw:
+        return []
+    return [c.strip() for c in re.split(r"[,\s]+", raw) if c.strip()]
+
+
+def _parse_quantiles(raw: str) -> list[float]:
+    """把 "0.25, 0.5, 0.75" 解析为 [0.25, 0.5, 0.75]；只保留 (0,1) 区间的值。"""
+    out: list[float] = []
+    for tok in re.split(r"[,\s]+", raw or ""):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+        except ValueError:
+            continue
+        if 0.0 < v < 1.0:
+            out.append(v)
+    return out
 
 
 def compile_graph(graph: dict) -> dict:
@@ -301,6 +340,90 @@ def compile_graph(graph: dict) -> dict:
                 sql += f" GROUP BY {group}"
             steps.append({"node": nid, "name": name,
                           "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
+            last_view = name
+        elif typ == "describe":
+            up = _one_input(n)
+            cols = _split_cols(cfg.get("cols"))
+            if not cols:
+                raise WorkflowError(
+                    f"描述节点「{name}」需要指定要统计的列（cols，用逗号分隔）")
+            # 每列 UNION ALL 一行；SUMMARIZE 无法嵌 VIEW，改手写。DuckDB 强类型 union 需类型一致，用 DOUBLE 兜底
+            def _row(c: str) -> str:
+                qc = _qcol(c)
+                # 强转 DOUBLE 避免 UNION 不同数值类型时报错（varchar 列 avg/stddev 本就非法，就该报错）
+                return (f"SELECT '{c}' AS column_name, "
+                        f"count({qc}) AS n, "
+                        f"count(*) - count({qc}) AS nulls, "
+                        f"min({qc})::DOUBLE AS min, "
+                        f"max({qc})::DOUBLE AS max, "
+                        f"avg({qc})::DOUBLE AS avg, "
+                        f"stddev({qc})::DOUBLE AS std, "
+                        f"quantile_cont({qc}, 0.25)::DOUBLE AS q25, "
+                        f"median({qc})::DOUBLE AS q50, "
+                        f"quantile_cont({qc}, 0.75)::DOUBLE AS q75 "
+                        f"FROM {_q(up['name'])}")
+            sql = "\nUNION ALL\n".join(_row(c) for c in cols)
+            steps.append({"node": nid, "name": name,
+                          "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS ({sql})"})
+            last_view = name
+        elif typ == "distinct":
+            up = _one_input(n)
+            cols = _split_cols(cfg.get("cols"))
+            select = ", ".join(_qcol(c) for c in cols) if cols else "*"
+            sql = f"SELECT DISTINCT {select} FROM {_q(up['name'])}"
+            steps.append({"node": nid, "name": name,
+                          "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
+            last_view = name
+        elif typ == "percentile":
+            up = _one_input(n)
+            col = (cfg.get("col") or "").strip()
+            if not col:
+                raise WorkflowError(f"分位数节点「{name}」缺少目标列（col）")
+            qs = _parse_quantiles(cfg.get("quantiles") or "0.25,0.5,0.75,0.95")
+            if not qs:
+                raise WorkflowError(
+                    f"分位数节点「{name}」的 quantiles 无效（用 0-1 间的浮点数，逗号分隔）")
+            qsel = ", ".join(
+                f"quantile_cont({_qcol(col)}, {q}) AS p{int(round(q*100)):02d}" for q in qs)
+            group = (cfg.get("group") or "").strip()
+            select = f"{group}, {qsel}" if group else qsel
+            sql = f"SELECT {select} FROM {_q(up['name'])}"
+            if group:
+                sql += f" GROUP BY {group}"
+            steps.append({"node": nid, "name": name,
+                          "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
+            last_view = name
+        elif typ == "correlate":
+            up = _one_input(n)
+            cols = _split_cols(cfg.get("cols"))
+            if len(cols) < 2:
+                raise WorkflowError(f"相关节点「{name}」至少需要 2 列（cols）")
+            # 两两 corr()：对每对 (i<j) 生成一列 corr(a,b) AS "a__b"
+            pairs = []
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    a, b = cols[i], cols[j]
+                    label = f"{a}__{b}"
+                    pairs.append(f"corr({_qcol(a)}, {_qcol(b)}) AS {_qcol(label)}")
+            sql = f"SELECT {', '.join(pairs)} FROM {_q(up['name'])}"
+            steps.append({"node": nid, "name": name,
+                          "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
+            last_view = name
+        elif typ == "pivot":
+            up = _one_input(n)
+            on_col = (cfg.get("on") or "").strip()
+            using = (cfg.get("using") or "").strip()
+            if not on_col or not using:
+                raise WorkflowError(
+                    f"透视节点「{name}」缺少 on（透视列）或 using（聚合表达式）")
+            group = (cfg.get("group") or "").strip()
+            # DuckDB: PIVOT (SELECT * FROM up) ON <on> USING <using> [GROUP BY <group>]
+            sql = f"PIVOT (SELECT * FROM {_q(up['name'])}) ON {on_col} USING {using}"
+            if group:
+                sql += f" GROUP BY {group}"
+            # DuckDB 限制：动态透视（列值从数据推断）不能进 VIEW；用 TABLE 存物化结果
+            steps.append({"node": nid, "name": name,
+                          "sql": f"CREATE OR REPLACE TABLE {_q(name)} AS {sql}"})
             last_view = name
         elif typ == "sql":
             raw = (cfg.get("sql") or "").strip().rstrip(";")
