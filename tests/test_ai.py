@@ -274,6 +274,44 @@ def test_build_workflow_repair_prompt_carries_error():
     assert "x y" in p and "完整" in p
 
 
+def test_build_workflow_prompt_includes_schema_hint_when_provided():
+    """用户已选库时，prompt 必须显式告知 AI source cfg 要带 schema。"""
+    p = ai.build_workflow_prompt("sys", "mysql", ["demo/main"],
+                                 [("orders", "CREATE TABLE orders(id INT)")],
+                                 "按天聚合", schema="dbm_e2e", default_conn="demo/main")
+    assert "dbm_e2e" in p                     # 库名进 prompt
+    assert '"schema"' in p or 'schema=' in p or 'schema"' in p  # 提示 cfg.schema
+    assert "demo/main" in p                   # 默认连接进 prompt
+
+
+def test_build_workflow_prompt_no_schema_hint_when_omitted():
+    """未指定库时不应捏造 schema 提示。"""
+    p = ai.build_workflow_prompt("sys", "mysql", ["demo/main"], [], "按天聚合")
+    assert "用户已选库" not in p
+
+
+def test_build_workflow_prompt_modify_mode_when_current_graph_provided():
+    """current_graph 非空 = 修改模式：prompt 里带上当前图 JSON + 修改规则说明。"""
+    cur = {"nodes": [{"id": "a", "type": "source", "name": "orders",
+                      "cfg": {"conn": "demo/main", "sql": "SELECT * FROM orders"}}],
+           "edges": []}
+    p = ai.build_workflow_prompt("sys", "mysql", ["demo/main"], [], "把 orders 按天聚合",
+                                 current_graph=cur)
+    assert "修改模式" in p                              # 明确修改模式
+    assert "orders" in p and "SELECT * FROM orders" in p  # 当前图 JSON 出现
+    assert "尽量保留" in p or "保留原节点" in p           # 修改规则
+    assert "完整" in p                                 # 要求返回完整图
+
+
+def test_build_workflow_prompt_new_mode_when_current_graph_empty():
+    """空 nodes 视为新建模式，不进修改分支。"""
+    p1 = ai.build_workflow_prompt("sys", "mysql", ["demo/main"], [], "q",
+                                  current_graph={"nodes": [], "edges": []})
+    p2 = ai.build_workflow_prompt("sys", "mysql", ["demo/main"], [], "q",
+                                  current_graph=None)
+    assert "修改模式" not in p1 and "修改模式" not in p2
+
+
 def test_generate_workflow_parses_graph(monkeypatch):
     graph = {"nodes": [{"id": "a", "type": "source", "name": "o", "cfg": {}}], "edges": []}
     monkeypatch.setattr(ai, "run_ai", lambda *a, **k: (json.dumps(graph), "sid-w"))

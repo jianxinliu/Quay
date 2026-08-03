@@ -68,6 +68,21 @@ def _ai_api_cfg(s: dict) -> dict:
             "key_env": str(s.get("ai_api_key_env") or "")}
 
 
+def _patch_source_schema(graph: dict, default_conn: str, schema: str | None) -> None:
+    """AI 生成的 source 节点用了 default_conn 但漏写 cfg.schema 时兜底填 schema（原地修改）。
+
+    schema 为空则什么都不做（连接自身有默认库，不需要 schema）。
+    """
+    if not schema:
+        return
+    for n in graph.get("nodes") or []:
+        if n.get("type") != "source":
+            continue
+        cfg = n.setdefault("cfg", {})
+        if (cfg.get("conn") or "").strip() == default_conn and not (cfg.get("schema") or "").strip():
+            cfg["schema"] = schema
+
+
 def _layout_graph(graph: dict) -> None:
     """给 AI 生成的节点按拓扑层级赋 x/y（AI 不给坐标），使画布排版可读。原地修改。"""
     nodes = graph.get("nodes") or []
@@ -1704,9 +1719,11 @@ class DbmService:
     def ai_generate_workflow(
         self, project: str, connection: str, question: str, caller: CallerInfo,
         *, schema: str | None = None, tables: list[str] | None = None,
+        current_graph: dict | None = None,
     ) -> dict:
         """让命令行 AI 按连接/表结构 + 需求设计一张 workflow DAG（画布图）。
 
+        current_graph 非空 = 修改模式：把当前流程 JSON 塞进 prompt，让 AI 在此基础上按需求修改。
         产物用 compile_graph 校验，编译失败把错误回喂给 AI 重修一次；仍失败则报错。
         返回 {graph:{nodes,edges}}（节点已排版赋 x/y），前端载到画布待人审阅、不自动执行。
         """
@@ -1739,17 +1756,22 @@ class DbmService:
             for t in names:
                 tbl_schema, tbl = (t.split(".", 1) if "." in t else (schema, t))
                 ddls.append((tbl, engines.get_table_ddl(engine, cfg.engine, tbl, tbl_schema)))
+            default_conn = f"{project}/{connection}"
             kw = dict(system_prompt=str(s.get("ai_workflow_prompt") or ai.DEFAULT_WORKFLOW_PROMPT),
                       dialect=cfg.engine, connections=conns, ddls=ddls, question=question,
                       provider=str(s.get("ai_provider") or "claude"),
                       model=str(s.get("ai_model") or ""),
                       timeout=int(s.get("ai_timeout_s") or 60),
-                      cli_path=str(s.get("ai_cli_path") or ""), api=_ai_api_cfg(s))
+                      cli_path=str(s.get("ai_cli_path") or ""), api=_ai_api_cfg(s),
+                      schema=schema, default_conn=default_conn,
+                      current_graph=current_graph)
             graph, sid = ai.generate_workflow(**kw)
+            _patch_source_schema(graph, default_conn, schema)   # 兜底：AI 漏写就补上
             try:
                 compile_graph(graph)
             except WorkflowError as e:  # 回喂错误、续接会话重修一次
                 graph, sid = ai.generate_workflow(**kw, repair_error=str(e), session_id=sid)
+                _patch_source_schema(graph, default_conn, schema)
                 try:
                     compile_graph(graph)
                 except WorkflowError as e2:

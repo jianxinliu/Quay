@@ -915,6 +915,41 @@ def test_workflow_ai_gated_and_generates(client, monkeypatch):
     assert all("x" in n and "y" in n for n in d["graph"]["nodes"])  # 已排版
 
 
+def test_workflow_ai_modify_mode_forwards_current_graph(client, monkeypatch):
+    """修改模式：前端传 current_graph 时，走 ai.generate_workflow 的 current_graph 参数。"""
+    import json as _json
+    from dbmcp import ai, engines
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    monkeypatch.setattr(engines, "get_table_ddl",
+                        lambda *a, **k: "CREATE TABLE users(id INT)")
+    good = {"nodes": [
+        {"id": "a", "type": "source", "name": "src", "cfg": {"conn": "demo/main", "sql": "SELECT 1"}},
+        {"id": "b", "type": "output", "name": "out", "cfg": {"limit": 5}}],
+        "edges": [{"from": "a", "to": "b", "port": "in"}]}
+    captured = {}
+    def fake(**kw):
+        captured.update(kw)
+        return dict(good), "sid"
+    monkeypatch.setattr(ai, "generate_workflow", fake)
+    cur = {"nodes": [{"id": "z", "type": "source", "name": "old",
+                      "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}}], "edges": []}
+    r = tc.post("/admin/workflows/ai",
+                data={"conn": "demo/main", "question": "改", "tables": '["users"]',
+                      "current_graph": _json.dumps(cur)})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert captured.get("current_graph") == cur
+    # 空 nodes 视为新建（不设 current_graph）
+    captured.clear()
+    r = tc.post("/admin/workflows/ai",
+                data={"conn": "demo/main", "question": "新", "tables": '["users"]',
+                      "current_graph": _json.dumps({"nodes": [], "edges": []})})
+    assert r.status_code == 200
+    assert captured.get("current_graph") is None
+
+
 # ==============================================================
 # PR-2：调度 / 运行历史 / xlsx 下载 HTTP 路由
 # ==============================================================

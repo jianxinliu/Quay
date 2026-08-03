@@ -1311,7 +1311,10 @@
         currentRunErr: "",
         // 运行中面板（列表页顶部，5s 轮询）
         runningList: [],
-        runningTimer: null
+        runningTimer: null,
+        // AI 生成流程面板
+        aiEnabled: false,
+        wfAi: null   // {question, conn, connOptions, tables, tablesLoading, picked, filter, running, error}
       };
     },
     computed: {
@@ -1671,12 +1674,154 @@
         this.drawerNodeId = null;
         this.onGraphUpdate(this.current.graph);
       },
+      // ---------- AI 生成流程（详情页「✨ AI 生成」）----------
+      openWfAi: function () {
+        var self = this;
+        // 当前 workflow 已有节点 → 默认「修改」模式；否则「新建」
+        var hasGraph = !!(this.current && this.current.graph
+                          && (this.current.graph.nodes || []).length);
+        this.wfAi = { mode: hasGraph ? "modify" : "create",
+                      question: "", conn: "", schema: "",
+                      connOptions: [], connMeta: {},
+                      dbs: [], dbsLoading: false, dbsErr: "",
+                      tables: [], tablesLoading: false, picked: {},
+                      filter: "", running: false, error: "" };
+        // 拉真实连接：过滤 analysis 工作区、redis（不支持 AI）
+        apiGet("/admin/sql/connections").then(function (d) {
+          if (!self.wfAi) return;
+          var meta = {};
+          var opts = ((d && d.connections) || []).filter(function (c) {
+            return c.project !== "analysis" && c.engine !== "redis";
+          }).map(function (c) {
+            var v = c.project + "/" + c.connection;
+            meta[v] = { engine: c.engine, database: c.database, environment: c.environment };
+            return { value: v, label: v, env: c.environment };
+          });
+          // 排序：绑了默认库的先（省一步选 schema）→ 环境 local→dev→staging→prod
+          var envRank = { local: 0, dev: 1, staging: 2, prod: 3 };
+          opts.sort(function (a, b) {
+            var da = meta[a.value].database ? 0 : 1;
+            var db = meta[b.value].database ? 0 : 1;
+            if (da !== db) return da - db;
+            var pa = a.env in envRank ? envRank[a.env] : 4;
+            var pb = b.env in envRank ? envRank[b.env] : 4;
+            return pa - pb;
+          });
+          self.wfAi.connOptions = opts;
+          self.wfAi.connMeta = meta;
+          // 修改模式：默认用当前 workflow 里已有 source 节点的连接（延用现有）
+          if (opts.length && !self.wfAi.conn) {
+            var reuse = "";
+            if (self.wfAi.mode === "modify" && self.current && self.current.graph) {
+              var src = (self.current.graph.nodes || []).find(function (n) {
+                return n.type === "source" && n.cfg && n.cfg.conn && meta[n.cfg.conn];
+              });
+              if (src) reuse = src.cfg.conn;
+            }
+            self.wfAiSetConn(reuse || opts[0].value);
+          }
+        });
+      },
+      closeWfAi: function () { this.wfAi = null; },
+      wfAiNeedsDb: function () {
+        var w = this.wfAi; if (!w || !w.conn) return false;
+        var m = w.connMeta[w.conn]; if (!m) return false;
+        if (!(m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse")) return false;
+        return !m.database;
+      },
+      wfAiSetConn: function (v) {
+        if (!this.wfAi) return;
+        this.wfAi.conn = v; this.wfAi.schema = "";
+        this.wfAi.picked = {}; this.wfAi.tables = []; this.wfAi.filter = "";
+        this.wfAi.dbs = []; this.wfAi.dbsErr = ""; this.wfAi.error = "";
+        if (this.wfAiNeedsDb()) this.wfAiLoadDbs();
+        else this.wfAiLoadTables();
+      },
+      wfAiLoadDbs: function () {
+        var self = this, w = this.wfAi; if (!w || !w.conn) return;
+        w.dbsLoading = true; w.dbsErr = "";
+        apiGet("/admin/sql/databases?conn=" + encodeURIComponent(w.conn)).then(function (d) {
+          if (!self.wfAi) return;
+          self.wfAi.dbsLoading = false;
+          if (d && d.ok) self.wfAi.dbs = d.databases || [];
+          else self.wfAi.dbsErr = (d && d.error) || "无法列出库";
+        }).catch(function (e) {
+          if (self.wfAi) { self.wfAi.dbsLoading = false; self.wfAi.dbsErr = String(e); }
+        });
+      },
+      wfAiSetDb: function (v) {
+        if (!this.wfAi) return;
+        this.wfAi.schema = v || "";
+        this.wfAi.picked = {}; this.wfAi.tables = []; this.wfAi.filter = "";
+        this.wfAiLoadTables();
+      },
+      wfAiLoadTables: function () {
+        var self = this, w = this.wfAi; if (!w || !w.conn) return;
+        if (this.wfAiNeedsDb() && !w.schema) { w.tables = []; return; }
+        w.tablesLoading = true; w.error = "";
+        var url = "/admin/sql/tables?conn=" + encodeURIComponent(w.conn);
+        if (w.schema) url += "&schema=" + encodeURIComponent(w.schema);
+        apiGet(url).then(function (d) {
+          if (!self.wfAi) return;
+          self.wfAi.tablesLoading = false;
+          if (d && d.ok) self.wfAi.tables = d.tables || [];
+          else self.wfAi.error = (d && d.error) || "无法加载表列表";
+        }).catch(function (e) {
+          if (self.wfAi) { self.wfAi.tablesLoading = false; self.wfAi.error = String(e); }
+        });
+      },
+      wfAiTogglePick: function (name) {
+        var w = this.wfAi; if (!w) return;
+        if (w.picked[name]) delete w.picked[name]; else w.picked[name] = true;
+      },
+      wfAiVisibleTables: function () {
+        var w = this.wfAi; if (!w) return [];
+        var f = (w.filter || "").toLowerCase().trim();
+        return f ? w.tables.filter(function (t) { return t.toLowerCase().indexOf(f) >= 0; }) : w.tables;
+      },
+      wfAiGenerate: function () {
+        var self = this, w = this.wfAi;
+        if (!w || w.running) return;
+        var promptForMode = w.mode === "modify" ? "请描述要对流程做的修改" : "请描述你想做的流程";
+        if (!(w.question || "").trim()) { w.error = promptForMode; return; }
+        if (!w.conn) { w.error = "请选择取数连接"; return; }
+        if (this.wfAiNeedsDb() && !w.schema) { w.error = "请先选择一个库（schema）"; return; }
+        if (!self.current) { w.error = "请先打开一个流程"; return; }
+        w.running = true; w.error = "";
+        var payload = {
+          conn: w.conn, question: w.question,
+          schema: w.schema || null,
+          tables: JSON.stringify(Object.keys(w.picked))
+        };
+        // 修改模式：把当前 graph 塞进 payload，后端拿去做 modify prompt
+        if (w.mode === "modify" && self.current.graph
+            && (self.current.graph.nodes || []).length) {
+          payload.current_graph = JSON.stringify(self.current.graph);
+        }
+        apiPost("/admin/workflows/ai", payload).then(function (d) {
+          if (!self.wfAi) return;
+          w.running = false;
+          if (!d || !d.ok) { w.error = (d && d.error) || "生成失败"; return; }
+          var g = d.graph || {};
+          self.current.graph = { nodes: g.nodes || [], edges: g.edges || [] };
+          self.selectedNodeId = null; self.nodeStatus = {};
+          self.onGraphUpdate(self.current.graph);   // 触发防抖保存
+          self.wfAi = null;
+        }).catch(function (e) {
+          if (self.wfAi) { w.running = false; w.error = String(e); }
+        });
+      }
     },
     mounted: function () {
       window.addEventListener("hashchange", this.onHashChange);
       // 列表页 / 新建页需要 list & workspaces；详情页/运行详情页也顺便刷一下
       this.refresh();
       this.refreshWorkspaces();
+      // 拉一次全局 AI 开关（决定详情页「✨ AI 生成」按钮是否显示）
+      var self = this;
+      apiGet("/admin/sql/connections").then(function (d) {
+        self.aiEnabled = !!(d && d.ai_enabled);
+      });
       // 列表页启动运行中轮询（5s）；进入其他视图时停
       this.refreshRunning();
       var self = this;
@@ -1814,6 +1959,7 @@
       +       '<button :class="{active: viewMode===\'blueprint\'}" @click="viewMode=\'blueprint\'">蓝图</button>'
       +       '<button :class="{active: viewMode===\'history\'}" @click="viewMode=\'history\'; loadRuns()">历史</button>'
       +     '</div>'
+      +     '<button v-if="aiEnabled" class="dg-btn" @click="openWfAi" title="AI 生成整张流程（覆盖当前画布，仅生成不执行）">✨ AI 生成</button>'
       +     '<button class="dg-btn" @click="openSchedule" title="定时执行 + 通知设置">⚙ 调度</button>'
       +     '<button class="dg-btn run" @click="runCurrent" :disabled="runBusy">'
       +       '{{ runBusy ? "运行中…" : "▶ 运行" }}</button>'
@@ -1922,6 +2068,65 @@
       +         '<tbody><tr v-for="(r, ri) in currentRun.output_preview.rows.slice(0, 50)" :key="ri">'
       +           '<td v-for="(v, ci) in r" :key="ci">{{ v == null ? "" : String(v).slice(0, 80) }}</td>'
       +         '</tr></tbody></table></div>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>'
+      // ============ AI 生成流程浮层（顶层）============
+      + '<div v-if="wfAi" class="wf-ai-overlay" @click.self="closeWfAi">'
+      +   '<div class="wf-ai-card">'
+      +     '<div class="wf-ai-hd">'
+      +       '<span class="wf-ai-title">✨ AI {{ wfAi.mode===\'modify\' ? \'修改\' : \'生成\' }}流程</span>'
+      +       '<span class="wf-ai-sub">{{ wfAi.mode===\'modify\' ? \'在当前流程上按需求增/删/改节点与连线\' : \'描述你要做的分析，AI 会生成一张 DAG 载入画布\' }}（不执行，可继续编辑）</span>'
+      +       '<button class="wf-drawer-icon wf-drawer-close" @click="closeWfAi" title="关闭" aria-label="关闭">'
+      +         '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">'
+      +           '<path d="M4 4l8 8M12 4l-8 8"/></svg>'
+      +       '</button>'
+      +     '</div>'
+      +     '<div class="wf-ai-body">'
+      // 模式切换（仅当当前 workflow 已有节点时才显示）
+      +       '<div v-if="current && current.graph && (current.graph.nodes||[]).length" class="row">'
+      +         '<div class="wf-ai-mode-tabs">'
+      +           '<button :class="{active: wfAi.mode===\'modify\'}" @click="wfAi.mode=\'modify\'" title="在当前流程上做增/删/改">修改当前流程</button>'
+      +           '<button :class="{active: wfAi.mode===\'create\'}" @click="wfAi.mode=\'create\'" title="覆盖生成一张全新流程">新建覆盖</button>'
+      +         '</div>'
+      +         '<div v-if="wfAi.mode===\'create\'" class="wf-ai-hint" style="margin-top:6px; color: var(--dg-red)">⚠ 新建会覆盖当前画布（{{ (current.graph.nodes||[]).length }} 个节点）</div>'
+      +       '</div>'
+      +       '<div class="row">'
+      +         '<label>{{ wfAi.mode===\'modify\' ? \'修改需求（比如：把 by_channel 改成按日聚合、加 ROI 节点）\' : \'需求描述\' }}</label>'
+      +         '<textarea v-model="wfAi.question" rows="3" spellcheck="false"'
+      +           ' :placeholder="wfAi.mode===\'modify\' ? \'示例：给 orders 加 WHERE status=paid 的过滤；把 by_channel 改成按天分组\' : \'示例：按渠道聚合最近 7 天订单 ROI，输出前 10 名\'"></textarea>'
+      +       '</div>'
+      +       '<div class="row">'
+      +         '<label>取数连接</label>'
+      +         '<dg-select :model-value="wfAi.conn" :options="wfAi.connOptions"'
+      +           ' placeholder="选择连接…" @update:model-value="wfAiSetConn"/>'
+      +       '</div>'
+      +       '<div v-if="wfAi.conn && wfAiNeedsDb()" class="row">'
+      +         '<label>库 <span v-if="wfAi.dbsLoading" class="wf-hint">加载中…</span></label>'
+      +         '<dg-select :model-value="wfAi.schema" :options="wfAi.dbs.map(x => ({value: x, label: x}))"'
+      +           ' :placeholder="wfAi.dbsLoading ? \'加载库…\' : \'选择库…（此连接未绑定默认库）\'"'
+      +           ' @update:model-value="wfAiSetDb"/>'
+      +         '<div v-if="wfAi.dbsErr" class="wf-mod-schema-err">{{ wfAi.dbsErr }}</div>'
+      +       '</div>'
+      +       '<div v-if="wfAi.conn && (!wfAiNeedsDb() || wfAi.schema)" class="row">'
+      +         '<label>相关表（可多选，帮 AI 定位；不选则给 AI 全部表）'
+      +           '<span v-if="wfAi.tablesLoading" class="wf-hint">加载中…</span>'
+      +         '</label>'
+      +         '<input v-model="wfAi.filter" placeholder="筛选表名…" class="wf-ai-filter">'
+      +         '<div v-if="!wfAi.tablesLoading" class="wf-ai-tables">'
+      +           '<label v-for="t in wfAiVisibleTables()" :key="t" class="wf-ai-tbl">'
+      +             '<input type="checkbox" :checked="!!wfAi.picked[t]" @change="wfAiTogglePick(t)">'
+      +             '<span>{{ t }}</span>'
+      +           '</label>'
+      +           '<span v-if="!wfAiVisibleTables().length" class="wf-ai-hint">（无匹配表）</span>'
+      +         '</div>'
+      +       '</div>'
+      +       '<div v-if="wfAi.error" class="wf-err">{{ wfAi.error }}</div>'
+      +       '<div class="wf-ai-foot">'
+      +         '<button class="dg-btn" @click="closeWfAi">取消</button>'
+      +         '<button class="dg-btn run" @click="wfAiGenerate" :disabled="wfAi.running">'
+      +           '{{ wfAi.running ? (wfAi.mode===\'modify\' ? "修改中…（可能 10~30 秒）" : "生成中…（可能 10~30 秒）") : (wfAi.mode===\'modify\' ? "✨ 应用修改" : "✨ 生成流程") }}</button>'
+      +       '</div>'
       +     '</div>'
       +   '</div>'
       + '</div>'

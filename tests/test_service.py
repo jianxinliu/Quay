@@ -584,6 +584,73 @@ class TestAiGenerateWorkflow:
         with pytest.raises(QueryRejected, match="仍不合法"):
             service.ai_generate_workflow("demo", "main", "q", CALLER, tables=["users"])
 
+    def test_schema_passed_to_ai_and_patched_when_missing(self, service, monkeypatch):
+        """用户传了 schema：应传给 ai.generate_workflow；AI 漏写 cfg.schema 时兜底填。"""
+        from dbmcp import ai, engines
+        self._enable_ai(service)
+        # sqlite fixture 里没有 "mydb" 库，跳过 DDL 获取（只是为了拼 prompt 用）
+        monkeypatch.setattr(engines, "get_table_ddl",
+                            lambda *a, **k: "CREATE TABLE users(id INT)")
+        captured = {}
+        # AI 输出的 source 节点故意不带 schema → 兜底应补上
+        graph_missing_schema = {"nodes": [
+            {"id": "a", "type": "source", "name": "users_src",
+             "cfg": {"conn": "demo/main", "sql": "SELECT id FROM users"}},
+            {"id": "b", "type": "output", "name": "result", "cfg": {"limit": 10}}],
+            "edges": [{"from": "a", "to": "b", "port": "in"}]}
+
+        def fake(**kw):
+            captured.update(kw)
+            return dict(graph_missing_schema), "sid-1"
+        monkeypatch.setattr(ai, "generate_workflow", fake)
+        out = service.ai_generate_workflow("demo", "main", "q", CALLER,
+                                            schema="mydb", tables=["users"])
+        # schema 已传给 ai
+        assert captured.get("schema") == "mydb"
+        assert captured.get("default_conn") == "demo/main"
+        # 兜底：source 节点 cfg.schema 被补成 mydb
+        src = next(n for n in out["graph"]["nodes"] if n["type"] == "source")
+        assert src["cfg"]["schema"] == "mydb"
+
+    def test_current_graph_passed_to_ai(self, service, monkeypatch):
+        """修改模式：current_graph 应传给 ai.generate_workflow 走修改分支。"""
+        from dbmcp import ai, engines
+        self._enable_ai(service)
+        monkeypatch.setattr(engines, "get_table_ddl",
+                            lambda *a, **k: "CREATE TABLE users(id INT)")
+        cur = {"nodes": [
+            {"id": "a", "type": "source", "name": "raw",
+             "cfg": {"conn": "demo/main", "sql": "SELECT * FROM users"}}],
+            "edges": []}
+        captured = {}
+
+        def fake(**kw):
+            captured.update(kw)
+            return dict(self._GOOD), "sid-1"
+        monkeypatch.setattr(ai, "generate_workflow", fake)
+        service.ai_generate_workflow("demo", "main", "改一下", CALLER,
+                                     tables=["users"], current_graph=cur)
+        assert captured.get("current_graph") == cur
+
+    def test_schema_patch_respects_ai_choice(self, service, monkeypatch):
+        """AI 主动写了 cfg.schema 时兜底不应覆盖。"""
+        from dbmcp import ai, engines
+        self._enable_ai(service)
+        monkeypatch.setattr(engines, "get_table_ddl",
+                            lambda *a, **k: "CREATE TABLE users(id INT)")
+        graph_with_schema = {"nodes": [
+            {"id": "a", "type": "source", "name": "users_src",
+             "cfg": {"conn": "demo/main", "schema": "ai_chose",
+                     "sql": "SELECT id FROM users"}},
+            {"id": "b", "type": "output", "name": "result", "cfg": {"limit": 10}}],
+            "edges": [{"from": "a", "to": "b", "port": "in"}]}
+        monkeypatch.setattr(ai, "generate_workflow",
+                            lambda **kw: (dict(graph_with_schema), "sid-1"))
+        out = service.ai_generate_workflow("demo", "main", "q", CALLER,
+                                            schema="user_chose", tables=["users"])
+        src = next(n for n in out["graph"]["nodes"] if n["type"] == "source")
+        assert src["cfg"]["schema"] == "ai_chose"   # AI 的选择保留
+
 
 class _RecordingNotifier:
     """内存 notifier：把 send 参数记录下来，供断言。"""

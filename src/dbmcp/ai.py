@@ -199,18 +199,45 @@ def build_workflow_prompt(
     connections: list[str],
     ddls: list[tuple[str, str]],
     question: str,
+    schema: str | None = None,
+    default_conn: str | None = None,
+    current_graph: dict | None = None,
 ) -> str:
-    """拼出让 AI 生成 workflow DAG 的完整 prompt（纯函数）。"""
+    """拼出让 AI 生成/修改 workflow DAG 的完整 prompt（纯函数）。
+
+    schema 非空：告诉 AI 用户已选定的库，source 节点 cfg 必须带 schema=xxx；
+    default_conn 非空：告诉 AI 优先用这个连接（用户选的那个）；
+    current_graph 非空（含至少 1 个节点）：修改模式——把当前图 JSON 塞进 prompt，
+      要求 AI 在此基础上按需求增删改，返回**完整**新图（尽量保留原节点 id 与命名）。
+    """
     parts = [(system_prompt or DEFAULT_WORKFLOW_PROMPT).strip(), "", WORKFLOW_FORMAT_DOC, ""]
     parts.append(f"取数节点里 SQL 的数据库方言：{dialect}")
     parts.append("可用连接（source 的 conn 只能从中选）：")
     parts.append("、".join(connections) if connections else "（无）")
+    if default_conn:
+        parts.append(f"用户已选取数连接：{default_conn}（优先使用这个；若需求明确要另一个连接才切换）")
+    if schema:
+        parts.append(
+            f"用户已选库：{schema}。所有引用该连接的 source 节点 cfg 必须写 "
+            f'"schema": "{schema}"；SQL 里表名不加库前缀。'
+        )
     parts.append("")
     parts.append("=== 相关表结构 ===")
     for name, ddl in ddls:
         parts.append((ddl or "").strip())
         parts.append("")
-    parts.append("=== 需求 ===")
+    if current_graph and (current_graph.get("nodes") or []):
+        parts.append("=== 当前流程（修改模式：请在此基础上按需求增/删/改节点与连线）===")
+        parts.append(json.dumps(current_graph, ensure_ascii=False, separators=(",", ":")))
+        parts.append(
+            "修改规则：① 尽量保留没被需求改动的节点原样（id、name、cfg 都不动）；"
+            "② 需要新增的节点用新 id（如 n_new1）；③ 删除的节点连带删除相关边；"
+            "④ 返回**完整**新图 JSON（nodes+edges 全带），而不是只返回 diff。"
+        )
+        parts.append("")
+        parts.append("=== 需求（对当前流程的修改）===")
+    else:
+        parts.append("=== 需求 ===")
     parts.append((question or "").strip())
     parts.append("")
     parts.append(_WF_CONTRACT)
@@ -237,15 +264,22 @@ def generate_workflow(
     repair_error: str | None = None,
     session_id: str | None = None,
     api: dict | None = None,
+    schema: str | None = None,
+    default_conn: str | None = None,
+    current_graph: dict | None = None,
 ) -> tuple[dict, str]:
     """拼 prompt → 调 AI → 解析出 workflow graph dict。返回 (graph, session_id)。失败抛 AIError。
 
     repair_error 非空 = 重修：续接会话、只回喂编译错误（不重发表结构）。
+    schema/default_conn：传给 prompt 告诉 AI 用户已选定的库/连接。
+    current_graph 非空（含节点）= 修改模式：把当前图塞进 prompt，让 AI 在此基础上按需求修改。
     """
     if repair_error and session_id:
         prompt = build_workflow_repair_prompt(repair_error)
     else:
-        prompt = build_workflow_prompt(system_prompt, dialect, connections, ddls, question)
+        prompt = build_workflow_prompt(system_prompt, dialect, connections, ddls, question,
+                                       schema=schema, default_conn=default_conn,
+                                       current_graph=current_graph)
     raw, new_sid = run_ai(prompt, provider=provider, model=model, timeout=timeout,
                           cli_path=cli_path, session_id=session_id, **_api_kwargs(api))
     graph = _parse_workflow_output(raw)
