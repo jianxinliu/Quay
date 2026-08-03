@@ -2305,7 +2305,10 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     @mcp.custom_route("/admin/workflows/ai", methods=["POST"])
     @guard
     async def _wf_ai(req: Request) -> JSONResponse:
-        """让 AI 按连接/表结构 + 需求生成一张 workflow DAG（compile 校验+重修）。回前端载到画布，不执行。"""
+        """让 AI 按连接/表结构 + 需求生成/修改 workflow DAG（compile 校验+重修）。回前端载到画布，不执行。
+
+        current_graph 传当前流程 JSON 时走修改模式（AI 在此基础上按需求增/删/改）；否则新建。
+        """
         from .service import QueryRejected
         if not service.get_settings().get("ai_enabled"):
             return JSONResponse({"ok": False, "error": "AI 辅助未开启"}, status_code=403)
@@ -2317,12 +2320,22 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             tables = [str(t).strip() for t in tables if str(t).strip()] or None
         except (ValueError, TypeError):
             tables = None
+        current_graph = None
+        cg_raw = str(f.get("current_graph") or "").strip()
+        if cg_raw:
+            try:
+                cg = json.loads(cg_raw)
+                if isinstance(cg, dict) and (cg.get("nodes") or []):
+                    current_graph = cg
+            except (ValueError, TypeError):
+                pass
         caller = _caller(req)
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             out = await anyio.to_thread.run_sync(
                 lambda: service.ai_generate_workflow(
-                    project, connection, question, caller, schema=schema, tables=tables))
+                    project, connection, question, caller,
+                    schema=schema, tables=tables, current_graph=current_graph))
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **out})
