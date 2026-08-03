@@ -356,6 +356,68 @@ class TestGraph:
         # output_sql = 第一个 output（拓扑序里 o1 先出）
         assert plan["output_sql"] == top_sql
 
+    def test_compile_stats_nodes(self):
+        """五个统计节点（describe/distinct/percentile/correlate/pivot）都能编译成 DuckDB SQL。"""
+        from dbmcp.workflows import compile_graph
+
+        def _single(node_kind: str, **cfg):
+            g = {"nodes": [
+                _node("a", "source", "t", conn="p/c", sql="SELECT * FROM t"),
+                _node("b", node_kind, "out", **cfg)],
+                 "edges": [{"from": "a", "to": "b", "port": "in"}]}
+            return compile_graph(g)["steps"][0]["sql"]
+
+        # describe：UNION ALL 每列一行，含 n/nulls/min/max/avg/std/q25/q50/q75
+        sql = _single("describe", cols="a, b")
+        assert 'UNION ALL' in sql
+        assert '"a"' in sql and '"b"' in sql
+        assert 'quantile_cont' in sql and 'AS q25' in sql and 'AS q75' in sql
+        assert 'AS avg' in sql and 'AS std' in sql and 'AS nulls' in sql
+
+        # distinct
+        sql = _single("distinct")
+        assert "SELECT DISTINCT *" in sql
+        sql = _single("distinct", cols="id, name")
+        assert "SELECT DISTINCT" in sql and '"id"' in sql and '"name"' in sql
+
+        # percentile：quantile_cont 展开为 p25/p50/p75/p95
+        sql = _single("percentile", col="amount", quantiles="0.25,0.5,0.75,0.95")
+        assert "quantile_cont" in sql and "AS p25" in sql and "AS p95" in sql
+        # 带 group
+        sql = _single("percentile", col="amount", quantiles="0.5", group="channel")
+        assert "GROUP BY channel" in sql and "AS p50" in sql
+
+        # correlate：两两 corr()
+        sql = _single("correlate", cols="a, b, c")
+        # 应有 3 对：a__b、a__c、b__c
+        assert "corr(" in sql
+        assert 'AS "a__b"' in sql and 'AS "a__c"' in sql and 'AS "b__c"' in sql
+
+        # pivot（DuckDB 语法，动态列 → 只能 CREATE TABLE 不能 CREATE VIEW）
+        sql = _single("pivot", on="channel", using="sum(amount)", group="day")
+        assert "PIVOT" in sql and "ON channel" in sql and "USING sum(amount)" in sql
+        assert "GROUP BY day" in sql and "CREATE OR REPLACE TABLE" in sql
+
+    def test_compile_stats_node_errors(self):
+        """统计节点参数缺失时的清晰报错。"""
+        from dbmcp.workflows import WorkflowError, compile_graph
+
+        def _fail(node_kind: str, msg: str, **cfg):
+            g = {"nodes": [
+                _node("a", "source", "t", conn="p/c", sql="SELECT * FROM t"),
+                _node("b", node_kind, "out", **cfg)],
+                 "edges": [{"from": "a", "to": "b", "port": "in"}]}
+            with pytest.raises(WorkflowError, match=msg):
+                compile_graph(g)
+
+        _fail("describe", "需要指定要统计的列")                     # cols 必填
+        _fail("percentile", "缺少目标列")                            # col 必填
+        _fail("percentile", "quantiles 无效", col="x", quantiles="abc")
+        _fail("correlate", "至少需要 2 列")                          # cols 至少 2 个
+        _fail("correlate", "至少需要 2 列", cols="only_one")
+        _fail("pivot", "缺少 on")                                    # on 必填
+        _fail("pivot", "缺少 on", on="channel")                      # using 必填
+
     def test_compile_errors(self):
         from dbmcp.workflows import WorkflowError, compile_graph
         with pytest.raises(WorkflowError, match="为空"):
