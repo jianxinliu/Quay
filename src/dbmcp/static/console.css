@@ -55,6 +55,15 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   font-size: 13px; -webkit-font-smoothing: antialiased;
 }
 
+/* 细窄滚动条：macOS 开「始终显示滚动条」时，默认的经典滚动条又粗又实，横向那条会压住
+   编辑器 tab 名字。用标准属性 scrollbar-width:thin 让浏览器渲染「细长」原生滚动条即可，
+   全站统一（含 tab 条、结果网格、树、SQL 执行记录面板）。
+   注意：**不要**用 ::-webkit-scrollbar 自定义尺寸——那会把细长的叠加式滚动条强制变回
+   带凹槽、占位的经典滚动条，视觉反而更粗重（正是本次「还是太粗」的根因）。
+   只作用于两个 IDE 页（console.css 仅此二页加载），不影响服务端渲染页；
+   Monaco 用自绘滚动条、不受影响。 */
+.dg-root, .rd-root, .dg-root *, .rd-root * { scrollbar-width: thin; }
+
 /* 拖动分隔条 */
 .dg-vsplit { width: 6px; cursor: col-resize; flex: none; background: transparent; }
 .dg-vsplit:hover, .dg-hsplit:hover { background: var(--dg-accent); }

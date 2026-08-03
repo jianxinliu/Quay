@@ -10,6 +10,7 @@
 
 | 场景 | 工具 | 说明 |
 |---|---|---|
+| 声明会话 | `begin_session(title, note?)` | 开始跑 SQL 前调一次，登记本次会话的名字/背景，之后本会话的 SQL 在后台按会话归类、便于人回溯 |
 | 发现 | `list_projects` / `list_connections` | 找到目标连接（项目 → 连接） |
 | 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
@@ -23,6 +24,17 @@
 连接管理、密钥管理**不暴露给 agent**——那是人的事（CLI 或管理后台）。
 
 ## 基本套路
+
+### 0. 声明会话（推荐，开头调一次）
+
+```
+begin_session(title="排查订单重复扣款", note="复现 issue #123，只读排查")
+```
+
+登记后，本次 MCP 会话里跑过的所有 SQL（`query`/`execute`/`sample_rows`…）都会在管理后台
+「操作审计」里按这个会话归类，人可以按 **agent + 会话** 回溯「这个会话都做了哪些操作」，
+并把「需审批的写 / 不需审批的读」分开看。幂等，可重复调用更新名字。不调用也能工作，
+只是后台只能看到一串没有语义的会话 id。
 
 ### 1. 查数（最常见）
 

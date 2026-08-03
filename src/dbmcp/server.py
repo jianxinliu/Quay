@@ -102,7 +102,9 @@ def build_mcp(service: DbmService) -> FastMCP:
     mcp = FastMCP(
         name="db-manage-mcp",
         instructions=(
-            "统一的数据库访问服务。先用 list_projects / list_connections 找到目标连接，"
+            "统一的数据库访问服务。开始跑 SQL 前，建议先调 begin_session(title, note) 声明本次"
+            "会话的名字和背景，之后本会话跑过的 SQL 会在后台按此会话归类、方便人回溯。"
+            "先用 list_projects / list_connections 找到目标连接，"
             "用 list_tables / describe_table / sample_rows 探索 schema。"
             "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
             "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
@@ -168,6 +170,23 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise ToolError(str(e)) from e
         except ConnectionUnavailable as e:
             raise _tool_error_from_unavailable(e) from e
+
+    @mcp.tool
+    def begin_session(
+        title: Annotated[str, Field(description="本次会话的名字，如「排查订单重复扣款」")],
+        note: Annotated[str, Field(description="会话简介/背景，可选，如「复现 issue #123，只读排查」")] = "",
+        ctx: Context | None = None,
+    ) -> dict:
+        """声明本次工作会话的名字和简介（建议在开始跑 SQL 前调用一次）。
+
+        登记后，本次会话里跑过的所有 SQL（query/execute/sample_rows 等）都会在管理后台
+        按这个会话归类，方便人回溯「这个会话都做了哪些操作」。同一会话可重复调用以更新名字。
+        不调用也能工作，但后台只能看到一串没有语义的会话 id。
+        """
+        try:
+            return service.begin_session(_caller_from_ctx(ctx), title, note)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
 
     @mcp.tool
     def query(
