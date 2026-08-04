@@ -15,6 +15,7 @@
 
   var editor = null;          // 单个 Monaco 编辑器，切 tab 换 model
   var models = new Map();     // tabId -> ITextModel
+  var viewStates = new Map(); // tabId -> Monaco 视图状态（滚动位置/光标），切 tab 恢复用
   var bmCollection = null;    // 书签装饰集合（切 tab 时重设为该 tab 的书签）
   var execCollection = null;  // 执行状态字形装饰（在被执行语句行左侧显示 ⟳/✓/✗）
   var stmtBoxCol = null;      // 缺分号波浪线装饰
@@ -24,6 +25,7 @@
   var tableSchema = {};       // 表名 -> schema（补全按 schema 取列）
   var colCache = {};          // "conn|schema|table" -> columns
   var seq = 1;
+  var useSeq = 0;             // 结果页 LRU 使用序：新建/查看结果时递增打戳，持久化超预算按此从最久未用起淘汰
   var STORE_KEY = "dbm-console-v2";
   // CSV/TSV 解析（导入用）：自动检测分隔符（Excel 复制区域即 TSV），支持引号包裹与转义
   function parseDelimited(text) {
@@ -401,6 +403,29 @@
         for (var i = 0; i < ts.length; i++) if (ts[i].id === id) return ts[i];
         return null;
       },
+      // 多单元格选中时的即时统计（Excel/DataGrip 状态栏风）：非空计数 + 可计算值的 sum/avg/min/max。
+      // 用 computed（不是 method）避免模板里被多次调用重复遍历大选区。
+      cellStats: function () {
+        var t = this.activeTab, s = t && t.cellSel;
+        if (!s || !t.result) return null;
+        if ((s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1) < 2) return null;  // 单格不统计
+        var rows = t.result.rows, nums = [], cnt = 0;
+        for (var r = s.r0; r <= s.r1; r++) {
+          var row = rows[r]; if (!row) continue;
+          for (var c = s.c0; c <= s.c1; c++) {
+            var v = row[c];
+            if (v == null || v === "") continue;
+            cnt++;
+            var n = this._numify(v); if (n != null) nums.push(n);
+          }
+        }
+        if (!nums.length) return { count: cnt, numeric: 0 };
+        var sum = 0, min = Infinity, max = -Infinity;
+        for (var i = 0; i < nums.length; i++) { sum += nums[i]; if (nums[i] < min) min = nums[i]; if (nums[i] > max) max = nums[i]; }
+        return { count: cnt, numeric: nums.length,
+                 sum: this._fmtNum(sum), avg: this._fmtNum(sum / nums.length),
+                 min: this._fmtNum(min), max: this._fmtNum(max) };
+      },
       // 编辑区 tab 按连接分组：同连接聚成一簇，组头显示连接名+环境，可折叠（否则 tab 多了太乱）
       tabGroups: function () {
         var self = this, order = [], map = {};
@@ -639,6 +664,7 @@
         if (this.tabs[i].pinned) { this.flash("已固定的 tab，先取消固定再关闭"); return; }
         this.tabs.splice(i, 1);
         var m = models.get(id); if (m) { m.dispose(); models.delete(id); }
+        viewStates.delete(id);
         if (!this.tabs.length) { this.newTab({}); return; }
         if (this.activeId === id) this.switchTab(this.tabs[Math.max(0, i - 1)].id);
         this.persist();
@@ -700,6 +726,7 @@
         var kept = this.tabs.filter(function (t) { return t.pinned; });
         this.tabs.filter(function (t) { return !t.pinned; }).forEach(function (t) {
           var m = models.get(t.id); if (m) { m.dispose(); models.delete(t.id); }
+          viewStates.delete(t.id);
         });
         this.tabs = kept;
         if (!this.tabs.length) { this.newTab({}); return; }
@@ -759,10 +786,21 @@
       },
       persistAcc: function () { try { localStorage.setItem("dbm-console-acc", JSON.stringify(this.acc)); } catch (e) {} },
       switchTab: function (id) {
+        // 离开当前 tab 前先存下它的视图状态（滚动位置 + 光标），回来时恢复，
+        // 否则 setModel 换 model 后编辑器总是回到第一行
+        var prevId = this.activeId;
+        if (editor && prevId != null && prevId !== id) {
+          try { var vs = editor.saveViewState(); if (vs) viewStates.set(prevId, vs); } catch (e) {}
+        }
         this.activeId = id;
         var t = this.activeTab;
         var m = models.get(id);
-        if (editor && m) { editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" }); this.applyBookmarks(); this.applyExecGlyph(); this.applyStmtBox(); }
+        if (editor && m) {
+          editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" });
+          var saved = viewStates.get(id);
+          if (saved) { try { editor.restoreViewState(saved); } catch (e) {} }
+          this.applyBookmarks(); this.applyExecGlyph(); this.applyStmtBox();
+        }
         if (t && t.conn !== this.lastLoadedConn) this.loadTree();
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
@@ -1051,7 +1089,7 @@
         var t = this.activeTab; if (!t || !t.conn) { this.flash("请先选择连接"); return; }
         this.aiPanel = { question: "", explain: false, samples: false,
                          schema: this.aiSchema() || (this.databases.length ? this.databases[0] : ""),
-                         tables: [], picked: {}, filter: "", loading: true,
+                         tables: [], picked: {}, sent: {}, filter: "", loading: true,
                          running: false, error: "", sessionId: "", turns: [],
                          mode: "replace", lastRange: null, pos: { left: 10, top: 8 } };
         var self = this;
@@ -1160,9 +1198,12 @@
         var q = (p.question || "").trim();
         if (!q) { p.error = "请填写你想查什么"; return; }
         var picked = Object.keys(p.picked);
+        // 追问：只把「本轮新勾选、之前没发过」的表补给 AI（其余表结构已在会话上下文里）。
+        // 首轮：整份 picked（空=整库模式）。
+        var toSend = p.sessionId ? picked.filter(function (q) { return !p.sent[q]; }) : picked;
         p.running = true; p.error = "";
         var body = { conn: t.conn, question: q,
-                     tables: JSON.stringify(picked),
+                     tables: JSON.stringify(toSend),
                      explain: p.explain ? "1" : null,
                      include_samples: p.samples ? "1" : null,
                      session_id: p.sessionId || null };
@@ -1188,6 +1229,7 @@
           // 保持会话：记录本轮、带回 session_id，面板不关，可继续追问
           p.turns.push(q);
           if (d.session_id) p.sessionId = d.session_id;
+          toSend.forEach(function (q) { p.sent[q] = true; });  // 记下已发过的表，追问不重发
           p.question = "";
         }).catch(function (e) { if (self.aiPanel) { p.running = false; p.error = String(e); } });
       },
@@ -1794,16 +1836,29 @@
         t.err = err; t.result = result;
         if (t.isPaging && t.results[t.resultIdx]) {
           var e = t.results[t.resultIdx]; e.sql = sql; e.result = result; e.err = err;  // 翻页/重载更新当前结果页
+          e.used = ++useSeq;
         } else {
           var nid = t.results.length ? t.results[t.results.length - 1].rid + 1 : 1;
-          t.results.push({ rid: nid, sql: sql, result: result, err: err });
+          t.results.push({ rid: nid, sql: sql, result: result, err: err, used: ++useSeq });
           if (t.results.length > 10) t.results.shift();  // 上限，防 localStorage 膨胀
           t.resultIdx = t.results.length - 1;
         }
       },
+      // 结果页标题：SQL 前有注释就取注释前几个字作标题（更好认），否则「结果 N」（N=稳定的 rid）
+      resLabel: function (rt) {
+        var s = (rt.sql || "").replace(/^\s+/, "");
+        var m = s.match(/^--[ \t]?(.*)/) || s.match(/^#[ \t]?(.*)/) || s.match(/^\/\*+([\s\S]*?)\*\//);
+        var label = "";
+        if (m) {
+          var txt = (m[1] || "").split(/[\r\n]/)[0].trim();
+          if (txt) label = txt.length > 12 ? txt.slice(0, 12) + "…" : txt;
+        }
+        return (rt.err ? "✗ " : "") + (label || ("结果 " + rt.rid));
+      },
       // 结果 tab（查询 tab 每次执行新增一个）——点击结果页切换展示
       selectResult: function (i) {
         var t = this.activeTab, entry = t && t.results[i]; if (!entry) return;
+        entry.used = ++useSeq;  // 查看即刷新 LRU 使用序，避免常看的页被淘汰
         t.resultIdx = i; t.readSql = entry.sql; t.ok = null;
         if (entry.err) { t.err = entry.err; t.result = null; this.persist(); return; }
         t.err = null;
@@ -1811,8 +1866,9 @@
           t.result = entry.result; this.persist();
           if (t.view === "chart") this.$nextTick(this.renderChart);
         } else {
-          // 刷新后被释放的历史结果 → 用户点击时才重跑该 SQL 恢复（isPaging=true 更新本结果 tab）
+          // 仅当结果集因体积超预算被释放（刷新后）才走到这里 → 提示并重跑恢复（isPaging 更新本页）
           t.result = null;
+          this.flash("该结果因体积过大未缓存，正在重新查询…");
           this.run(false, 0, entry.sql, true);
         }
       },
@@ -1824,6 +1880,7 @@
         if (!t.results.length) { t.result = null; t.err = null; t.ok = null; t.resultIdx = 0; this.persist(); return; }
         var ni = beforeActive ? t.resultIdx - 1 : Math.min(t.resultIdx, t.results.length - 1);
         var entry = t.results[ni];
+        entry.used = ++useSeq;
         t.resultIdx = ni; t.readSql = entry.sql; t.ok = null;
         t.err = entry.err || null;
         t.result = entry.err ? null : (entry.result || null);  // 被释放的历史结果显示占位，可点该页手动重跑
@@ -2415,6 +2472,19 @@
         if (!s) return 0;
         return (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
       },
+      // 选中值能否当数字：number 直接用；字符串仅认纯数值字面量（含大整数字符串）
+      _numify: function (v) {
+        if (typeof v === "number") return isFinite(v) ? v : null;
+        if (typeof v === "string" && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(v.trim())) {
+          var n = Number(v); return isFinite(n) ? n : null;
+        }
+        return null;
+      },
+      _fmtNum: function (n) {
+        if (!isFinite(n)) return "" + n;
+        return Number.isInteger(n) ? n.toLocaleString()
+             : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      },
       isCellSel: function (ri, ci) {
         var s = this.activeTab && this.activeTab.cellSel;
         return !!(s && ri >= s.r0 && ri <= s.r1 && ci >= s.c0 && ci <= s.c1);
@@ -2844,9 +2914,12 @@
         try {
           this.stashTree();
           var tabs = this.tabs.map(function (t) {
+            // query tab 的 t.result 是「当前结果页」的镜像，与 results[resultIdx].result 同一份数据，
+            // 不再重复持久化（避免翻倍占用 + LRU 估算失真）；restore 时从当前结果页派生。data/ddl tab 无 results，照存。
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: this.sqlOf(t),
-                     result: t.result, ok: t.ok, err: t.err, pinned: !!t.pinned,
+                     result: (t.type || "query") === "query" ? null : t.result,
+                     ok: t.ok, err: t.err, pinned: !!t.pinned,
                      snippetId: t.snippetId || null, snipNote: t.snipNote || "",
                      savedSql: t.savedSql || "", dirty: !!t.dirty, bookmarks: t.bookmarks || [],
                      where: t.where || "", orderBy: t.orderBy || "",
@@ -2855,10 +2928,13 @@
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      colDisplay: t.colDisplay || {},
-                     // 只持久化「当前」结果 tab 的行数据，其余只留 SQL 骨架（点击时重跑）
-                     results: (t.results || []).map(function (rt, i) {
+                     // 编辑器光标/滚动位置持久化（用户习惯，刷新后回到原处）；Map 由光标/滚动事件实时刷新，这里直接取
+                     viewState: viewStates.get(t.id) || null,
+                     // 默认持久化所有结果页的行数据（点击切换不重查）；只有整体超预算时，
+                     // 才在下面按 LRU（used 使用序）从最久未用的结果页开始淘汰其行数据
+                     results: (t.results || []).map(function (rt) {
                        return { rid: rt.rid, sql: rt.sql, err: rt.err || null,
-                                result: i === t.resultIdx ? rt.result : null };
+                                result: rt.result, used: rt.used || 0 };
                      }),
                      resultIdx: t.resultIdx || 0,
                      view: t.view || "table", chart: t.chart || null };
@@ -2867,18 +2943,28 @@
           var data = { v: 2, tabs: tabs, activeId: activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH, dataLogH: this.dataLogH,
                        schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
-          function dropResults(pred) {
-            tabs.forEach(function (t) {
-              if (!pred(t)) return;
-              t.result = null;
-              (t.results || []).forEach(function (rt) { rt.result = null; });
-            });
-          }
+          var LIMIT = 3800000;  // localStorage 预算（~5MB 上限留余量）
           var s = JSON.stringify(data);
-          if (s.length > 3000000) {  // 逐级降级：先丢非当前 tab 的结果集（保 SQL/树），再丢全部
-            dropResults(function (t) { return t.id !== activeId; });
+          if (s.length > LIMIT) {
+            // LRU 淘汰：收集所有仍带行数据的结果页，按 used 升序（最久未用在前）丢其 result，
+            // 直到估算装得下——保留最近用过的，而不是无脑按 tab 丢或全丢。顶层 query result 未存、无重复计量。
+            var entries = [];
+            tabs.forEach(function (t) {
+              (t.results || []).forEach(function (rt) {
+                if (rt.result != null) entries.push({ rt: rt, cost: JSON.stringify(rt.result).length });
+              });
+            });
+            entries.sort(function (a, b) { return (a.rt.used || 0) - (b.rt.used || 0); });
+            var over = s.length - LIMIT;
+            for (var i = 0; i < entries.length && over > 0; i++) {
+              entries[i].rt.result = null;
+              over -= entries[i].cost;  // 估算释放量
+            }
             s = JSON.stringify(data);
-            if (s.length > 3800000) { dropResults(function () { return true; }); s = JSON.stringify(data); }
+            if (s.length > LIMIT) {  // 估算有误差仍超：兜底丢掉全部剩余结果
+              tabs.forEach(function (t) { t.result = null; (t.results || []).forEach(function (rt) { rt.result = null; }); });
+              s = JSON.stringify(data);
+            }
           }
           localStorage.setItem(STORE_KEY, s);
         } catch (e) { /* 存储失败不影响使用 */ }
@@ -2892,9 +2978,13 @@
           // 静默丢弃老的 flow tab（DAG 画布已迁到 /admin/workflows 独立页）
           var rawTabs = d.tabs.filter(function (t) { return (t.type || "query") !== "flow"; });
           this.tabs = rawTabs.map(function (t) {
+            var isQuery = (t.type || "query") === "query";
+            var cur = isQuery && t.results ? t.results[t.resultIdx || 0] : null;
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
                      type: t.type || "query", table: t.table || "", sql: t.sql || "",
-                     result: t.result || null, ok: t.ok || null, err: t.err || null,
+                     // query tab 的当前结果从当前结果页派生（persist 未存顶层镜像）；data/ddl 直接用存的
+                     result: isQuery ? ((cur && cur.result) || null) : (t.result || null),
+                     ok: t.ok || null, err: t.err || null,
                      pinned: !!t.pinned,
                      snippetId: t.snippetId || null, snipNote: t.snipNote || "",
                      savedSql: t.savedSql != null ? t.savedSql : (t.sql || ""), dirty: !!t.dirty,
@@ -2922,6 +3012,12 @@
           this.schemaShow = d.schemaShow || {};
           this.schemaDefault = d.schemaDefault || {};
           seq = Math.max.apply(null, this.tabs.map(function (t) { return t.id; })) + 1;
+          this.tabs.forEach(function (t) {  // LRU 使用序接续到刷新前的最大值之上，保持单调
+            (t.results || []).forEach(function (rt) { if ((rt.used || 0) > useSeq) useSeq = rt.used; });
+          });
+          rawTabs.forEach(function (t) {  // 恢复编辑器光标/滚动位置，等 initEditor 建好 editor 后应用
+            if (t.viewState) viewStates.set(t.id, t.viewState);
+          });
         } catch (e) { /* 损坏则从空开始 */ }
       },
 
@@ -2983,6 +3079,15 @@
           // Monaco 会按真实可视空间决定弹在光标上方还是下方（顶部空间不够就弹下面）
           fixedOverflowWidgets: true,
         });
+        // 恢复活跃 tab 的光标/滚动位置（刷新前存的），非活跃 tab 的在 switchTab 时恢复。
+        // 立即恢复 + 布局完成后再补一次：编辑器初建时容器可能尚未定尺寸，滚动会被 clamp 到 0。
+        var avs = viewStates.get(this.activeId);
+        if (avs) {
+          var applyVs = function () { try { editor.restoreViewState(avs); } catch (e) {} };
+          applyVs();
+          var once = editor.onDidLayoutChange(function () { applyVs(); once.dispose(); });
+          if (this.activeTab && this.activeTab.type === "query") this.$nextTick(function () { applyVs(); editor.focus(); });
+        }
         // schema 浮层动态避开 minimap：让浮层右缘停在 minimap 左侧（minimap 关闭时贴右缘）
         editor.onDidLayoutChange(function () { self.syncSchemaFloat(); });
         this.syncSchemaFloat();
@@ -3031,9 +3136,11 @@
         execCollection = editor.createDecorationsCollection();  // 执行状态字形（语句行左侧 ⟳/✓/✗）
         stmtBoxCol = editor.createDecorationsCollection();       // 缺分号波浪线
         // 光标移动/选区变化/滚动 → 更新当前语句边框（框住 ⌘↵ 将执行的那条 SQL）+ 重 lint
-        editor.onDidChangeCursorPosition(function () { self.applyStmtBox(); self.scheduleLint(); });
-        editor.onDidChangeCursorSelection(function () { self.applyStmtBox(); });
-        editor.onDidScrollChange(function () { self.applyStmtBox(); });
+        // 光标/滚动一变就把视图状态存进 Map（活跃 tab），与 persist 解耦——刷新前 Map 里始终是最新光标
+        var stashView = function () { try { var vs = editor.saveViewState(); if (vs && self.activeId != null) viewStates.set(self.activeId, vs); } catch (e) {} };
+        editor.onDidChangeCursorPosition(function () { stashView(); self.applyStmtBox(); self.scheduleLint(); });
+        editor.onDidChangeCursorSelection(function () { stashView(); self.applyStmtBox(); });
+        editor.onDidScrollChange(function () { stashView(); self.applyStmtBox(); });
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyB, function () { self.toggleBookmark(); });
         editor.addCommand(monaco.KeyCode.F2, function () { self.gotoBookmark(1); });
         editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.F2, function () { self.gotoBookmark(-1); });
@@ -3468,9 +3575,10 @@
           <textarea class="dg-ai-q" v-model="aiPanel.question" rows="2" spellcheck="false"
                     :placeholder="aiPanel.sessionId ? '继续追问，例如：改成按周分组' : '描述你想查什么，例如：每天新增订单数'"
                     @keydown.meta.enter.stop="aiGenerate" @keydown.ctrl.enter.stop="aiGenerate"></textarea>
-          <div class="dg-ai-scope" v-if="!aiPanel.sessionId">
+          <div class="dg-ai-scope">
             <div class="dg-ai-scope-hd">
-              <span>表 · 已选 {{ aiPickCount() }}（不选=整库）</span>
+              <span v-if="!aiPanel.sessionId">表 · 已选 {{ aiPickCount() }}（不选=整库）</span>
+              <span v-else>追问可再勾选新增表 · 已选 {{ aiPickCount() }}</span>
               <input v-model="aiPanel.filter" placeholder="筛选…" class="dg-ai-filter">
             </div>
             <div v-if="databases.length" class="dg-ai-schema">
@@ -3632,7 +3740,7 @@
         <div v-if="activeTab.type==='query' && activeTab.results && activeTab.results.length" class="dg-restabs">
           <div v-for="(rt,i) in activeTab.results" :key="rt.rid" class="rtab" :class="{on: i===activeTab.resultIdx, err: !!rt.err}"
                :title="rt.sql" @click="selectResult(i)">
-            <span class="rl"><template v-if="rt.err">✗ </template>结果 {{ i+1 }}</span>
+            <span class="rl">{{ resLabel(rt) }}</span>
             <span class="rx" @click.stop="closeResult(i)">✕</span>
           </div>
         </div>
@@ -3666,6 +3774,16 @@
             </span>
             <span v-else-if="selCellCount()" class="rowops">
               已选 {{ selCellCount() }} 格
+              <span v-if="cellStats" class="dg-cellstats">
+                <template v-if="cellStats.numeric">
+                  <span class="st sum" title="选中可计算值的和"><i>SUM</i>{{ cellStats.sum }}</span>
+                  <span class="st" title="平均"><i>AVG</i>{{ cellStats.avg }}</span>
+                  <span class="st" title="最小"><i>MIN</i>{{ cellStats.min }}</span>
+                  <span class="st" title="最大"><i>MAX</i>{{ cellStats.max }}</span>
+                  <span class="st" :title="'非空计数（可计算值 ' + cellStats.numeric + '）'"><i>COUNT</i>{{ cellStats.count }}</span>
+                </template>
+                <span v-else class="st" title="非空计数"><i>COUNT</i>{{ cellStats.count }}</span>
+              </span>
               <span class="dg-menu"><button class="dg-btn" @click.stop="copyOpen=!copyOpen">复制为 ▾</button>
                 <div v-if="copyOpen" class="dg-menu-pop">
                   <button @click="copyCells('csv')">CSV</button>
