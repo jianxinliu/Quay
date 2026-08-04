@@ -119,6 +119,18 @@ def test_writer_has_no_readonly():
     assert all("READ ONLY" not in s for s in stmts)
 
 
+def test_sa_pool_kwargs_preserves_default_and_scales():
+    from dbmcp.engines import _sa_pool_kwargs
+    # 15（默认）还原历史值：pool_size=5 + overflow=10
+    assert _sa_pool_kwargs(15) == {"pool_size": 5, "max_overflow": 10}
+    # 小于 5：全常驻、无 overflow
+    assert _sa_pool_kwargs(3) == {"pool_size": 3, "max_overflow": 0}
+    # 大：5 常驻，其余全 overflow；总数 = pool_size + max_overflow
+    k = _sa_pool_kwargs(100)
+    assert k == {"pool_size": 5, "max_overflow": 95}
+    assert k["pool_size"] + k["max_overflow"] == 100
+
+
 def test_role_timeouts_reader_uses_statement_timeout():
     policy = Policy(statement_timeout_s=30, write_timeout_s=600)
     stmt, op = role_timeouts(policy, readonly=True)

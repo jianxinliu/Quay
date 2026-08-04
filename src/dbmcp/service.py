@@ -1406,7 +1406,32 @@ class DbmService:
     def save_settings(self, updates: dict) -> dict:
         if self.settings is None:
             raise QueryRejected("设置子系统未启用")
-        return self.settings.save(updates)
+        old_pool = int(self.get_settings().get("engine_pool_size")
+                       or engines.DEFAULT_ENGINE_POOL_SIZE)
+        saved = self.settings.save(updates)
+        new_pool = int(saved.get("engine_pool_size") or engines.DEFAULT_ENGINE_POOL_SIZE)
+        if new_pool != old_pool:
+            self.pool.dispose()  # 池大小变了：回收旧引擎，下次按新大小重建
+        self.apply_runtime_settings()
+        return saved
+
+    def apply_runtime_settings(self) -> None:
+        """把「并发/连接池」进程级设置应用到运行时：引擎池大小 + anyio 线程池上限。
+
+        由 serve 启动的 lifespan 与设置保存路由调用（都在事件循环内）——线程池限流器是
+        per-loop 的，拿不到（非 serve 的单测/CLI）就静默跳过，只影响并发上限、不报错。
+        """
+        if self.settings is None:
+            return
+        s = self.get_settings()
+        self.pool.engine_pool_size = int(s.get("engine_pool_size")
+                                         or engines.DEFAULT_ENGINE_POOL_SIZE)
+        try:
+            import anyio.to_thread  # noqa: PLC0415
+            anyio.to_thread.current_default_thread_limiter().total_tokens = int(
+                s.get("mcp_max_concurrency") or 40)
+        except Exception:  # noqa: BLE001 — 不在事件循环里就跳过
+            pass
 
     def _setting(self, key: str):
         return self.get_settings().get(key)
