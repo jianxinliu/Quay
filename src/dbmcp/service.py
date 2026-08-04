@@ -1672,7 +1672,12 @@ class DbmService:
         def _run() -> dict:
             ddls: list[tuple[str, str]] = []
             samples: dict[str, str] | None = None
-            if not session_id:  # 首轮才收集表结构；追问续接会话、上下文已在 AI 侧
+            # 首轮收集全部表结构；追问续接会话、上下文已在 AI 侧，只补发本轮新增的表（tables 里传的即新增表）。
+            if session_id:
+                for t in list(tables or []):  # 追问新增表：补发这些表的建表语句
+                    tbl_schema, tbl = (t.split(".", 1) if "." in t else (schema, t))
+                    ddls.append((tbl, engines.get_table_ddl(engine, cfg.engine, tbl, tbl_schema)))
+            else:
                 names = list(tables or [])
                 if not names:  # 整库：列出全部表
                     names = engines.list_tables(engine, schema)
