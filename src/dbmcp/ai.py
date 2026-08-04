@@ -113,11 +113,20 @@ def build_sql_prompt(
     return "\n".join(parts)
 
 
-def build_followup_prompt(question: str, *, explain: bool) -> str:
-    """追问 prompt（续接已有会话）：不重发表结构，只带新的调整要求 + 输出契约。"""
-    parts = ["在上一条 SQL 的基础上按下面的要求调整，仍然遵守之前的所有约束：",
-             "", (question or "").strip(), "",
-             _CONTRACT_EXPLAIN if explain else _CONTRACT_PLAIN]
+def build_followup_prompt(
+    question: str, *, explain: bool, ddls: list[tuple[str, str]] | None = None
+) -> str:
+    """追问 prompt（续接已有会话）：不重发已发过的表结构，只带新的调整要求 + 输出契约。
+
+    ddls 非空 = 追问时新增了表：把这些新表的建表语句一并带上，AI 可据此在后续 SQL 里用到它们。
+    """
+    parts = ["在上一条 SQL 的基础上按下面的要求调整，仍然遵守之前的所有约束："]
+    if ddls:
+        parts += ["", "=== 新增相关表结构（可在本轮 SQL 中使用）==="]
+        for _name, ddl in ddls:
+            parts += [(ddl or "").strip(), ""]
+    parts += ["", (question or "").strip(), "",
+              _CONTRACT_EXPLAIN if explain else _CONTRACT_PLAIN]
     return "\n".join(parts)
 
 
@@ -142,7 +151,7 @@ def generate_sql(
     api = provider=api 时的 {base, format, key_env}（可选）。
     """
     if session_id:
-        prompt = build_followup_prompt(question, explain=explain)
+        prompt = build_followup_prompt(question, explain=explain, ddls=ddls)
     else:
         prompt = build_sql_prompt(system_prompt, dialect, ddls, question,
                                   explain=explain, samples=samples)

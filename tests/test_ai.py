@@ -44,6 +44,16 @@ def test_build_followup_prompt_has_no_ddl_only_adjustment():
     assert ai._CONTRACT_PLAIN in p
 
 
+def test_build_followup_prompt_includes_new_tables_ddl():
+    # 追问时新增了表：把新表的建表语句带上，AI 才能在本轮 SQL 里用到它
+    p = ai.build_followup_prompt(
+        "关联用户表补上昵称", explain=False,
+        ddls=[("users", "CREATE TABLE users(id INT, name VARCHAR(50))")])
+    assert "CREATE TABLE users" in p
+    assert "新增相关表结构" in p
+    assert "关联用户表补上昵称" in p
+
+
 # ---------- 输出解析 ----------
 
 def test_parse_plain_strips_fences():
@@ -351,9 +361,25 @@ def test_generate_sql_followup_omits_ddl(monkeypatch):
         captured["prompt"] = prompt
         return "SELECT 2", "sid-1"
     monkeypatch.setattr(ai, "run_ai", fake_run_ai)
-    ai.generate_sql(system_prompt="s", dialect="mysql",
-                    ddls=[("orders", "CREATE TABLE orders(id INT)")],
+    # 追问且未新增表（ddls 为空）：不重发表结构
+    ai.generate_sql(system_prompt="s", dialect="mysql", ddls=[],
                     question="改成按周", explain=False, samples=None,
                     provider="claude", model="", timeout=10, session_id="sid-1")
-    assert "CREATE TABLE orders" not in captured["prompt"]
+    assert "CREATE TABLE" not in captured["prompt"]
     assert "改成按周" in captured["prompt"]
+
+
+def test_generate_sql_followup_sends_new_tables_ddl(monkeypatch):
+    captured = {}
+
+    def fake_run_ai(prompt, **kw):  # noqa: ANN001
+        captured["prompt"] = prompt
+        return "SELECT 2", "sid-1"
+    monkeypatch.setattr(ai, "run_ai", fake_run_ai)
+    # 追问时新增表：ddls 里的新表建表语句要发给 AI
+    ai.generate_sql(system_prompt="s", dialect="mysql",
+                    ddls=[("users", "CREATE TABLE users(id INT)")],
+                    question="关联用户表", explain=False, samples=None,
+                    provider="claude", model="", timeout=10, session_id="sid-1")
+    assert "CREATE TABLE users" in captured["prompt"]
+    assert "关联用户表" in captured["prompt"]

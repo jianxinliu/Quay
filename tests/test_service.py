@@ -498,10 +498,27 @@ class TestAiGenerateSql:
                                explanation="", session_id="sid-1")
         monkeypatch.setattr(ai, "generate_sql", fake_gen)
         service.ai_generate_sql("demo", "main", "只看成年人", CALLER, session_id="sid-1")
-        assert captured["ddls"] == []          # 追问不重发表结构
+        assert captured["ddls"] == []          # 追问未新增表时不重发表结构
         assert captured["session_id"] == "sid-1"
         recs = service.store.recent(filters={"tool": "ai_followup_sql"})
         assert recs and recs[0]["status"] == "ok"
+
+    def test_followup_with_new_tables_sends_their_ddl(self, service, monkeypatch):
+        from dbmcp import ai
+        self._enable_ai(service)
+        captured = {}
+
+        def fake_gen(**kw):
+            captured.update(kw)
+            return ai.AIResult(sql="SELECT 1", explanation="", session_id="sid-1")
+        monkeypatch.setattr(ai, "generate_sql", fake_gen)
+        # 追问时新增了 users 表：只补发这张新表的建表语句
+        service.ai_generate_sql("demo", "main", "关联用户表", CALLER,
+                                tables=["users"], session_id="sid-1")
+        ddl_names = [n for n, _ in captured["ddls"]]
+        assert ddl_names == ["users"]
+        assert "CREATE TABLE" in captured["ddls"][0][1]
+        assert captured["session_id"] == "sid-1"
 
     def test_too_many_tables_rejects_before_ddl(self, service, monkeypatch):
         from dbmcp import ai

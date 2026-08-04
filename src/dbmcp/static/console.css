@@ -400,7 +400,7 @@ table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: v
 table.dg-rt td .nul { color: var(--dg-faint); font-style: italic; }
 table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 .dg-res-ok { padding: 12px 14px; color: var(--dg-green); }
-.dg-res-err { padding: 12px 14px; color: var(--dg-red); white-space: pre-wrap; font-family: var(--dg-mono); font-size: 12px; }
+.dg-res-err { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; color: var(--dg-red); white-space: pre-wrap; word-break: break-word; font-family: var(--dg-mono); font-size: 12px; }
 .dg-res-empty { padding: 14px; color: var(--dg-faint); }
 /* 执行中加载态：顶部转圈条 + 数据 tab 的骨架行（列头已知，内容 shimmer 占位） */
 .dg-res-loading { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
@@ -661,6 +661,14 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   cursor: pointer; color: var(--dg-muted); padding: 0 3px;
 }
 .dg-res-meta .rowops .act:hover, .dg-res-meta .dg-resq .act:hover { color: var(--dg-text); }
+.dg-res-meta .dg-cellstats { display: inline-flex; gap: 6px; align-items: center; font-family: var(--dg-mono); }
+.dg-res-meta .dg-cellstats .st {
+  display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap;
+  padding: 1px 8px; border-radius: 10px; background: var(--dg-accent-soft);
+  color: var(--dg-text); font-size: 12px; font-weight: 600;
+}
+.dg-res-meta .dg-cellstats .st i { font-style: normal; font-weight: 600; font-size: 10px; letter-spacing: .3px; color: var(--dg-accent); }
+.dg-res-meta .dg-cellstats .st.sum i { color: var(--dg-amber); }
 .dg-res-meta .dg-resq { display: inline-flex; gap: 4px; align-items: center; }
 .dg-res-meta .dg-resq input {
   width: 180px; background: var(--dg-bg); color: var(--dg-text);
