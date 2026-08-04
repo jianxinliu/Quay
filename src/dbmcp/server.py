@@ -99,8 +99,17 @@ async def _maybe_elicit_approval(
 
 
 def build_mcp(service: DbmService) -> FastMCP:
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _lifespan(_server: FastMCP):
+        # 启动即把并发/连接池设置应用到运行时（线程池上限需在事件循环内才设得上）
+        service.apply_runtime_settings()
+        yield {}
+
     mcp = FastMCP(
         name="db-manage-mcp",
+        lifespan=_lifespan,
         instructions=(
             "统一的数据库访问服务。开始跑 SQL 前，建议先调 begin_session(title, note) 声明本次"
             "会话的名字和背景，之后本会话跑过的 SQL 会在后台按此会话归类、方便人回溯。"

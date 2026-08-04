@@ -47,6 +47,36 @@ def service(tmp_path):
     svc.close()
 
 
+class TestRuntimeSettings:
+    """并发/连接池设置热生效：save_settings 同步引擎池大小、变更时回收旧引擎。"""
+
+    def _svc(self, service):
+        from dbmcp.settings import SettingsStore
+        service.settings = SettingsStore(":memory:")
+        return service
+
+    def test_apply_sets_engine_pool_size(self, service):
+        svc = self._svc(service)
+        svc.save_settings({"engine_pool_size": "42"})
+        assert svc.pool.engine_pool_size == 42
+
+    def test_pool_size_change_disposes_pool(self, service, monkeypatch):
+        svc = self._svc(service)
+        calls = []
+        monkeypatch.setattr(svc.pool, "dispose", lambda: calls.append(1))
+        svc.save_settings({"engine_pool_size": "30"})  # 变了 → 回收
+        assert calls == [1]
+        svc.save_settings({"sql_page_size": "50"})     # 池大小没变 → 不回收
+        assert calls == [1]
+
+    def test_clamped_to_bounds(self, service):
+        svc = self._svc(service)
+        svc.save_settings({"engine_pool_size": "9999", "mcp_max_concurrency": "1"})
+        s = svc.get_settings()
+        assert s["engine_pool_size"] == 100    # 上界夹取
+        assert s["mcp_max_concurrency"] == 10  # 下界夹取
+
+
 class TestReconnect:
     """人工重连：绕过健康位强制重建连接（供查询台「重连数据库」用）。"""
 

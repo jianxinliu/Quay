@@ -789,7 +789,13 @@ def _settings_db_body(s: dict) -> str:
                        "超长 TEXT/BLOB 单元格截断的字符数。")
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
-                       "连接级 Policy 可单独覆盖。"))
+                       "连接级 Policy 可单独覆盖。")
+        + _num_setting("MCP 最大并发数", "mcp_max_concurrency", s, 40,
+                       "同进程最多并行的阻塞 DB 调用数（anyio 线程池），10–500，默认 40。"
+                       "决定「多少个不同连接能同时跑」，改后即时生效。")
+        + _num_setting("单连接引擎池大小", "engine_pool_size", s, 15,
+                       "单个引擎（连接×角色×库）的最大连接数（5 常驻 + 其余 overflow），5–100，默认 15。"
+                       "决定「同一连接上能并行多少条 SQL」；改后回收旧引擎、按新大小重建。"))
 
 
 def _text_setting(label: str, name: str, s: dict, default: str, hint: str,

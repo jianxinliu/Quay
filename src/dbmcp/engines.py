@@ -31,6 +31,17 @@ Role = Literal["reader", "writer"]
 
 DB_CLIENT_NAME = f"Quay({__version__})"
 DEFAULT_IDLE_RECLAIM_S = 600  # 隧道 + 引擎空闲 10 分钟回收
+DEFAULT_ENGINE_POOL_SIZE = 15  # 单引擎最大连接数（= SQLAlchemy pool_size + max_overflow）
+
+
+def _sa_pool_kwargs(total: int) -> dict[str, int]:
+    """把「单引擎最大连接数 total」拆成 SQLAlchemy 的 pool_size/max_overflow。
+
+    保持既有语义：最多 5 条常驻热连接，其余作 overflow 按需开、用完回收——
+    total=15 时正好还原历史默认（pool_size=5, max_overflow=10）。
+    """
+    base = min(5, max(1, total))
+    return {"pool_size": base, "max_overflow": max(0, total - base)}
 
 
 class UnsupportedEngineError(Exception):
@@ -75,6 +86,8 @@ class EnginePool:
         # SSH 证书库（名字→证书）的活引用，建隧道时解析每跳的 identity。
         # service 构造时指向 AppConfig.ssh_identities（同一 dict，原地增删即时可见）。
         self.identities: dict[str, SshIdentity] | None = None
+        # 单引擎最大连接数（pool_size + max_overflow）。service 从设置同步，改后 dispose 重建。
+        self.engine_pool_size: int = DEFAULT_ENGINE_POOL_SIZE
 
     def get(
         self,
@@ -95,7 +108,8 @@ class EnginePool:
                 # 隧道已死，连引擎一起回收后重建
                 entry.dispose()
                 del self._entries[key]
-            entry = _build_pooled_engine(cfg, role, schema, identities or self.identities)
+            entry = _build_pooled_engine(cfg, role, schema, identities or self.identities,
+                                         pool_size=self.engine_pool_size)
             self._entries[key] = entry
             return entry.engine
 
@@ -139,6 +153,7 @@ def build_probe_engine(
 def _build_pooled_engine(
     cfg: ConnectionConfig, role: Role, schema: str | None = None,
     identities: dict[str, "SshIdentity"] | None = None,
+    pool_size: int = DEFAULT_ENGINE_POOL_SIZE,
 ) -> _PooledEngine:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host, cfg.port
@@ -151,7 +166,7 @@ def _build_pooled_engine(
         host, port = "127.0.0.1", tunnel.local_port
 
     try:
-        engine = _create_readonly_engine(cfg, role, host, port, schema)
+        engine = _create_readonly_engine(cfg, role, host, port, schema, pool_size=pool_size)
     except Exception:
         if tunnel is not None:
             tunnel.close()
@@ -218,10 +233,12 @@ def _create_readonly_engine(
     host: str | None,
     port: int | None,
     schema: str | None = None,
+    pool_size: int = DEFAULT_ENGINE_POOL_SIZE,
 ) -> SAEngine:
     """schema：查询台执行 schema 上下文。MySQL 覆盖默认库；PG 设 search_path。"""
     readonly = role == "reader"
     stmt_timeout_s, op_timeout_s = role_timeouts(cfg.policy, readonly)
+    pool_kwargs = _sa_pool_kwargs(pool_size)  # sqlite 不用（本地文件、并发无意义）
 
     if cfg.engine == "sqlite":
         engine = create_engine(f"sqlite:///{cfg.database}", pool_pre_ping=True)
@@ -251,6 +268,7 @@ def _create_readonly_engine(
         engine = create_engine(
             url,
             pool_pre_ping=True,
+            **pool_kwargs,
             connect_args={
                 "connect_timeout": 5,
                 # 展示在 MySQL performance_schema.session_connect_attrs 中
@@ -296,6 +314,7 @@ def _create_readonly_engine(
         return create_engine(
             url,
             pool_pre_ping=True,
+            **pool_kwargs,
             connect_args={
                 "connect_timeout": 5,
                 # 展示在 pg_stat_activity.application_name 中
@@ -327,6 +346,7 @@ def _create_readonly_engine(
         return create_engine(
             url,
             pool_pre_ping=True,
+            **pool_kwargs,
             connect_args={
                 "connect_timeout": 5,
                 # 展示在 system.processes / system.query_log 的 client_name 中
