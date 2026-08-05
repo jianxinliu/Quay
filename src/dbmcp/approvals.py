@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS change_request (
     status       TEXT NOT NULL,
     decided_by   TEXT,
     decided_at   TEXT,
-    decision_note TEXT
+    decision_note TEXT,
+    exec_result  TEXT                 -- JSON：核销执行后的结果（行数/耗时/执行方）
 );
 CREATE INDEX IF NOT EXISTS idx_change_status ON change_request (status);
 """
@@ -72,6 +73,7 @@ class ChangeRequest:
     decided_by: str = ""
     decided_at: str = ""
     decision_note: str = ""
+    exec_result: dict | None = None  # 执行结果（affected_rows/duration_ms/executed_by），未执行为 None
 
     def effective_status(self, now: datetime | None = None) -> str:
         """惰性过期判定：pending/approved 超过 expires_at 视为 expired。"""
@@ -98,6 +100,10 @@ class ApprovalStore:
         self._ttl = timedelta(minutes=ttl_minutes)
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # 老库迁移：exec_result 是后加的列（执行结果回填给等待中的 agent 与后台详情页）
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(change_request)")}
+            if "exec_result" not in cols:
+                self._conn.execute("ALTER TABLE change_request ADD COLUMN exec_result TEXT")
             self._conn.commit()
 
     def create(
@@ -229,6 +235,19 @@ class ApprovalStore:
             )
         return self.get(change_id)
 
+    def record_execution(self, change_id: int, result: dict) -> None:
+        """回填核销后的执行结果。
+
+        等待中的 agent（wait_for_change）靠它知道「后台按了『批准并执行』，变更已落地、
+        行数是多少」，无需再核销一次；后台详情页也据此展示结果。纯记录，不改状态。
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE change_request SET exec_result = ? WHERE id = ?",
+                (json.dumps(result, ensure_ascii=False), change_id),
+            )
+            self._conn.commit()
+
     def purge_old(self, retention_days: int) -> int:
         """删除超过保留期的**终态**审批单（consumed/rejected/expired 及已过期的 pending/approved）。
 
@@ -265,6 +284,7 @@ class ApprovalStore:
             decided_by=row["decided_by"] or "",
             decided_at=row["decided_at"] or "",
             decision_note=row["decision_note"] or "",
+            exec_result=json.loads(row["exec_result"]) if row["exec_result"] else None,
         )
 
     def close(self) -> None:

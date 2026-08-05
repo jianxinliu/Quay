@@ -15,7 +15,7 @@
 | 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
 | 数据导出 | `export_table(project, connection, table, fields?, limit?, format?, database?)` | 按库、表、字段和行数导出 CSV/JSON/Markdown/XLSX 文件 |
-| 数据变更 | `execute(project, connection, sql, reason?, change_id?)` + `get_change_status(change_id)` | 拒绝—重提审批流，见下 |
+| 数据变更 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` + `wait_for_change(change_id)` / `get_change_status(change_id)` | 提交后就地等人批准、批准即自动执行，见下 |
 | 连通性 | `test_connection(project, connection)` | SELECT 1 |
 | 跨源分析 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 本地沙箱，见下 |
 | 流程沉淀 | `save_workflow(name, workspace, script)` | 把验证过的分析脚本存为可重跑 workflow |
@@ -57,20 +57,23 @@ list_projects → list_connections(project) → list_tables → describe_table �
   **别重复拉全量/翻页**，改写聚合 SQL、加 WHERE/LIMIT、或用分析工作台（`analysis_*`）下推计算。
 - 未绑定 database 的连接（工具返回会提示）需用**全限定表名**（`库.表`）。
 
-### 2. 改数（拒绝—重提审批流）
+### 2. 改数（审批流：提交 → 等人批 → 自动执行）
 
 ```
-execute(sql) → 返回 rejected + change_id + 风险报告
-  → 在会话里告知用户，等人在管理后台批准
-  → get_change_status(change_id) 查状态
-  → 批准后：execute(sql, change_id=...) 重提，放行执行
+execute(sql) → 生成审批单，服务端就地等待人工决策（默认 120s，wait_seconds 可覆盖）
+  → 你把返回的 approval_url 贴给用户，让其点开审批页
+  → 用户点「批准」→ 本次调用自动执行并返回 status=executed（无需用户回来说一句、你也不用重提）
+  → 若等待超时返回 status=approval_required：提醒用户后调 wait_for_change(change_id) 继续等
 ```
 
 要点：
-- **第一次 execute 一定会被拒**，这不是错误，是流程。拿到 change_id 后把风险报告
-  转述给用户，让用户去后台（或 CLI `dbm approve`）批。
-- 重提必须是**同一条 SQL**（指纹校验，不一致直接拒）；真正执行的永远是审批单里存的 SQL。
-- 审批单 30 分钟过期、一次性核销。prod 环境强制走审批，没有捷径。
+- **第一次 execute 不会立刻执行**，这不是错误，是流程。把风险报告转述给用户，
+  **同时把 approval_url 贴出来**（终端里可点），省掉用户自己翻后台。
+- 等待返回 `status=executed` 即已落地；返回 `status=consumed`（wait_for_change 里）表示
+  审批人在后台点了「批准并立即执行」，变更已生效、`exec_result` 里有行数，**别再重提**。
+- 别自己写循环反复调 `get_change_status` 轮询——用 `wait_for_change`，它一直等到有结果。
+- 手动重提时必须是**同一条 SQL**（指纹校验，不一致直接拒）；真正执行的永远是审批单里存的 SQL。
+- 审批单 60 分钟过期、一次性核销。prod 环境强制走审批，没有捷径。
 - 客户端支持 elicitation 时（local/dev 环境），批准动作可能直接弹到会话里。
 
 ### 3. 跨源分析（分析工作台）
@@ -122,7 +125,8 @@ run_workflow(name)   → {steps: [每步 ✓/✗ 与行数], output: 最终结�
 
 - 每条 SQL 都有审计留痕（你的 clientInfo、SQL 原文、结果、耗时）——行为可追溯。
 - 敏感字段可能被脱敏（列值显示为掩码），这是配置行为，不要试图绕过。
-- 拿不到权限/被审批卡住时：告知用户去管理后台处理，不要反复重试同一条写操作。
+- 拿不到权限/被审批卡住时：把 approval_url 给用户并用 `wait_for_change` 等着，
+  不要反复重提同一条写操作，也不要循环调 `get_change_status` 空轮询。
 - 大表探索先 `describe_table` + `sample_rows`，别上来就 `SELECT *`。
 - Redis 不对 agent 开放：没有 Redis MCP 工具，`list_connections` 也不会返回 Redis 连接。
   Redis 只能由人在管理后台的 Redis 控制台操作，需要 Redis 数据时请让用户去后台处理。

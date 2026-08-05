@@ -16,7 +16,7 @@ import html
 import json
 import os
 from collections.abc import Awaitable, Callable
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -790,6 +790,10 @@ def _settings_db_body(s: dict) -> str:
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
                        "连接级 Policy 可单独覆盖。")
+        + _num_setting("审批等待时长（秒）", "approval_wait_seconds", s, 120,
+                       "agent 提交写操作后，服务端等你审批的秒数：你在审批页点批准，"
+                       "agent 那边即刻自动执行、无需你回会话里说一声。0 = 不等待（只返回审批单号）；"
+                       "若 MCP 客户端单次工具调用超时更短，把它调小，agent 会分多次续等。")
         + _num_setting("MCP 最大并发数", "mcp_max_concurrency", s, 40,
                        "同进程最多并行的阻塞 DB 调用数（anyio 线程池），10–500，默认 40。"
                        "决定「多少个不同连接能同时跑」，改后即时生效。")
@@ -1469,7 +1473,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
  <form method='post' action='/admin/approvals/{c.id}/approve' style='display:inline'>
   <label>审批人</label><input name='by' value='admin@localhost'>
   <label>备注（可选）</label><input name='note' style='width:320px'>
-  <br><br><button class='btn btn-approve' type='submit'>批准</button>
+  <!-- 「仅批准」放在前面：表单里输入框按回车会触发第一个提交按钮，
+       默认动作必须是不写库的那个，执行必须是显式点击。 -->
+  <br><br><button class='btn' type='submit'>仅批准（由 agent 重提执行）</button>
+  <button class='btn btn-approve' type='submit' name='exec' value='1'
+          style='margin-left:8px'>批准并立即执行</button>
+  <div class="muted" style="margin-top:8px">「批准并立即执行」当场用 writer 账号执行审批单里的 SQL；
+   等待中的 agent 会收到执行结果，不必再重提。</div>
  </form>
  <form method='post' action='/admin/approvals/{c.id}/reject' style='margin-top:16px'>
   <label>拒绝理由（会返回给 agent）</label>
@@ -1478,9 +1488,15 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
   <button class='btn btn-reject' type='submit'>拒绝</button>
  </form></div>"""
         elif c.decided_by:
+            ex = c.exec_result or {}
+            exec_line = (
+                f"<br>执行: 影响 {ex.get('affected_rows', '?')} 行 · "
+                f"{ex.get('duration_ms', '?')} ms · 由 {_esc(str(ex.get('executed_by') or '—'))} 触发"
+            ) if ex else ""
             actions = (
                 f"<div class='card'>决策: {_badge(st, _STATUS_COLOR)} by {_esc(c.decided_by)} "
-                f"@ {_esc(_fmt_ts(c.decided_at))}<br>备注: {_esc(c.decision_note) or '—'}</div>"
+                f"@ {_esc(_fmt_ts(c.decided_at))}<br>备注: {_esc(c.decision_note) or '—'}"
+                f"{exec_line}</div>"
             )
 
         body = f"""
@@ -1514,9 +1530,24 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         by = str(form.get("by") or "admin@localhost")
         note = str(form.get("note") or "")
         try:
-            service.approve_change(change_id, decided_by=by, note=note)
+            if form.get("exec"):
+                # 批准并立即执行：走与 agent 重提相同的核销路径（执行审批单里存的 SQL），
+                # 只是触发方是后台操作者。等待中的 agent 从 exec_result 收到结果。
+                await anyio.to_thread.run_sync(
+                    partial(service.approve_and_execute_change, change_id, decided_by=by, note=note)
+                )
+            else:
+                service.approve_change(change_id, decided_by=by, note=note)
         except ApprovalError:
             pass  # 已决策/过期，详情页会展示最新状态
+        except Exception as e:  # noqa: BLE001 - 执行失败要让审批人看到原因，不能静默重定向
+            return HTMLResponse(
+                _page("执行失败", f"<div class='card'><h3>审批单 #{change_id} 执行失败</h3>"
+                      f"<pre>{_esc(f'{type(e).__name__}: {e}')}</pre>"
+                      f"<p>审批单已被核销，如需重试请让 agent 重新提交。</p>"
+                      f"<p><a href='/admin/approvals/{change_id}'>← 返回审批单</a></p></div>"),
+                status_code=500,
+            )
         return RedirectResponse(url=f"/admin/approvals/{change_id}", status_code=303)
 
     @mcp.custom_route("/admin/approvals/{change_id:int}/reject", methods=["POST"])

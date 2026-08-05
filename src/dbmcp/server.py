@@ -17,9 +17,15 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
 from .agent_format import render_agent_result
-from .approvals import ApprovalError
+from .approvals import STATUS_APPROVED, STATUS_CONSUMED, STATUS_PENDING, ApprovalError
 from .health import ConnectionUnavailable
-from .service import CallerInfo, DbmService, QueryRejected
+from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
+
+# 等待人工审批：每 1s 复查一次审批单状态。用轮询而非进程内条件变量，是因为决策也可能
+# 来自别的进程（`dbm approve` CLI），条件变量覆盖不到；1s 延迟对「人点批准」无感。
+_WAIT_POLL_S = 1.0
+_WAIT_HEARTBEAT_S = 10.0   # 每 10s 报一次 progress，防客户端把长调用判超时
+_WAIT_MAX_S = 3600
 
 
 def _tool_error_from_unavailable(e: ConnectionUnavailable) -> ToolError:
@@ -98,6 +104,70 @@ async def _maybe_elicit_approval(
         return {"status": "rejected", "change_id": cid, "reason": str(e)}
 
 
+async def _wait_for_decision(
+    service: DbmService, change_id: int, timeout_s: float, ctx: Context | None
+) -> dict:
+    """等待审批单离开 pending（人在后台或 CLI 上决策），或等到超时。
+
+    异步等待：只在每次复查时借一下线程跑 SQLite 读，不长期占用 MCP 线程池名额，
+    也不阻塞事件循环——同一进程上的管理后台在此期间照常响应（人要在那里点批准）。
+    返回值同 change_status_payload；超时返回时 status 仍是 pending 且带 timed_out=True。
+    """
+    timeout_s = max(0.0, min(float(timeout_s), _WAIT_MAX_S))
+    start = anyio.current_time()
+    deadline = start + timeout_s
+    next_beat = start + _WAIT_HEARTBEAT_S
+    while True:
+        change = await anyio.to_thread.run_sync(service.get_change, change_id)
+        payload = change_status_payload(change)
+        if payload["status"] != STATUS_PENDING:
+            return payload
+        now = anyio.current_time()
+        if now >= deadline:
+            payload["timed_out"] = True
+            return payload
+        if ctx is not None and now >= next_beat:
+            next_beat = now + _WAIT_HEARTBEAT_S
+            try:
+                await ctx.report_progress(
+                    progress=now - start, total=timeout_s,
+                    message=f"等待人工审批（审批单 #{change_id}）",
+                )
+            except Exception:  # noqa: BLE001 - 客户端不支持进度通知，不影响等待
+                pass
+        await anyio.sleep(min(_WAIT_POLL_S, deadline - now))
+
+
+async def _wait_then_execute(
+    service: DbmService,
+    result: dict,
+    wait_seconds: float,
+    ctx: Context | None,
+    resubmit: Callable[[int], dict],
+) -> dict:
+    """审批单已生成 → 等人决策 → 批准即自动带 change_id 重提执行。
+
+    把「人回 CLI 说一句已批准、agent 再重提一次」这两步去掉：人在后台点完批准，
+    这里的等待即返回，随后自动核销执行。红线不变——执行的仍是审批单里存储的 SQL。
+    """
+    cid = result["change_id"]
+    decision = await _wait_for_decision(service, cid, wait_seconds, ctx)
+    status = decision["status"]
+    if status == STATUS_APPROVED:
+        return await anyio.to_thread.run_sync(resubmit, cid)
+    if status == STATUS_CONSUMED:
+        # 后台按了「批准并立即执行」：变更已落地，这里只把结果转达给 agent（再重提会被拒）
+        executed = decision.get("exec_result") or {}
+        return {"status": "executed", "change_id": cid, **executed,
+                "message": "已由审批人在管理后台批准并直接执行"}
+    if status == STATUS_PENDING:  # 等待超时，审批单仍有效
+        return {**result, "waited_seconds": wait_seconds,
+                "message": f"{result.get('message', '')} 已等待 {int(wait_seconds)}s 仍无人决策，"
+                           f"可再调 wait_for_change({cid}) 继续等待。"}
+    reason = decision.get("decision_note") or f"审批单当前状态为 {status}"
+    return {"status": "rejected", "change_id": cid, "reason": reason}
+
+
 def build_mcp(service: DbmService) -> FastMCP:
     from contextlib import asynccontextmanager
 
@@ -119,8 +189,11 @@ def build_mcp(service: DbmService) -> FastMCP:
             "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
             "不要读取或把文件内容放入模型上下文。"
             "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
-            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：首次提交会生成审批单并返回 change_id，"
-            "需人工在管理后台审批；批准后带 change_id 重提相同 SQL 才执行。"
+            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：首次提交会生成审批单，"
+            "并在服务端等待人工决策——把返回的 approval_url 贴给用户让其点开审批，"
+            "用户一批准本次调用就自动执行并返回 status=executed，不必让用户回来说「已批准」。"
+            "若等待超时返回 status=approval_required，提醒用户后调 wait_for_change(change_id) "
+            "继续等（别自己循环调 get_change_status 轮询）。"
             "跨源 JOIN、大结果集聚合、多步分析请用分析工作台（DuckDB 本地沙箱）："
             "analysis_import 把各源查询结果快照为工作区数据集（reader 拉取、带行数上限），"
             "analysis_sql 在工作区自由 JOIN/聚合/建 VIEW（不需审批），只把小结果带回上下文。"
@@ -236,15 +309,24 @@ def build_mcp(service: DbmService) -> FastMCP:
         change_id: Annotated[
             int | None, Field(description="已获批审批单号；批准后带上它重提相同 SQL 即可执行")
         ] = None,
+        wait_seconds: Annotated[
+            int | None,
+            Field(description="首次提交生成审批单后，服务端等待人工决策的秒数；"
+                              "0=不等待立即返回审批单号，省略=用系统设置的默认值"),
+        ] = None,
         ctx: Context | None = None,
     ) -> dict:
         """执行数据变更操作（需人工授权）。
 
-        首次提交（不带 change_id）：系统评估风险并生成审批单。若当前客户端支持会话内
-        确认（elicitation）且连接策略允许，会直接弹出确认，用户批准即执行；
-        否则返回 status=approval_required 与 change_id，请把审批单号告知用户在管理后台审批，
-        批准后带上 change_id 重新提交**完全相同的 SQL**（返回 status=executed）。
-        若返回 status=rejected，reason 会说明原因（未审批/已过期/被驳回/SQL 不一致），据此调整。
+        首次提交（不带 change_id）：系统评估风险并生成审批单，并**在服务端等待人工决策**
+        （默认等待时长见系统设置，可用 wait_seconds 覆盖）。等待期间请把返回的 approval_url
+        贴给用户，让其点开审批页处理；用户一批准，本次调用就会自动执行并返回
+        status=executed，无需用户回到会话里说「已批准」，也无需你再重提一次。
+        若客户端支持会话内确认（elicitation）且连接策略允许，则直接弹确认框、批准即执行。
+
+        返回 status=approval_required 表示等待超时而审批单仍挂着：把 approval_url 再提醒
+        用户一次，然后调 wait_for_change(change_id) 继续等即可（审批单 60 分钟内有效）。
+        返回 status=rejected 时 reason 说明原因（被驳回/已过期/SQL 不一致），据此调整。
         只读语句会被直接执行。
         """
         caller = _caller_from_ctx(ctx)
@@ -260,6 +342,11 @@ def build_mcp(service: DbmService) -> FastMCP:
                 service, ctx, project, connection, sql, caller, result,
                 resubmit=lambda cid: run(change_id=cid),
             )
+            wait_s = service.approval_wait_seconds() if wait_seconds is None else wait_seconds
+            if result.get("status") == "approval_required" and wait_s > 0:
+                result = await _wait_then_execute(
+                    service, result, wait_s, ctx, resubmit=lambda cid: run(change_id=cid),
+                )
         return result
 
     # Redis 有意不暴露为 MCP 工具：agent 碰不到 Redis。Redis 仅供人通过已登录的
@@ -267,21 +354,38 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def get_change_status(change_id: int) -> dict:
-        """查询审批单状态（pending / approved / rejected / consumed / expired）及风险报告。"""
+        """查询审批单当前状态（pending / approved / rejected / consumed / expired），立即返回。
+
+        只想「等到有结果为止」用 wait_for_change，别自己写循环反复调本工具。
+        """
         try:
             change = service.get_change(change_id)
         except Exception as e:
             raise ToolError(str(e)) from e
-        return {
-            "change_id": change.id,
-            "status": change.effective_status(),
-            "risk_level": change.risk_level,
-            "project": change.project,
-            "connection": change.connection,
-            "decided_by": change.decided_by,
-            "decision_note": change.decision_note,
-            "expires_at": change.expires_at,
-        }
+        return change_status_payload(change)
+
+    @mcp.tool
+    async def wait_for_change(
+        change_id: int,
+        timeout_seconds: Annotated[
+            int | None, Field(description="最长等待秒数，省略则用系统设置的默认值")
+        ] = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """等待审批单被人决策，一直阻塞到有结果或超时（不要自己轮询 get_change_status）。
+
+        用在 execute 的等待超时之后：把 approval_url 再提醒用户一次，然后调本工具继续等。
+        返回 status=approved 表示可以带 change_id 重提相同 SQL 执行；
+        status=consumed 表示审批人在后台点了「批准并立即执行」，变更已落地（exec_result 里有
+        影响行数），**不要再重提**；status=rejected/expired 见 decision_note；
+        status=pending 且 timed_out=true 表示本次等待超时、审批单仍有效，可再调一次继续等。
+        """
+        wait_s = service.approval_wait_seconds() if timeout_seconds is None else timeout_seconds
+        try:
+            service.get_change(change_id)  # 先确认审批单存在，不存在直接报错而不是空等
+        except Exception as e:
+            raise ToolError(str(e)) from e
+        return await _wait_for_decision(service, change_id, wait_s, ctx)
 
     @mcp.tool
     def list_databases(

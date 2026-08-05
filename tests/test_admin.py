@@ -296,6 +296,38 @@ def test_detail_and_approve_flow(client):
     assert out["status"] == "executed"
 
 
+def test_approve_and_execute_button_lands_the_change(client):
+    """后台「批准并立即执行」：人点一次就落地，agent 只需从等待中收结果。"""
+    tc, svc = client
+    cid = svc.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", CALLER)["change_id"]
+
+    # 详情页两个按钮都在
+    detail = tc.get(f"/admin/approvals/{cid}")
+    assert "批准并立即执行" in detail.text and "仅批准" in detail.text
+
+    resp = tc.post(f"/admin/approvals/{cid}/approve",
+                   data={"by": "ops@x", "note": "ok", "exec": "1"}, follow_redirects=False)
+    assert resp.status_code == 303
+    change = svc.get_change(cid)
+    assert change.status == "consumed"                    # 已核销，agent 不必也不能再重提
+    assert change.exec_result["affected_rows"] == 1
+    with sqlite3.connect(svc.config.get_connection("demo", "main").database) as conn:
+        assert conn.execute("SELECT active FROM users WHERE id = 1").fetchone()[0] == 0
+
+    # 决策卡片回显执行结果
+    assert "影响 1 行" in tc.get(f"/admin/approvals/{cid}").text
+
+
+def test_plain_approve_leaves_execution_to_agent(client):
+    """「仅批准」按钮（不带 exec）保持原语义：不执行，等 agent 重提。"""
+    tc, svc = client
+    cid = svc.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", CALLER)["change_id"]
+    tc.post(f"/admin/approvals/{cid}/approve", data={"by": "ops@x", "note": "ok"})
+    assert svc.get_change(cid).status == "approved"
+    with sqlite3.connect(svc.config.get_connection("demo", "main").database) as conn:
+        assert conn.execute("SELECT active FROM users WHERE id = 1").fetchone()[0] == 1
+
+
 def test_reject_flow_returns_reason_to_agent(client):
     tc, svc = client
     r = svc.execute("demo", "main", "DELETE FROM users WHERE id = 2", CALLER)
