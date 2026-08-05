@@ -106,9 +106,10 @@ flowchart TD
     C -->|"LOW 只读 / 策略允许的低风险"| RUN["直接执行，返回结果"]
     C -->|"需要授权"| G{"客户端支持 elicitation<br/>且策略允许？"}
     G -->|"是"| ELI["服务端发起确认<br/>人确认即执行（快捷通道）"]
-    G -->|"否"| DENY["明确拒绝，返回结构化信息<br/>status: approval_required · change_id · risk_report<br/>「已生成审批单，请到后台审批，批准后带 change_id 重提」"]
-    DENY --> REVIEW["人在管理后台查看审批单<br/>完整 SQL / 目标库 / 环境 / 风险报告<br/>（影响表 · 预估行数 · 性能 · 危害等级）"]
-    REVIEW -->|"批准"| RESUB["agent 带 change_id 重新提交<br/>校验通过 → 执行并核销"]
+    G -->|"否"| DENY["生成审批单，返回结构化信息<br/>status · change_id · approval_url · risk_report<br/>并在服务端等待人工决策（默认 120s）"]
+    DENY --> REVIEW["人点 approval_url 进管理后台查看审批单<br/>完整 SQL / 目标库 / 环境 / 风险报告<br/>（影响表 · 预估行数 · 性能 · 危害等级）"]
+    REVIEW -->|"批准"| RESUB["等待中的调用自动带 change_id 重提<br/>校验通过 → 执行并核销"]
+    REVIEW -->|"批准并立即执行"| DIRECT["后台当场核销执行<br/>结果回填审批单，等待中的 agent 直接收到"]
     REVIEW -->|"拒绝（附理由）"| REJ["返回人的拒绝理由<br/>agent 调整 SQL 后重新提交"]
     REJ -.->|"生成新审批单"| E
 ```
@@ -117,7 +118,13 @@ flowchart TD
 
 - **执行的永远是审批单里存储的 SQL**。agent 重提的文本只用于校验：规范化指纹与审批单不一致 → 拒绝并说明"与已批准的 SQL 不一致"。保证"人批的"和"实际执行的"是同一条语句，杜绝批准后偷换内容（无论 agent 有意还是无意改写）。
 - 放行匹配优先凭 `change_id`；重提未带 id 时，退回 **SQL 规范化指纹 + connection** 兜底匹配。
-- 审批单**一次性**核销；TTL 默认 30 分钟，过期作废。
+- 审批单**一次性**核销；TTL 默认 60 分钟，过期作废。
+- **等待而非来回喊话**：审批单生成后服务端就地等人决策（`approval_wait_seconds`，默认 120s；
+  agent 可用 `wait_seconds` 覆盖、0 = 立即返回），批准即自动重提执行——人不必回会话里说
+  「已批准」，agent 也不必二次发起。等待是异步 1s 轮询（决策可能来自别的进程），
+  期间管理后台照常响应；超时返回 `approval_required`，agent 用 `wait_for_change` 续等，审批单不失效。
+- 后台「批准并立即执行」与 agent 重提走**同一条核销执行路径**（执行审批单里存的 SQL、
+  原子核销、照记审计），只是触发方不同；执行结果回填 `exec_result`，等待中的 agent 据此得知已落地。
 - `prod` 环境强制走审批（elicitation 快捷通道是否对 prod 开放，策略可配，默认关闭）。
 - 写操作执行时切换 **writer 账号**；日常查询始终走只读账号（数据库层第二道防线）。
 - 通知遵循"安静即正常"：不主动推送任何通知，审批挂起由 agent 在会话中告知用户。
@@ -151,8 +158,9 @@ flowchart TD
 |---|---|
 | `list_projects` / `list_connections` | 浏览可用连接（不含密钥） |
 | `query(project, connection, sql)` | 强制只读：非只读语句直接报错，不进审批 |
-| `execute(project, connection, sql, reason?, change_id?)` | 统一入口，走完整审计+授权流程；批准后带 change_id 重提放行（见第六节） |
-| `get_change_status(change_id)` | 查询审批单状态 |
+| `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 统一入口，走完整审计+授权流程；生成审批单后等待人工决策，批准即自动执行（见第六节） |
+| `wait_for_change(change_id, timeout_seconds?)` | 阻塞等待审批单被决策（超时后续等用；别自己轮询） |
+| `get_change_status(change_id)` | 查询审批单状态（立即返回） |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
 （Redis **不暴露为 MCP 工具**，仅供人通过 /admin/redis 管理后台操作）|
 | `test_connection(project, connection)` | 连通性检查（含隧道建立） |

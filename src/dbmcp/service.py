@@ -33,6 +33,7 @@ HOUSEKEEPING_INTERVAL_S = 60
 DEFAULT_RETENTION_DAYS = 30
 ADMIN_PAGE_SIZE = 100  # 查询台每页行数（上限受连接 max_rows 约束）
 DEFAULT_AGENT_MAX_RESULT_CHARS = 40000  # agent 结果字符预算的最终兜底（settings 未启用时）
+DEFAULT_APPROVAL_WAIT_S = 120  # execute 等待人工审批的默认秒数（settings 未启用时）
 
 
 class QueryRejected(Exception):
@@ -207,6 +208,23 @@ def _describe_columns(store, workspace: str, name: str) -> list[dict]:
 class CallerInfo:
     agent: str = "unknown"
     session_id: str = ""
+
+
+def change_status_payload(change) -> dict:
+    """审批单状态的统一回传结构（get_change_status / wait_for_change / execute 等待共用）。"""
+    payload = {
+        "change_id": change.id,
+        "status": change.effective_status(),
+        "risk_level": change.risk_level,
+        "project": change.project,
+        "connection": change.connection,
+        "decided_by": change.decided_by,
+        "decision_note": change.decision_note,
+        "expires_at": change.expires_at,
+    }
+    if change.exec_result:
+        payload["exec_result"] = change.exec_result
+    return payload
 
 
 class DbmService:
@@ -1283,31 +1301,35 @@ class DbmService:
         rec.status = "rejected"
         rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {report.level}）"
         self.store.record(rec)
+        # 审批页直达链接：既随通知下发，也回给 agent（agent 把它贴进会话，人点一下就到
+        # 审批页，省掉「自己去后台翻审批列表」这一步）
+        from .notify import approval_deeplink  # noqa: PLC0415
+        base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
+        approval_url = approval_deeplink(base_url, change.id)
         # 需要人为介入 → 主动发通知（安静即正常：不通知的话可能长时间没人看到）
         # meta.deeplink 让各渠道适配跳转：Bark→url 字段、企微→markdown 链接、
         # 飞书→post 富文本 a 节点、macOS→body 附 URL 文本、站内 inbox→前端点击
         try:
-            from .notify import approval_deeplink  # noqa: PLC0415
             sql_preview = " ".join(sql.split())[:120]
-            base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
             self.notifier.send(
                 title=f"新审批单 #{change.id} · {project}/{connection}",
                 body=f"风险 {report.level} · agent={caller.agent or 'unknown'}\nSQL: {sql_preview}",
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": project, "connection": connection,
                       "risk_level": report.level,
-                      "deeplink": approval_deeplink(base_url, change.id)},
+                      "deeplink": approval_url},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify approval_created failed")
         return {
             "status": "approval_required",
             "change_id": change.id,
+            "approval_url": approval_url,
             "risk": report_dict,
             "message": (
                 f"该操作被评估为需人工授权（风险等级 {report.level}）。"
-                f"已生成审批单 #{change.id}，请通知用户在管理后台审批；"
-                f"批准后带上 change_id={change.id} 重新提交相同 SQL 即可执行。"
+                f"已生成审批单 #{change.id}，请把审批链接 {approval_url} 给用户，"
+                f"并用 wait_for_change({change.id}) 等待人工决策（批准后会自动执行）。"
                 f"审批单 60 分钟内有效。"
             ),
         }
@@ -1356,12 +1378,34 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
-        return {
+        payload = {
             "status": "executed",
             "change_id": change_id,
             "affected_rows": result.row_count,
             "duration_ms": result.duration_ms,
+            "executed_by": caller.agent,
         }
+        # 回填到审批单：等待中的 agent 与后台详情页据此知道「已落地、影响多少行」
+        self.approvals.record_execution(change_id, payload)
+        return payload
+
+    def approve_and_execute_change(
+        self, change_id: int, decided_by: str, note: str = ""
+    ) -> dict:
+        """后台「批准并立即执行」：批准后当场核销执行，人点一次即落地。
+
+        与 agent 带 change_id 重提走的是同一条 `_execute_approved` 路径——执行的仍是审批单
+        里存储的 SQL、仍是原子核销、审计照记，只是触发方从 agent 换成后台操作者。
+        等待中的 agent 会从 exec_result 收到执行结果，不必再重提（重提会因已核销被拒）。
+        """
+        if self.approvals is None:
+            raise QueryRejected("审批子系统未启用")
+        change = self.approvals.approve(change_id, decided_by, note)
+        cfg = self.config.get_connection(change.project, change.connection)
+        caller = CallerInfo(agent="admin-ui", session_id=f"approve:{decided_by}")
+        return self._execute_approved(
+            change.project, change.connection, cfg, change.sql, change_id, caller
+        )
 
     def _try_explain(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
@@ -1435,6 +1479,11 @@ class DbmService:
 
     def _setting(self, key: str):
         return self.get_settings().get(key)
+
+    def approval_wait_seconds(self) -> int:
+        """execute 首提被拒后，服务端默认等待人工决策的秒数（0 = 不等待）。"""
+        value = self._setting("approval_wait_seconds")
+        return DEFAULT_APPROVAL_WAIT_S if value is None else int(value)
 
     def agent_result_budget(self, project: str, connection: str) -> int:
         """解析给 agent 的结果字符预算：连接级 Policy 优先，否则全局设置兜底。"""

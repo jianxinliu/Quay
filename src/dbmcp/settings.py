@@ -37,6 +37,11 @@ DEFAULTS: dict[str, object] = {
     # ——并发/连接池（进程级；改后热生效）
     "mcp_max_concurrency": 40,   # 同进程最多并行的阻塞 DB 调用数（anyio 线程池 total_tokens）
     "engine_pool_size": 15,      # 单个引擎（连接×角色×库）的最大连接数（pool_size + max_overflow）
+    # ——审批
+    # agent 提交写操作后，服务端等待人工决策的默认秒数（0 = 不等待，立即返回审批单号）。
+    # 等待期间人在后台点批准/拒绝，agent 无需人回 CLI 说一句即可继续。
+    # 若 MCP 客户端的单次工具调用超时更短，把这里调小，agent 会分多次续等。
+    "approval_wait_seconds": 120,
     # ——Agent 输出
     "agent_max_result_chars": 40000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
     # ——AI 辅助写 SQL（查询台「✨ AI」按钮；产物只回填编辑器/画布、不执行）
@@ -74,6 +79,7 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
     "redis_scan_count": (50, 10_000),
     "redis_min_dbs": (1, 256),
     "agent_max_result_chars": (2000, 500_000),
+    "approval_wait_seconds": (0, 3600),
     "mcp_max_concurrency": (10, 500),
     "engine_pool_size": (5, 100),
     "ai_timeout_s": (10, 600),

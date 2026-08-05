@@ -99,6 +99,7 @@ async def test_prod_environment_skips_elicitation(tmp_path):
             r = await c.call_tool("execute", {
                 "project": "demo", "connection": "main",
                 "sql": "UPDATE users SET active = 0 WHERE id = 1",
+                "wait_seconds": 0,  # 不等人决策，直接断言首提结果
             })
             # 即使客户端支持 elicitation，prod 也走审批单流程
             assert r.data["status"] == "approval_required"
@@ -116,6 +117,7 @@ async def test_client_without_elicitation_falls_back(tmp_path):
             r = await c.call_tool("execute", {
                 "project": "demo", "connection": "main",
                 "sql": "UPDATE users SET active = 0 WHERE id = 1",
+                "wait_seconds": 0,
             })
             assert r.data["status"] == "approval_required"  # 回退审批单
     finally:
