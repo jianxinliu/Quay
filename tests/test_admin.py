@@ -296,6 +296,33 @@ def test_detail_and_approve_flow(client):
     assert out["status"] == "executed"
 
 
+def test_detail_renders_explain_with_column_headers(client):
+    """执行计划要带表头：只有一堆值，审批人不知道每列是什么。"""
+    tc, svc = client
+    cid = svc.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", CALLER)["change_id"]
+    detail = tc.get(f"/admin/approvals/{cid}").text
+    assert "执行计划（EXPLAIN）" in detail
+    assert "<th>opcode</th>" in detail          # sqlite EXPLAIN 的列名
+    assert "<th>addr</th>" in detail
+
+
+def test_explain_html_falls_back_to_pre_for_legacy_text_plan():
+    """老审批单里存的是无列名的纯文本计划，仍原样展示（不误把首行当表头）。"""
+    from dbmcp.admin import _explain_html
+    out = _explain_html({"explain": "1 | SIMPLE | users | ALL"})
+    assert "<pre>" in out and "SIMPLE | users" in out
+    assert "<th>" not in out
+
+
+def test_explain_html_translates_no_info_plan():
+    """MySQL 对点查更新的无信息量输出转成人话（新旧两种格式都认）。"""
+    from dbmcp.admin import _explain_html
+    msg = "Plan not executable by iterator executor"
+    for risk in ({"explain": msg},
+                 {"explain": {"columns": ["EXPLAIN"], "rows": [[msg]]}}):
+        assert "优化器无需生成可展示的查询计划" in _explain_html(risk)
+
+
 def test_approve_and_execute_button_lands_the_change(client):
     """后台「批准并立即执行」：人点一次就落地，agent 只需从等待中收结果。"""
     tc, svc = client

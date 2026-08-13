@@ -639,6 +639,10 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   position: sticky; left: 0; background: var(--dg-bg); border-right: 1px solid var(--dg-border);
 }
 .dg-rt td.gut:hover { color: var(--dg-text); background: var(--dg-hover); }
+/* 当前行：点任意单元格/行号高亮整行（列多时横向读同一条记录不串行）；比 rsel 弱一档 */
+.dg-rt tr.rcur td { background: color-mix(in srgb, var(--dg-accent) 14%, transparent); }
+/* 行号列是 sticky 的，底色必须不透明，否则横向滚动时下层内容会透出来 */
+.dg-rt tr.rcur td.gut { background: color-mix(in srgb, var(--dg-accent) 14%, var(--dg-bg)); color: var(--dg-text); }
 .dg-rt tr.rsel td { background: var(--dg-accent-soft); }
 .dg-rt tr.rsel td.gut { color: #cfe0ff; }
 .dg-rt td.hit { outline: 1px solid var(--dg-amber); outline-offset: -1px; }

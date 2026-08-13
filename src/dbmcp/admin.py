@@ -299,15 +299,37 @@ def _impact_html(risk: dict) -> str:
     )
 
 
+# MySQL 对单行主键更新等语句的无信息量输出，转成人话
+_PLAN_NO_INFO = "not executable by iterator executor"
+_PLAN_NO_INFO_HTML = ('<div class="sec-title">执行计划</div>'
+                      '<div class="muted">该语句为点查/单行定位更新，优化器无需生成可展示的查询计划。</div>')
+
+
 def _explain_html(risk: dict) -> str:
     plan = risk.get("explain")
     if not plan:
         return ""
-    # MySQL 对单行主键更新等语句的无信息量输出，转成人话
-    if "not executable by iterator executor" in plan:
-        return ('<div class="sec-title">执行计划</div>'
-                '<div class="muted">该语句为点查/单行定位更新，优化器无需生成可展示的查询计划。</div>')
-    return f'<div class="sec-title">执行计划（EXPLAIN）</div><pre>{_esc(plan)}</pre>'
+    # 老审批单存的是 " | " 拼接的纯文本计划（没有列名），原样展示
+    if isinstance(plan, str):
+        if _PLAN_NO_INFO in plan:
+            return _PLAN_NO_INFO_HTML
+        return f'<div class="sec-title">执行计划（EXPLAIN）</div><pre>{_esc(plan)}</pre>'
+    columns, rows = plan.get("columns") or [], plan.get("rows") or []
+    if not rows:
+        return ""
+    if any(_PLAN_NO_INFO in str(v) for row in rows for v in row):
+        return _PLAN_NO_INFO_HTML
+    head = "".join(f"<th>{_esc(c)}</th>" for c in columns)
+    body = "".join(
+        "<tr>" + "".join(
+            '<td><span class="muted">NULL</span></td>' if v is None else f"<td>{_esc(v)}</td>"
+            for v in row
+        ) + "</tr>"
+        for row in rows
+    )
+    return ('<div class="sec-title">执行计划（EXPLAIN）</div>'
+            f'<div class="plan-wrap"><table class="plan-tbl">'
+            f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>")
 
 
 def _keyring_available() -> bool:
