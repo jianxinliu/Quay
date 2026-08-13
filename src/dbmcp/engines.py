@@ -617,15 +617,38 @@ def insert_rows(engine: SAEngine, table: str, columns: list[str],
                        duration_ms=duration_ms)
 
 
-def explain(engine: SAEngine, sql: str, engine_kind: str) -> str | None:
-    """取执行计划文本，供风险评估参考。失败返回 None（不阻断主流程）。"""
-    prefix = "EXPLAIN "  # 不带 ANALYZE，避免真实执行写语句
+PLAN_MAX_ROWS = 50           # 计划行数上限：审批人只看概览，超长计划不必全存
+PLAN_MAX_CELL_CHARS = 500    # 单格字符上限（MySQL 的 Extra、PG 的计划行可能很长）
+
+# MySQL 9 起 explain_format 默认 TREE，而 TREE 解释不了 DML（只回一句
+# "not executable by iterator executor"）；显式要传统表格式才有 type/key/rows 可看。
+_EXPLAIN_PREFIX = {"mysql": "EXPLAIN FORMAT=TRADITIONAL "}
+
+
+def explain(engine: SAEngine, sql: str, engine_kind: str) -> dict | None:
+    """取执行计划，返回 {"columns": [...], "rows": [[...]]}；失败返回 None（不阻断主流程）。
+
+    带列名回传是为了让审批人看得懂每列是什么——MySQL EXPLAIN 有十余列，
+    只给一行值等于没给。
+    """
+    prefix = _EXPLAIN_PREFIX.get(engine_kind, "EXPLAIN ")  # 不带 ANALYZE，避免真实执行写语句
     try:
         with engine.connect() as conn:
-            rows = conn.execute(text(prefix + sql)).fetchall()
-        return "\n".join(" | ".join(str(v) for v in row) for row in rows)
+            result = conn.execute(text(prefix + sql))
+            columns = [str(c) for c in result.keys()]
+            rows = result.fetchmany(PLAN_MAX_ROWS)
     except Exception:
         return None
+    if not rows:
+        return None
+    return {"columns": columns, "rows": [[_plan_cell(v) for v in row] for row in rows]}
+
+
+def _plan_cell(value: object) -> str | None:
+    if value is None:
+        return None  # 保留 NULL 语义（MySQL 的 key/ref 常为 NULL），由展示层渲染
+    s = str(value)
+    return s if len(s) <= PLAN_MAX_CELL_CHARS else s[:PLAN_MAX_CELL_CHARS] + "…"
 
 
 # 列库/schema 时过滤掉系统库，减少噪音

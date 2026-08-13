@@ -632,6 +632,7 @@
                     wfName: opts.wfName || "", wfSteps: null, vsel: null,
                     view: "table", chart: null,
                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
+                    curRow: -1,   // 当前行（点任意单元格/行号即高亮整行，便于横向读长行）
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
                     edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
@@ -1693,7 +1694,8 @@
           else if (sqlOverride == null && !isPage) { t.execMarks = [{ line: this.execLineFor(), state: "" }]; t.execIdx = 0; }
         }
         this.setExecGlyph(t, "run");
-        t.rowSel = {}; t.lastSelRi = -1; t.resQ = null; t.cellSel = null;  // 重查后行号会变，行/单元格选择/搜索作废
+        // 重查后行号会变，行/单元格选择、当前行、搜索一并作废
+        t.rowSel = {}; t.lastSelRi = -1; t.resQ = null; t.cellSel = null; t.curRow = -1;
         if (page === 0) t.result = null;
         // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询。
         // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
@@ -2448,6 +2450,7 @@
         if (!t.rowSel) t.rowSel = {};
         // 行/单元格选中互斥，开始选行前清单元格选
         t.cellSel = null;
+        t.curRow = ri;
         if (ev.shiftKey && t.lastSelRi >= 0) {
           var a = Math.min(t.lastSelRi, ri), b = Math.max(t.lastSelRi, ri);
           for (var i = a; i <= b; i++) t.rowSel[i] = true;
@@ -2702,7 +2705,9 @@
       // ---------- Value Editor（DataGrip 式侧栏编辑面板，选中单元格展开） ----------
       cellClick: function (ri, ci) {
         var t = this.activeTab;
-        if (!t || !t.result || (t.type !== "data" && t.type !== "query")) return;
+        if (!t || !t.result) return;
+        t.curRow = ri;   // 点任意单元格即高亮整行（列多时便于横向对齐读同一条记录）
+        if (t.type !== "data" && t.type !== "query") return;
         t.vsel = { ri: ri, ci: ci };
         var v = t.result.rows[ri][ci], key = ri + ":" + ci;
         var staged = t.type === "data" && t.edits && key in t.edits;   // 面板显示已暂存的改动值（若有）
@@ -2996,7 +3001,7 @@
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null, vsel: null,
                      view: t.view || "table", chart: t.chart || null,
-                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
+                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null, curRow: -1,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
                      submit: null, submitting: false, refreshWarn: false,
                      colDisplay: t.colDisplay || {},
@@ -3854,7 +3859,7 @@
               </td>
             </tr>
             <tr v-for="(row,ri) in activeTab.result.rows" :key="ri"
-                :class="{rsel: activeTab.rowSel && activeTab.rowSel[ri], delrow: isDelRow(ri)}">
+                :class="{rcur: activeTab.curRow===ri, rsel: activeTab.rowSel && activeTab.rowSel[ri], delrow: isDelRow(ri)}">
               <td class="gut" @mousedown.prevent @click.stop="rowClick(ri,$event)"
                   :title="isDelRow(ri) ? '已标记删除（提交时执行）' : '点击选择行'">{{ isDelRow(ri) ? '␡' : ri+1 }}</td>
               <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)" :data-cell="ri+':'+ci"

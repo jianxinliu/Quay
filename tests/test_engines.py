@@ -9,7 +9,7 @@ import decimal
 
 import pytest
 
-from dbmcp import __version__
+from dbmcp import __version__, engines
 from dbmcp.config import ConnectionConfig, Policy
 from dbmcp.engines import (
     DB_CLIENT_NAME,
@@ -221,6 +221,54 @@ def test_make_canceller_sqlite_interrupts():
     cancel = make_canceller(engine, _sa_conn_with(raw))
     cancel()
     assert interrupted == [True]
+
+
+def _sqlite_engine() -> object:
+    import sqlalchemy as sa
+    engine = sa.create_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.execute(sa.text("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)"))
+    return engine
+
+
+def test_explain_returns_columns_with_rows():
+    """执行计划必须带列名——审批人看一堆裸值不知道每列是什么。"""
+    plan = engines.explain(_sqlite_engine(), "UPDATE t SET name = 'b' WHERE id = 1", "sqlite")
+    assert plan["columns"][:2] == ["addr", "opcode"]
+    assert plan["rows"]
+    assert all(len(row) == len(plan["columns"]) for row in plan["rows"])
+
+
+def test_explain_mysql_forces_traditional_format():
+    """MySQL 9 默认 TREE 格式解释不了 DML，必须显式要传统表格式（真实 MySQL 9.5 上验证过）。"""
+    captured = []
+
+    class _Conn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt):
+            captured.append(str(stmt))
+            raise RuntimeError("stop here")  # 只关心发出去的语句
+
+    engine = type("E", (), {"connect": lambda self: _Conn()})()
+    assert engines.explain(engine, "UPDATE t SET a = 1", "mysql") is None
+    assert captured == ["EXPLAIN FORMAT=TRADITIONAL UPDATE t SET a = 1"]
+    captured.clear()
+    engines.explain(engine, "UPDATE t SET a = 1", "postgres")
+    assert captured == ["EXPLAIN UPDATE t SET a = 1"]
+
+
+def test_explain_failure_returns_none():
+    """取计划失败不阻断主流程（审批单照样生成）。"""
+    assert engines.explain(_sqlite_engine(), "NOT SQL AT ALL", "sqlite") is None
+
+
+def test_explain_caps_rows_and_cell_chars(monkeypatch):
+    monkeypatch.setattr(engines, "PLAN_MAX_ROWS", 2)
+    monkeypatch.setattr(engines, "PLAN_MAX_CELL_CHARS", 2)
+    plan = engines.explain(_sqlite_engine(), "UPDATE t SET name = 'b' WHERE id = 1", "sqlite")
+    assert len(plan["rows"]) == 2
+    assert all(v is None or len(v) <= 3 for row in plan["rows"] for v in row)  # 2 + 省略号
 
 
 def test_make_canceller_missing_id_is_noop():

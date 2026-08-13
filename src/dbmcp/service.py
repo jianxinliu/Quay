@@ -1410,11 +1410,12 @@ class DbmService:
     def _try_explain(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
         schema: str | None = None,
-    ) -> str | None:
+    ) -> dict | None:
         """对写语句取执行计划（不带 ANALYZE，不执行）供审批人参考。
 
+        返回 {"columns": [...], "rows": [[...]]}（带列名，审批页据此渲染表头）。
         reader 会话可能因只读事务拒绝 EXPLAIN DML（PG 会），失败则退回 writer；
-        全部失败返回 None，不阻断审批单生成。计划文本截断到 4000 字符。
+        全部失败返回 None，不阻断审批单生成。行数/单格长度上限见 engines.PLAN_MAX_*。
         """
         for role in ("reader", "writer"):
             if role == "writer" and cfg.writer is None:
@@ -1425,7 +1426,7 @@ class DbmService:
                 continue
             plan = engines.explain(engine, sql, cfg.engine)
             if plan:
-                return plan[:4000]
+                return plan
         return None
 
     def _meta_provider(self, project: str, connection: str, cfg: ConnectionConfig):

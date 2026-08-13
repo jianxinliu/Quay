@@ -47,6 +47,11 @@ td code{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border
 /* 代码 / 计划 */
 pre{background:var(--ink);color:#e2e8f0;padding:14px 16px;border-radius:10px;overflow-x:auto;
   font-size:12.5px;line-height:1.55;border:1px solid #262d38}
+/* EXPLAIN 计划表：列多值短，等宽紧凑 + 横向滚动；列名保留原始大小写（MySQL 的 select_type 等） */
+.plan-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+.plan-tbl{width:auto;min-width:100%;font-family:var(--mono);font-size:12px}
+.plan-tbl th,.plan-tbl td{padding:7px 11px;text-transform:none;white-space:pre-wrap;word-break:break-word}
+.plan-tbl th{font-size:11px;background:#fafbfc}
 /* 按钮 */
 .btn{display:inline-block;padding:9px 17px;border-radius:8px;border:1px solid transparent;
   font-size:13.5px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .12s,transform .04s;

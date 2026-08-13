@@ -127,8 +127,10 @@ class TestExplainInReport:
         r = service.execute("demo", "main", "DELETE FROM users WHERE id = 1", CALLER)
         assert r["status"] == "approval_required"
         assert "explain" in r["risk"], "风险报告应包含执行计划"
-        # sqlite 的 EXPLAIN 输出是 opcode 表
-        assert "Opcode" in r["risk"]["explain"] or "|" in r["risk"]["explain"]
+        # 计划带列名（审批页据此渲染表头）；sqlite 的 EXPLAIN 输出是 opcode 表
+        plan = r["risk"]["explain"]
+        assert plan["columns"][:2] == ["addr", "opcode"]
+        assert plan["rows"]
         # 落库的审批单同样带 explain
         assert "explain" in service.get_change(r["change_id"]).risk_report
 
