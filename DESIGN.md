@@ -17,7 +17,7 @@
 
 ```mermaid
 flowchart TB
-    A["Agent A / B / C …（Claude Code 等 MCP 客户端）"]
+    A["Agent（Claude Code / Codex / Cursor / DeepSeek Harness / …）"]
     A -->|"MCP streamable HTTP（stdio 作兼容模式）"| Q
 
     subgraph Q["Quay 服务（本地进程 · launchd 常驻）"]
@@ -28,7 +28,7 @@ flowchart TB
         L3["③ 审批中心：审批单生命周期（拒绝—重提模式）"]
         L4["④ 元数据缓存：schema / 索引 / 表行数统计"]
         L5["⑤ 连接管理：连接池 · SSH 多跳隧道生命周期"]
-        L6["⑥ 驱动适配：MySQL / PostgreSQL / Redis"]
+        L6["⑥ 驱动适配：MySQL / PostgreSQL / SQLite / ClickHouse / Redis"]
         S[("存储 SQLite<br/>审计记录 / 审批单 / 元数据缓存")]
         F --> L1 --> L2 --> L3 --> L4 --> L5 --> L6
         L2 -.-> S
@@ -156,15 +156,19 @@ flowchart TD
 
 | 工具 | 说明 |
 |---|---|
+| `begin_session(title, note?)` | 声明会话名字/背景，审计按会话归类 |
 | `list_projects` / `list_connections` | 浏览可用连接（不含密钥） |
+| `list_databases` | 列库 / schema |
 | `query(project, connection, sql)` | 强制只读：非只读语句直接报错，不进审批 |
+| `export_table(...)` | 按表导出文件，返回短期下载链接 |
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 统一入口，走完整审计+授权流程；生成审批单后等待人工决策，批准即自动执行（见第六节） |
 | `wait_for_change(change_id, timeout_seconds?)` | 阻塞等待审批单被决策（超时后续等用；别自己轮询） |
 | `get_change_status(change_id)` | 查询审批单状态（立即返回） |
 | `list_tables` / `describe_table` / `sample_rows` | schema 探索 |
-（Redis **不暴露为 MCP 工具**，仅供人通过 /admin/redis 管理后台操作）|
 | `test_connection(project, connection)` | 连通性检查（含隧道建立） |
-| `analysis_workspaces` / `analysis_import` / `analysis_sql` / `run_workflow` | 分析工作台（见第十二节与 ANALYSIS.md） |
+| `analysis_workspaces` / `analysis_import` / `analysis_sql` / `run_workflow` / `save_workflow` | 分析工作台（见第十二节与 ANALYSIS.md） |
+
+（Redis **不暴露为 MCP 工具**，仅供人通过 /admin/redis 管理后台操作）
 
 resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 
@@ -176,7 +180,7 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 - macOS 常驻：`scripts/install-launchd.sh` 装为 launchd LaunchAgent，开机自启 + 崩溃自动拉起（约 10s 重启节流）
 - 密钥：`~/.config/db-manage-mcp/env`（600）注入 `env://` 引用值 + `DBM_ADMIN_TOKEN`；页面新建连接的密码进系统 keyring
 - SSH：直接读 `~/.ssh` 与真实 key 路径（本地进程,无容器路径映射问题）
-- stdio 模式：`uv run dbm serve --stdio`，供单 agent 直连
+- stdio 模式：`uv run dbm serve --stdio`，仅当没有常驻 HTTP 实例、且客户端只认 stdio 时用；多个 agent 应接同一个 `http://127.0.0.1:8100/mcp`（接入配方见 README「接入 Agent」）
 
 ## 十一、相关工作与现成工具对比（调研于 2026-07）
 

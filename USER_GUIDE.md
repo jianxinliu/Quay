@@ -1,7 +1,7 @@
 # 用户手册（管理后台）
 
 面向**人**的操作手册：查询台怎么用、分析工作台怎么玩、写操作怎么审批。
-架构与安全设计见 [DESIGN.md](DESIGN.md)，agent 接入见 [AGENT_GUIDE.md](AGENT_GUIDE.md)。
+架构与安全设计见 [DESIGN.md](DESIGN.md)。把 Claude Code / Codex / Cursor / DeepSeek Harness 等接到 MCP 见 [README 接入 Agent](README.md#接入-agent)，工具用法见 [AGENT_GUIDE.md](AGENT_GUIDE.md)。
 
 后台地址 `http://127.0.0.1:8100/admin`，用 `DBM_ADMIN_TOKEN` 登录。
 左侧导航五页：**查询台 / Redis / 审批中心 / 操作审计 / 系统设置**（连接管理已并入系统设置）。

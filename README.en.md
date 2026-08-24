@@ -20,9 +20,9 @@
 
 When you connect a database to an AI agent, there are only two ways to grant access: read-only, which rules out much of what you need it for, or writable, which means reviewing every SQL statement it produces by hand. Quay exists to solve this.
 
-It's a database workbench that runs on your own machine and manages connections to MySQL, PostgreSQL, SQLite, and Redis (internal databases are reachable over multi-hop SSH, with a separate key per hop if needed). It exposes four entry points: a SQL query console, a Redis console, and an analysis workbench for people, plus an MCP endpoint for agents. All of them share the same connection config, credential management, and audit log.
+It's a database workbench that runs on your own machine and manages connections to MySQL, PostgreSQL, SQLite, ClickHouse, and Redis (internal databases are reachable over multi-hop SSH, with a separate key per hop if needed). It exposes four entry points: a SQL query console, a Redis console, and an analysis workbench for people, plus an MCP endpoint for agents. All of them share the same connection config, credential management, and audit log.
 
-The constraint on agents is an approval flow. Read-only SQL runs immediately on a read-only account. A write is rejected on first submission, and a change request with a risk report is created instead. Once you review the report in the admin backend and approve it, the agent resubmits with the change ID and the statement runs — specifically, the SQL stored in the change request runs; the resubmitted text is only checked against its fingerprint and rejected on mismatch. Change requests expire after 60 minutes and are single-use — concurrent replays of the same request succeed exactly once. There is no path around approval for writes to production.
+The constraint on agents is an approval flow. Read-only SQL runs immediately on a read-only account. A write creates a change request with a risk report, and the original call waits in place for a human (120 seconds by default). You open the link in the conversation, review the report, and approve — the waiting call then executes the SQL stored in the change request. You don't have to go back to the chat and say "approved", and the agent doesn't have to resubmit. If the wait times out, the request stays valid and the agent continues with `wait_for_change`. Change requests expire after 60 minutes and are single-use — concurrent replays of the same request succeed exactly once. There is no path around approval for writes to production.
 
 Passwords live in the system keyring. Config files hold only `env://` / `keyring://` references, and credentials never appear in logs or tool output.
 
@@ -39,19 +39,113 @@ DBM_ADMIN_TOKEN=some-long-random-string uv run dbm serve
 
 The admin backend is at <http://127.0.0.1:8100/admin>, the MCP endpoint at `http://127.0.0.1:8100/mcp`.
 
-To connect Claude Code:
-
-```bash
-claude mcp add --transport http dbm http://127.0.0.1:8100/mcp
-```
+To connect any MCP client (Claude Code, Codex, Cursor, DeepSeek Harness, and others), see [Connecting agents](#connecting-agents). How agents should use the tools is in **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese).
 
 For start-on-login and one-click launch, see [Running it](#running-it).
+
+## Connecting agents
+
+Quay is an MCP server. The transport is **streamable HTTP** (recommended: one long-running process) and **stdio** is also supported (one agent, exclusive process). Point every client at the already-running `http://127.0.0.1:8100/mcp` so the query console, approvals, audit log, and every agent share the same process. Do not start a second `dbm serve` per agent: stdio launches an independent process, and then change requests never show up in the admin backend you are looking at.
+
+How to *use* the tools is in **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese; it can go straight into an agent system prompt). The rest of this section is only how each client reaches the endpoint.
+
+**Tool-call timeouts.** A write waits on the server for approval for 120 seconds by default. If the client times out sooner (Codex and DeepSeek Harness both default to 60 seconds), raise the client timeout to **≥ 180 seconds**, or the call dies before anyone clicks Approve. You can also shorten "approval wait" in system settings; on timeout the agent continues with `wait_for_change` and the change request is not lost.
+
+If the machine has a SOCKS or HTTP proxy, some clients will send `127.0.0.1` through it and get a 502. Set `NO_PROXY=127.0.0.1,localhost` (or the equivalent) on the client.
+
+### Claude Code
+
+User scope is the right default for a local workbench you want in every project:
+
+```bash
+claude mcp add --transport http --scope user dbm http://127.0.0.1:8100/mcp
+```
+
+Equivalent config (`mcpServers` at the top of `~/.claude.json`, or `.mcp.json` at a repo root):
+
+```json
+{
+  "mcpServers": {
+    "dbm": {
+      "type": "http",
+      "url": "http://127.0.0.1:8100/mcp"
+    }
+  }
+}
+```
+
+`claude mcp list` should show `dbm`. Drop `--scope user` to keep it local to one repo.
+
+### Codex
+
+Codex config is **TOML**, not JSON. Global file: `~/.codex/config.toml`.
+
+```toml
+[mcp_servers.dbm]
+url = "http://127.0.0.1:8100/mcp"
+startup_timeout_sec = 15
+tool_timeout_sec = 180
+```
+
+Or let the CLI write the URL (still bump the timeout by hand):
+
+```bash
+codex mcp add dbm --url http://127.0.0.1:8100/mcp
+```
+
+`codex mcp list` confirms the connection. The ChatGPT desktop app and the Codex IDE extension share this file with the CLI.
+
+### Cursor
+
+Global (every repo): `~/.cursor/mcp.json`. You can also add it from Cursor Settings → MCP.
+
+```json
+{
+  "mcpServers": {
+    "dbm": {
+      "type": "http",
+      "url": "http://127.0.0.1:8100/mcp"
+    }
+  }
+}
+```
+
+Use `"type": "http"`, not `"streamable-http"`: the editor accepts the latter, but `cursor-agent` silently drops the entire `mcp.json`. Project-level config lives in `.cursor/mcp.json`. After saving, `dbm` should be green in the MCP panel.
+
+### DeepSeek Harness
+
+Add one `@deepseek-ai/dsh-mcp-client` instance per MCP server in `cordis.yml`. Tools show up as `mcp__dbm__query`, `mcp__dbm__execute`, and so on; the underlying names are unchanged.
+
+```yaml
+- id: mcp-dbm
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: dbm
+    transport: streamable-http
+    url: http://127.0.0.1:8100/mcp
+    toolCallTimeoutMs: 180000
+    failOnStartupError: true
+```
+
+`serverName` must be unique in the running harness. Editing the entry reconnects the plugin; you don't need to restart the whole process.
+
+### Other common clients
+
+| Client | Where | Snippet |
+|---|---|---|
+| **Claude Desktop** | Settings → Connectors → Add custom connector (paste the URL). Do **not** put a `url` field in `claude_desktop_config.json` — Desktop rewrites the file and strips `mcpServers`. | `http://127.0.0.1:8100/mcp` |
+| **VS Code / GitHub Copilot** | `.vscode/mcp.json` (top-level key is `servers`, not `mcpServers`) | `{ "servers": { "dbm": { "type": "http", "url": "http://127.0.0.1:8100/mcp" } } }` |
+| **Gemini CLI** | `gemini mcp add --transport http dbm http://127.0.0.1:8100/mcp`, or `mcpServers` in `~/.gemini/settings.json` | `"dbm": { "httpUrl": "http://127.0.0.1:8100/mcp" }` (`httpUrl` is streamable HTTP; `url` is the older SSE transport) |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | `{ "mcpServers": { "dbm": { "serverUrl": "http://127.0.0.1:8100/mcp" } } }` |
+| **Any stdio-only client** | Only if there is **no** long-running HTTP instance | `command`: `uv`, `args`: `["run", "--directory", "/absolute/path/to/Quay", "dbm", "serve", "--stdio"]` |
+
+If a client speaks MCP streamable HTTP, the URL is `http://127.0.0.1:8100/mcp`. It listens on loopback with no auth — do not expose port 8100 on the LAN or the public internet.
 
 ## How it's organized
 
 ```mermaid
 flowchart TB
-    DB[("MySQL · PostgreSQL · SQLite · Redis<br/>(internal DBs over multi-hop SSH)")]
+    DB[("MySQL · PostgreSQL · SQLite · ClickHouse · Redis<br/>(internal DBs over multi-hop SSH)")]
     DB --> GOV["Governance layer<br/>connection & credential management · reader/writer accounts<br/>SQL risk audit · reject-and-resubmit approval · full audit log · masking"]
     GOV --> T1["Query console<br/>SQL IDE (people)"]
     GOV --> T2["Redis console<br/>(people)"]
@@ -71,7 +165,7 @@ A DataGrip-style SQL IDE in the browser:
 - Results export to CSV / JSON / Markdown / xlsx, or switch to bar, line, pie, and scatter charts with per-column SUM / COUNT / AVG aggregation. Chart config is saved with the workflow and redrawn on re-run.
 - Queries run asynchronously on the server, so switching pages or reloading doesn't interrupt them; you come back and pick up the results. Tabs are preserved, result sets included. A running query can be cancelled — cancellation issues `KILL QUERY` / `pg_cancel_backend` against the database, actually terminating the statement rather than just dropping the client connection.
 
-Running a write statement in the console first shows a risk report — which tables are affected, an estimated row count, whether an index is hit, the execution plan — and only after you confirm does the writer account execute it, with an audit record. This is a bypass for humans; agent writes still go through the approval flow. When connected to a production database, the whole console gets a red border, and production writes additionally require retyping the connection name.
+Running a write statement in the console first shows a risk report — which tables are affected, an estimated row count, whether an index is hit, the execution plan — and only after you confirm does the writer account execute it, with an audit record. This is a bypass for humans; agent writes still go through the approval flow. When connected to a production database, the whole console gets a red border. ClickHouse is read-only analysis for now — there is no writer account on those connections.
 
 <details>
 <summary><b>Redis console</b> (expand for a screenshot)</summary>
@@ -84,7 +178,7 @@ Redis's key-value model differs enough from the relational model that a shared c
 
 - Keys are organized into a tree by `:` prefix with colored type badges. The bar at the bottom switches logical databases; non-empty ones show a key count.
 - Key detail renders by type, with TTL, memory usage, and encoding. msgpack-encoded values are decoded to JSON automatically.
-- The command window runs the line under the cursor. Reads execute directly, writes require confirmation, and a write against production requires retyping the connection name. Passwords and password hashes in `CONFIG GET` / `ACL` output are masked.
+- The command window runs the line under the cursor. Reads execute directly, writes require confirmation, and a write against production also requires retyping the connection name. Passwords and password hashes in `CONFIG GET` / `ACL` output are masked.
 - The docs panel on the right follows the cursor, covers 176 common commands, and links to redis.io.
 
 </details>
@@ -100,7 +194,7 @@ The same capability is available to agents (`analysis_import` / `analysis_sql`):
 
 <img src="assets/screenshots/analysis-dag.png" width="820" alt="DAG canvas: fetch → filter → JOIN → aggregate → SQL">
 
-The query console also has a DAG canvas: drag nodes (fetch, filter, JOIN, aggregate, SQL, output) into a data-flow graph, run it, and watch each node report its status. A finished graph can be saved as a workflow that both people and agents can re-run. See **[ANALYSIS.md](ANALYSIS.md)**.
+The query console and the dedicated workflow page both have a DAG canvas: drag nodes (fetch, filter, JOIN, aggregate, stats, SQL, output) into a data-flow graph, run it, and watch each node report its status. A finished graph can be saved as a workflow that both people and agents can re-run, including on a schedule. See **[ANALYSIS.md](ANALYSIS.md)**.
 
 </details>
 
@@ -115,10 +209,12 @@ The query console and the DAG canvas have an "✨ AI" entry point: describe what
 
 ## How a write gets approved
 
-1. The agent calls `execute` with a write statement. The server assesses the risk, creates a change request, rejects the call, and returns a `change_id` with the risk report.
-2. A person reviews the risk report at `/admin/approvals` and approves or rejects it. Approval also works in-session via elicitation, or from the CLI (`dbm approvals` / `approve` / `reject`).
-3. After approval the agent resubmits with the `change_id`, and the SQL stored in the change request runs. The resubmitted text is only fingerprint-checked and rejected on mismatch.
-4. On rejection, the reason is returned to the agent so it can revise and resubmit.
+1. The agent calls `execute` with a write statement. The server assesses the risk, creates a change request, **waits in place on that same call** (120 seconds by default), and returns an `approval_url`.
+2. A person opens the link in the conversation (or `/admin/approvals`), reviews the risk report, and approves or rejects it. Approval also works in-session via elicitation, or from the CLI (`dbm approvals` / `approve` / `reject`). The backend has **Approve and execute**: one click lands the change immediately.
+3. The waiting call then **runs the SQL stored in the change request** and returns `status=executed`. The user does not have to come back to the chat and say "approved", and the agent does not have to resubmit. The resubmitted text is only fingerprint-checked and rejected on mismatch.
+4. If the wait times out, the call returns `approval_required`. The change request is still valid for 60 minutes; the agent continues with `wait_for_change`. On rejection, the reason is returned so the agent can revise and resubmit.
+
+New change requests appear in the bell in the admin UI. Bark / WeCom / Feishu can be turned on in system settings. Success is not pushed — a notification is sent only when a person needs to approve.
 
 Whichever of the three channels is used, the change request keeps a complete record. An unhandled change request expires after 60 minutes.
 
@@ -127,7 +223,7 @@ Whichever of the three channels is used, the change request keeps a complete rec
 - **Deny by default**: read-only classification is done by parsing the AST with sqlglot. Parse failures, multi-statement input, DML tucked inside a CTE, `SELECT ... FOR UPDATE` — all of it is treated as a write.
 - **"Read-only" functions with side effects are treated as writes too**: `SLEEP`, `BENCHMARK`, `LOAD_FILE`, `pg_read_file`, `dblink`, and similar are blacklisted, so a read-only account can't be used for denial of service or for reading files off the server.
 - **Two accounts**: everyday queries use a read-only reader account; only approved executions switch to the writer.
-- **A second line at the database**: MySQL `SESSION TRANSACTION READ ONLY`, PostgreSQL `default_transaction_read_only`, SQLite `PRAGMA query_only` — even if classification gets it wrong, the read-only account can't write at the database level.
+- **A second line at the database**: MySQL `SESSION TRANSACTION READ ONLY`, PostgreSQL `default_transaction_read_only`, SQLite `PRAGMA query_only`, ClickHouse URL `readonly=1` — even if classification gets it wrong, the read-only account can't write at the database level.
 - **Default limits**: a SELECT without a LIMIT gets one injected (1000 rows by default), and statements time out after 30 seconds by default — both configurable per connection. A full-table SELECT can neither drag down the database nor exhaust client memory.
 - **No plaintext secrets**: config holds references only; passwords stay out of logs and tool output, and credentials in Redis `CONFIG` / `ACL` output are masked.
 - **Full audit**: every call, rejected ones included, records the agent identity, time, connection, SQL, row count, and duration.
@@ -137,10 +233,13 @@ Whichever of the three channels is used, the change request keeps a complete rec
 
 | Tool | What it does |
 |---|---|
+| `begin_session(title, note?)` | Name the session so later SQL is grouped on the audit page |
 | `list_projects` / `list_connections` | Browse available connections (no credentials; Redis connections are not listed) |
+| `list_databases` | List databases / schemas (call this first when the connection has no default database) |
 | `query(project, connection, sql)` | Read-only SQL; anything else is rejected and audited; a missing LIMIT is injected |
-| `execute(project, connection, sql, reason?, change_id?)` | Writes: the first call creates a change request and returns a change_id; resubmit with it after approval |
-| `get_change_status(change_id)` | Change request status and risk report |
+| `export_table(...)` | Export a table as CSV / JSON / Markdown / xlsx; returns a short-lived download URL (file body stays out of context) |
+| `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | Writes: creates a change request, waits for approval, then runs |
+| `wait_for_change(change_id)` / `get_change_status(change_id)` | Keep waiting after a timeout / inspect the change request immediately |
 | `list_tables` / `describe_table` / `sample_rows` | Explore schema |
 | `test_connection` | Connectivity check |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB cross-source analysis (fetches audited and row-capped, computation free in the sandbox) |
@@ -165,7 +264,7 @@ tail -f ~/Library/Logs/db-manage-mcp.log
 # Build a double-clickable Quay.app (local build, no Gatekeeper prompt, icon bundled)
 bash scripts/build-app.sh ~/Applications
 
-# stdio mode (single agent connects directly, no HTTP server)
+# stdio mode (single agent, no HTTP server). Don't use this if a daemon is already on 8100 — connect over HTTP; see [Connecting agents](#connecting-agents)
 uv run dbm serve --stdio
 ```
 
@@ -178,7 +277,7 @@ Deployment is a plain local process; Docker support was deliberately left out. O
 | Who you are | What to read |
 |---|---|
 | Using the backend | **[USER_GUIDE.md](USER_GUIDE.md)** (Chinese) — query console / Redis / analysis / approvals |
-| An agent being integrated (or the person writing its prompts) | **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese) — tool map, approval flow, cross-source analysis |
+| An agent being integrated (or the person writing its prompts) | This README, [Connecting agents](#connecting-agents) (Claude Code / Codex / Cursor / DeepSeek Harness, …) · **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese) for the tool map and approval flow |
 | Working on the code | **[DESIGN.md](DESIGN.md)** architecture & security · **[ANALYSIS.md](ANALYSIS.md)** analysis workbench · **[CONTRIBUTING.md](CONTRIBUTING.md)** |
 | Found a vulnerability | **[SECURITY.md](SECURITY.md)** — please don't open a public issue |
 
@@ -190,7 +289,7 @@ uv run pytest          # full test suite
 uv run ruff check .    # lint
 ```
 
-380+ tests. Beyond unit tests, the critical paths — the approval flow, multi-hop SSH (including per-hop keys), write timeouts — have real-environment e2e scripts (`scripts/e2e_*`), validated against actual MySQL 9.5, PostgreSQL 17, Redis 7, and real SSH tunnels.
+700+ tests. Beyond unit tests, the critical paths — the approval flow, multi-hop SSH (including per-hop keys), write timeouts, read-only ClickHouse — have real-environment e2e scripts (`scripts/e2e_*`), validated against actual MySQL 9.5, PostgreSQL 17, Redis 7, ClickHouse 24, and real SSH tunnels.
 
 The frontend has no build chain: Vue and Monaco are vendored into the repo, so it runs straight from a clone, and changing frontend code requires no Node.
 

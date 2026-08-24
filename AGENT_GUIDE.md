@@ -3,8 +3,20 @@
 面向两类读者：**接入本服务的 AI agent**（本文可直接放进系统提示或知识库），以及
 **给 agent 写提示词/做集成的人**。讲清楚 agent 有哪些工具、怎么组合、边界在哪。
 
-服务地址：本地 HTTP `http://127.0.0.1:8100/mcp`（streamable HTTP），或 stdio
-（`uv run dbm serve --stdio`）。工具的权威描述以 MCP 工具 schema 为准，本文讲的是**用法与套路**。
+把客户端接到本服务的步骤（Claude Code / Codex / Cursor / DeepSeek Harness / Claude Desktop /
+VS Code Copilot / Gemini CLI / Windsurf / 通用 stdio）见 **[README.md 接入 Agent](README.md#接入-agent)**。
+本文不重复粘贴各家配置，只写接到之后怎么用。
+
+服务地址：本地 HTTP `http://127.0.0.1:8100/mcp`（streamable HTTP，**推荐**——与管理后台、
+审批、审计共用一份常驻进程），或 stdio（`uv run dbm serve --stdio`）。本机已经有
+`dbm serve` / launchd 在 8100 时，**不要再起一份 stdio**：那是另一个进程，审批单不会出现
+在你正在看的后台里。工具的权威描述以 MCP 工具 schema 为准，本文讲的是**用法与套路**。
+
+DeepSeek Harness 会把工具注册成 `mcp__<serverName>__<原名>`（例如 `mcp__dbm__query`）。
+下面写的都是 MCP 原名；带前缀的客户端把前缀去掉即可对上。
+
+客户端工具超时请 ≥ 180 秒（服务端默认等审批 120 秒）。超时不是失败：返回
+`approval_required` 后调 `wait_for_change` 续等，审批单 60 分钟内有效。
 
 ## 工具地图
 

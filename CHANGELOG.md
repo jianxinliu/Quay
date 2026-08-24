@@ -6,6 +6,9 @@
 ## [Unreleased]
 
 ### Added
+- README / README.en 补多客户端 MCP 接入指南（Claude Code、Codex、Cursor、DeepSeek Harness，
+  以及 Claude Desktop / VS Code Copilot / Gemini CLI / Windsurf / 通用 stdio），并同步近期能力
+  （ClickHouse、审批等待、begin_session / wait_for_change / export_table、通知渠道）。
 - 开源治理文件：`LICENSE`（Apache-2.0）、`NOTICE`、`SECURITY.md`、`CONTRIBUTING.md`、本 `CHANGELOG.md`。
 - `pyproject.toml` 补齐发布元数据（SPDX license、classifiers、keywords、project URLs、authors）。
 - 管理后台本机来源校验：`Host` 白名单（`DBM_ADMIN_ALLOWED_HOSTS` 可扩展）+ 写请求 `Origin` 同源校验。
