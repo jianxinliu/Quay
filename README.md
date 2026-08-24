@@ -20,9 +20,9 @@
 
 把数据库接给 AI agent，权限只有两种给法：只读，很多事它做不了；可写，它发出的每一条 SQL 你都得人工审查。Quay 用来解决这个问题。
 
-它是一个跑在本机的数据库工作台，统一管理 MySQL / PostgreSQL / SQLite / Redis 的连接（内网库走 SSH 多级跳板直连，每跳可配独立密钥），对外有四个入口：给人用的 SQL 查询台、Redis 控制台、分析工作台，和给 agent 用的 MCP 端点。所有入口共用同一套连接配置、密码管理和操作审计。
+它是一个跑在本机的数据库工作台，统一管理 MySQL / PostgreSQL / SQLite / ClickHouse / Redis 的连接（内网库走 SSH 多级跳板直连，每跳可配独立密钥），对外有四个入口：给人用的 SQL 查询台、Redis 控制台、分析工作台，和给 agent 用的 MCP 端点。所有入口共用同一套连接配置、密码管理和操作审计。
 
-对 agent 的核心约束是一条审批流。只读 SQL 用只读账号直接执行；写操作第一次提交会被拒绝，同时生成一张带风险报告的审批单。你在管理后台看过报告、点了批准，agent 拿审批单号重新提交才会执行——而且执行的是审批单里存的那条 SQL，重提的文本只用来核对指纹，不一致即拒绝。审批单 60 分钟过期、一次性核销（并发重放同一张单只会成功一次），生产环境的写操作没有绕过审批的途径。
+对 agent 的核心约束是一条审批流。只读 SQL 用只读账号直接执行；写操作第一次提交会生成一张带风险报告的审批单，当次调用就地等人批准（默认 120 秒）。你点开会话里的链接看过报告、点了批准，这次调用就会自动执行审批单里存的那条 SQL——不必回到对话里说「已批准」，也不必 agent 再重提一次。超时后审批单仍有效，agent 用 `wait_for_change` 续等。审批单 60 分钟过期、一次性核销（并发重放同一张单只会成功一次），生产环境的写操作没有绕过审批的途径。
 
 密码存在系统 keyring 里，配置文件只保留 `env://` / `keyring://` 引用，不会出现在日志和工具返回值中。
 
@@ -39,19 +39,113 @@ DBM_ADMIN_TOKEN=一串足够长的随机字符 uv run dbm serve
 
 管理后台在 <http://127.0.0.1:8100/admin>，MCP 端点在 `http://127.0.0.1:8100/mcp`。
 
-接入 Claude Code：
-
-```bash
-claude mcp add --transport http dbm http://127.0.0.1:8100/mcp
-```
+接入任意 MCP 客户端（Claude Code / Codex / Cursor / DeepSeek Harness 等）见 [接入 Agent](#接入-agent)。用法见 **[AGENT_GUIDE.md](AGENT_GUIDE.md)**。
 
 开机自启、双击启动等见 [常驻与启动](#常驻与启动)。
+
+## 接入 Agent
+
+Quay 是 MCP 服务：传输是 **streamable HTTP**（常驻进程，推荐），也兼容 **stdio**（单 agent 直连）。推荐所有客户端都接到已经在跑的 `http://127.0.0.1:8100/mcp`——查询台、审批、审计、多个 agent 共用这一份进程。不要给每个 agent 再起一份 `dbm serve`：stdio 会再拉一个独立进程，审批单和后台对不上。
+
+工具怎么用见 **[AGENT_GUIDE.md](AGENT_GUIDE.md)**（可直接放进 agent 系统提示）。下面只讲各家客户端怎么接到这个端点。
+
+**工具调用超时**：写操作默认在服务端等审批 120 秒。客户端默认超时更短时（Codex / DeepSeek Harness 都是 60 秒），把客户端超时调到 **≥ 180 秒**，否则人还没点批准，客户端已经把这次调用掐掉。也可以把系统设置里的「审批等待时长」调短，超时后 agent 调 `wait_for_change` 续等，单不会丢。
+
+本机若开了 SOCKS / HTTP 代理，部分客户端会把 `127.0.0.1` 也送进代理得到 502。给客户端加上 `NO_PROXY=127.0.0.1,localhost`（或等价配置）。
+
+### Claude Code
+
+推荐接到 user scope，所有项目都能用这份本地工作台：
+
+```bash
+claude mcp add --transport http --scope user dbm http://127.0.0.1:8100/mcp
+```
+
+等价配置（`~/.claude.json` 顶层 `mcpServers`，或项目根 `.mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "dbm": {
+      "type": "http",
+      "url": "http://127.0.0.1:8100/mcp"
+    }
+  }
+}
+```
+
+`claude mcp list` 能看到 `dbm` 即成功。只在某个仓库用时去掉 `--scope user`（默认 local）。
+
+### Codex
+
+Codex 的配置是 **TOML**（不是 JSON）。全局文件 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.dbm]
+url = "http://127.0.0.1:8100/mcp"
+startup_timeout_sec = 15
+tool_timeout_sec = 180
+```
+
+或让 CLI 写 URL，超时仍建议手改：
+
+```bash
+codex mcp add dbm --url http://127.0.0.1:8100/mcp
+```
+
+`codex mcp list` 确认已连接。ChatGPT 桌面端 / Codex IDE 扩展与 CLI 共用这份配置。
+
+### Cursor
+
+全局（所有仓库）：`~/.cursor/mcp.json`。也可以 Cursor Settings → MCP 里加点。
+
+```json
+{
+  "mcpServers": {
+    "dbm": {
+      "type": "http",
+      "url": "http://127.0.0.1:8100/mcp"
+    }
+  }
+}
+```
+
+`type` 用 `"http"`，不要写成 `"streamable-http"`：Cursor 编辑器能认后者，但 `cursor-agent` CLI 会把整份 `mcp.json` 静默丢掉。项目级写在 `.cursor/mcp.json`。改完后 MCP 面板里 `dbm` 应为绿灯。
+
+### DeepSeek Harness
+
+在 `cordis.yml` 里加一个 `@deepseek-ai/dsh-mcp-client` 实例（一个 MCP 服务对应一条）。工具会出现成 `mcp__dbm__query`、`mcp__dbm__execute` 这种带前缀的名字，用法不变。
+
+```yaml
+- id: mcp-dbm
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: dbm
+    transport: streamable-http
+    url: http://127.0.0.1:8100/mcp
+    toolCallTimeoutMs: 180000
+    failOnStartupError: true
+```
+
+`serverName` 在当前 harness 里必须唯一。改配置后插件会断线重连，不必重启整个进程。
+
+### 其他常见客户端
+
+| 客户端 | 配置位置 | 片段 |
+|---|---|---|
+| **Claude Desktop** | Settings → Connectors → Add custom connector（URL 填下面这一行）。不要把 `url` 写进 `claude_desktop_config.json`，桌面版会整段抹掉 `mcpServers`。 | `http://127.0.0.1:8100/mcp` |
+| **VS Code / GitHub Copilot** | `.vscode/mcp.json`（注意顶层键是 `servers`，不是 `mcpServers`） | `{ "servers": { "dbm": { "type": "http", "url": "http://127.0.0.1:8100/mcp" } } }` |
+| **Gemini CLI** | `gemini mcp add --transport http dbm http://127.0.0.1:8100/mcp`；或 `~/.gemini/settings.json` 的 `mcpServers` | `"dbm": { "httpUrl": "http://127.0.0.1:8100/mcp" }`（`httpUrl` = streamable HTTP；不要把同一 URL 写到 `url` 上，那是旧的 SSE） |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | `{ "mcpServers": { "dbm": { "serverUrl": "http://127.0.0.1:8100/mcp" } } }` |
+| **任意只支持 stdio 的客户端** | 仅当本机**没有**常驻 HTTP 实例时用 | `command`: `uv`，`args`: `["run", "--directory", "/绝对路径/Quay", "dbm", "serve", "--stdio"]` |
+
+协议层面：实现了 MCP 的 streamable HTTP 即可。URL 是 `http://127.0.0.1:8100/mcp`，本机回环、无鉴权——不要把 8100 暴露到局域网或公网。
 
 ## 整体结构
 
 ```mermaid
 flowchart TB
-    DB[("MySQL · PostgreSQL · SQLite · Redis<br/>（内网库经 SSH 多跳直达）")]
+    DB[("MySQL · PostgreSQL · SQLite · ClickHouse · Redis<br/>（内网库经 SSH 多跳直达）")]
     DB --> GOV["治理层<br/>连接与密码管理 · reader/writer 双账号<br/>SQL 风险审计 · 拒绝—重提审批 · 操作留痕 · 脱敏"]
     GOV --> T1["查询台<br/>SQL IDE（人用）"]
     GOV --> T2["Redis 控制台<br/>（人用）"]
@@ -71,7 +165,7 @@ flowchart TB
 - 结果可导出 CSV / JSON / Markdown / xlsx，也可以切成柱状图、折线图、饼图、散点图，支持按列做 SUM / COUNT / AVG 聚合；图表配置随 workflow 保存，重跑自动出图。
 - 查询在服务端异步执行，切走页面或刷新都不中断，回来接着看结果；多个 tab 连同结果集一起保留。运行中的查询可以取消——取消会对数据库发 `KILL QUERY` / `pg_cancel_backend`，真正终止语句，而不是只断开客户端。
 
-在查询台里执行写语句会先弹出风险报告——影响哪些表、预估多少行、是否命中索引、执行计划——确认后才用 writer 账号执行并记审计。这是给人开的旁路，agent 的写操作仍然要走审批流。连接生产库时整个界面套红色边框，且生产库的写操作要求重新输入连接名才放行。
+在查询台里执行写语句会先弹出风险报告——影响哪些表、预估多少行、是否命中索引、执行计划——确认后才用 writer 账号执行并记审计。这是给人开的旁路，agent 的写操作仍然要走审批流。连接生产库时整个界面套红色边框。ClickHouse 本期只做只读分析，连接上没有 writer。
 
 <details>
 <summary><b>Redis 控制台</b>（点开看截图）</summary>
@@ -84,7 +178,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 
 - 键按 `:` 前缀组织成树，带类型彩色徽章；底部可切换逻辑库，有数据的库标出键数。
 - 键详情按类型展示，附 TTL、内存占用、编码方式；msgpack 编码的值自动解成 JSON。
-- 命令窗口执行光标所在行：读命令直接执行，写命令需要确认，生产环境的写命令要求重新输入连接名才放行。`CONFIG GET` / `ACL` 输出里的密码和口令哈希会被遮蔽。
+- 命令窗口执行光标所在行：读命令直接执行，写命令需要确认；生产环境的写命令还要再输入连接名才放行。`CONFIG GET` / `ACL` 输出里的密码和口令哈希会被遮蔽。
 - 右侧文档面板跟着光标切换，覆盖 176 条常用命令，链接到 redis.io。
 
 </details>
@@ -100,7 +194,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 
 <img src="assets/screenshots/analysis-dag.png" width="820" alt="DAG 画布：取数 → 过滤 → JOIN → 聚合 → SQL">
 
-查询台里还有一个 DAG 画布：拖节点（取数、过滤、JOIN、聚合、SQL、输出）连成数据流图，一键执行、逐节点显示状态。搭好的图可以存成 workflow，人和 agent 都能重跑。详见 **[ANALYSIS.md](ANALYSIS.md)**。
+查询台和独立流程页都可以编排 DAG：拖节点（取数、过滤、JOIN、聚合、统计、SQL、输出）连成数据流图，一键执行、逐节点显示状态。搭好的图可以存成 workflow，人和 agent 都能重跑，也可以设成定时任务。详见 **[ANALYSIS.md](ANALYSIS.md)**。
 
 </details>
 
@@ -115,10 +209,12 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 
 ## 写操作的审批流程
 
-1. agent 调 `execute` 提交写 SQL。服务端评估风险、生成审批单，当次调用被拒绝，返回 `change_id` 和风险报告。
-2. 人在 `/admin/approvals` 查看风险报告，批准或拒绝。也可以在会话内通过 elicitation 确认，或用 CLI（`dbm approvals` / `approve` / `reject`）。
-3. 批准后 agent 带 `change_id` 重新提交，执行的是审批单里存的 SQL；重提文本只做指纹校验，不一致即拒绝。
-4. 被拒绝时理由会返回给 agent，供其修改后重新提交。
+1. agent 调 `execute` 提交写 SQL。服务端评估风险、生成审批单，**当次调用就地等待**（默认 120 秒），并把 `approval_url` 回给 agent。
+2. 人点开会话里的链接（或 `/admin/approvals`）看风险报告，批准或拒绝。也可以在会话内 elicitation，或用 CLI（`dbm approvals` / `approve` / `reject`）。后台有「批准并立即执行」：人点一次当场落地。
+3. 等待中的调用在批准后**自动执行审批单里存的 SQL**，返回 `status=executed`。不必让用户回到对话里说「已批准」，也不必 agent 再重提一次。重提文本只做指纹校验，不一致即拒绝。
+4. 等待超时返回 `approval_required`：审批单仍有效（60 分钟），agent 调 `wait_for_change` 续等。被拒绝时理由回给 agent，供其改完再提交。
+
+新审批单会进管理后台右上角铃铛，也可以在系统设置里打开 Bark / 企微 / 飞书。不主动推送成功——只在需要人点批准时通知。
 
 三条审批通道走哪条都会在审批单上留下完整记录。审批单 60 分钟未处理自动过期。
 
@@ -127,7 +223,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 - **默认拒绝**：用 sqlglot 解析 AST 做只读判定。解析失败、多语句、CTE 里夹带的 DML、`SELECT ... FOR UPDATE`，一律按写操作处理。
 - **有副作用的「只读」函数也按写处理**：`SLEEP` / `BENCHMARK` / `LOAD_FILE` / `pg_read_file` / `dblink` 等在黑名单上——防止只读账号被用来做拒绝服务或读服务器文件。
 - **双账号**：日常查询用只读的 reader 账号，只有审批通过的执行才切换到 writer。
-- **数据库层再设一道**：MySQL `SESSION TRANSACTION READ ONLY`、PostgreSQL `default_transaction_read_only`、SQLite `PRAGMA query_only`，即使分类出错，只读账号在数据库层面也写不进去。
+- **数据库层再设一道**：MySQL `SESSION TRANSACTION READ ONLY`、PostgreSQL `default_transaction_read_only`、SQLite `PRAGMA query_only`、ClickHouse URL `readonly=1`，即使分类出错，只读账号在数据库层面也写不进去。
 - **默认限流**：缺 LIMIT 的 SELECT 自动注入 LIMIT（默认 1000 行），语句超时默认 30 秒，都可按连接配置——一条全表 SELECT 拖不垮数据库，也拉不爆客户端内存。
 - **密钥不落明文**：配置只存引用，密码不进日志、不进工具返回值；Redis `CONFIG` / `ACL` 输出里的凭证自动脱敏。
 - **全量审计**：每次调用（包括被拒绝的）都记录 agent 身份、时间、连接、SQL、行数和耗时。
@@ -137,10 +233,13 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 
 | 工具 | 说明 |
 |---|---|
+| `begin_session(title, note?)` | 声明本次会话名字/背景；之后本会话的 SQL 在审计页按会话归类 |
 | `list_projects` / `list_connections` | 浏览可用连接（不含账密；Redis 连接不出现在列表里） |
+| `list_databases` | 列库 / schema（连接未绑默认库时先调这个） |
 | `query(project, connection, sql)` | 只读 SQL；非只读一律拒绝并审计；缺 LIMIT 自动注入 |
-| `execute(project, connection, sql, reason?, change_id?)` | 写操作：首次提交生成审批单并返回 change_id，批准后带它重提才执行 |
-| `get_change_status(change_id)` | 查审批单状态与风险报告 |
+| `export_table(...)` | 按表导出 CSV / JSON / Markdown / xlsx，返回短期下载链接（正文不进上下文） |
+| `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 写操作：生成审批单并等待批准，批准即自动执行 |
+| `wait_for_change(change_id)` / `get_change_status(change_id)` | 超时后续等 / 立即查审批单状态 |
 | `list_tables` / `describe_table` / `sample_rows` | 探索 schema |
 | `test_connection` | 连通性检查 |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 跨源分析（取数受审计和行数上限约束，沙箱内自由计算） |
@@ -165,7 +264,7 @@ tail -f ~/Library/Logs/db-manage-mcp.log
 # 生成可双击的 Quay.app（本地构建，不触发 Gatekeeper，图标已内置）
 bash scripts/build-app.sh ~/Applications
 
-# stdio 模式（单 agent 直连，不起 HTTP 服务）
+# stdio 模式（单 agent 直连，不起 HTTP 服务）。常驻实例已经在 8100 时不要用这个——改接 HTTP，见 [接入 Agent](#接入-agent)
 uv run dbm serve --stdio
 ```
 
@@ -178,7 +277,7 @@ uv run dbm serve --stdio
 | 你是谁 | 看哪份 |
 |---|---|
 | 用后台的人 | **[USER_GUIDE.md](USER_GUIDE.md)** —— 查询台 / Redis / 分析 / 审批操作手册 |
-| 接入的 agent（或写 agent 提示词的人） | **[AGENT_GUIDE.md](AGENT_GUIDE.md)** —— 工具地图、审批流程、跨源分析用法 |
+| 接入的 agent（或写 agent 提示词的人） | 本文 [接入 Agent](#接入-agent)（Claude Code / Codex / Cursor / DeepSeek Harness 等）· **[AGENT_GUIDE.md](AGENT_GUIDE.md)** 工具地图与审批套路 |
 | 想改代码的人 | **[DESIGN.md](DESIGN.md)** 架构与安全设计 · **[ANALYSIS.md](ANALYSIS.md)** 分析工作台 · **[CONTRIBUTING.md](CONTRIBUTING.md)** 开发约定 |
 | 发现安全漏洞 | **[SECURITY.md](SECURITY.md)** —— 请勿开公开 issue |
 
@@ -190,7 +289,7 @@ uv run pytest          # 全量测试
 uv run ruff check .    # lint
 ```
 
-380+ 个测试；审批流、SSH 多跳（含每跳独立密钥）、写超时等关键路径除单测外都有真实环境 e2e 脚本（`scripts/e2e_*`），对真实的 MySQL 9.5 / PostgreSQL 17 / Redis 7 和真实 SSH 隧道验证过。
+700+ 个测试；审批流、SSH 多跳（含每跳独立密钥）、写超时、ClickHouse 只读等关键路径除单测外都有真实环境 e2e 脚本（`scripts/e2e_*`），对真实的 MySQL 9.5 / PostgreSQL 17 / Redis 7 / ClickHouse 24 和真实 SSH 隧道验证过。
 
 前端没有构建链：Vue 和 Monaco 直接 vendor 进仓库，clone 下来就能跑，改前端代码不需要 Node。
 
