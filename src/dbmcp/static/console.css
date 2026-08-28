@@ -104,9 +104,27 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   border-top: 1px solid var(--dg-border); margin-top: 3px; padding-top: 8px; }
 .dg-acc .acc-hd:first-child { border-top: none; margin-top: 0; padding-top: 6px; }
 .dg-acc .acc-hd:hover { color: var(--dg-text); }
-/* 展开/收起三角：▸▾ 这两个字形的实际墨迹远小于字号，9~10px 等于看不见。
-   放到 12px + --dg-muted，hover 再提亮一档。 */
-.dg-acc .acc-hd .caret { color: var(--dg-muted); font-size: 12px; width: 12px; }
+/* 展开/收起箭头：**不再用 ▸▾ 字形**。这两个字符的实际墨迹远小于字号（12px 也看不清），
+   而且各字体渲染差异大。改成用 CSS 画的 chevron——边框粗细、尺寸、颜色都可控，
+   展开时旋转 90°（顺带得到一个自然的微交互）。
+   模板里的 ▾/▸ 文字被 font-size:0 藏起来，只作为可访问性/复制时的兜底；
+   开合状态靠 :class="{open: …}" 传给 CSS（CSS 选不到文本内容）。 */
+.dg-item .tw, .dg-acc .acc-hd .caret {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; font-size: 0;
+}
+.dg-item .tw::before, .dg-acc .acc-hd .caret::before {
+  content: ""; display: block; border-style: solid; border-color: currentColor;
+  border-width: 0 var(--tw-stroke) var(--tw-stroke) 0;
+  width: var(--tw-size); height: var(--tw-size);
+  transform: rotate(-45deg); transform-origin: 55% 55%;
+  transition: transform .16s cubic-bezier(.4, 0, .2, 1);
+}
+.dg-item .tw.open::before, .dg-acc .acc-hd .caret.open::before { transform: rotate(45deg); }
+.dg-acc .acc-hd .caret {
+  --tw-size: 6px; --tw-stroke: 1.9px;
+  width: 14px; height: 14px; color: var(--dg-muted);
+}
+.dg-acc .acc-hd:hover .caret { color: var(--dg-text); }
 .dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px;
   text-transform: none; letter-spacing: 0; }
 .dg-acc .acc-body { overflow: auto; }
@@ -130,9 +148,12 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   font-family: var(--dg-mono); font-size: 12.5px; line-height: 19px; white-space: nowrap;
 }
 .dg-item:hover { background: var(--dg-hover); }
-.dg-item .tw { width: 14px; color: var(--dg-muted); flex: none; font-size: 12px;
-  line-height: 1; transition: color .12s; }
-.dg-item:hover .tw { color: var(--dg-text); }
+.dg-item .tw {
+  --tw-size: 5.5px; --tw-stroke: 1.8px;
+  width: 15px; height: 15px; color: var(--dg-muted); transition: color .12s;
+}
+.dg-item:hover .tw, .dg-item.sel .tw { color: var(--dg-text); }
+.dg-item .tw:hover { color: var(--dg-accent); }
 .dg-item .nm { overflow: hidden; text-overflow: ellipsis; color: var(--dg-text); }
 .dg-item .mini { margin-left: auto; opacity: 0; color: var(--dg-muted); font-size: 11px; }
 .dg-item:hover .mini { opacity: 1; }
@@ -707,21 +728,37 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
    原来当前命中是深橄榄底 #4a3c14 + 常规浅灰字 —— 两个都偏暗，实际根本读不出内容
    （用户反馈「根本看不清」）。改用浏览器「页内查找」那套人人都认的配色：
    **当前命中＝亮黄底 + 深色字**，其余命中只给淡淡的黄底 + 描边做定位。 */
-/* 命中单元格同时可能带着「当前行」「单元格选中」「已编辑」等底色（.rcur/.csel/.vsel/
-   .edited 里还有用 !important 的），它们都会盖掉命中高亮 —— 而「我搜的那一个在哪」
-   必须永远压过其它状态，所以这里用 !important，是有意为之。 */
+/* ⌘F 网格内搜索的命中高亮。
+   两版都推翻过：最早是深橄榄底 + 常规浅灰字，太暗读不出；换成浏览器那种亮黄底 + 黑字，
+   在这套深色 IDE 里又太扎眼。现在走深色 UI 该有的做法——**不整块翻成亮色，而是把文字
+   提亮、底色只做微微的暖色抬升，当前命中再加一圈干净的琥珀描边**。对比来自描边和字色，
+   不是来自一块荧光笔。
+   另：命中格同时可能带 .rcur（当前行）/.csel（单元格选区）/.vsel（值编辑，自带
+   !important）/.edited 的底色，按特异性它们会盖掉命中高亮（实测计算值拿到的是 rcur 的
+   蓝色而不是这里设的），而「我搜的那一个在哪」必须永远压过其它状态 —— 这里的
+   !important 是有意为之。 */
+/* 其余命中：只有一层很淡的暖色底，说明「这里有」，安静不抢戏——给每个都描边的话，
+   71 个命中同时框起来，反而看不出当前在哪一个。 */
 table.dg-rt tbody td.hit {
-  background: color-mix(in srgb, var(--dg-amber) 22%, transparent) !important;
-  outline: 1px solid var(--dg-amber); outline-offset: -1px;
+  background: color-mix(in srgb, var(--dg-amber) 12%, transparent) !important;
 }
+/* 当前命中：底色加深一档 + 一圈干净的琥珀环 + 一点外扩微光，字提到暖白。
+   层级差是靠「只有它有环」拉开的，不是靠把它涂成荧光块。 */
 table.dg-rt tbody td.curhit {
-  background: #f0c040 !important; color: #1a1305 !important;
-  outline: 2px solid #fbe08a; outline-offset: -2px;
+  background: color-mix(in srgb, var(--dg-amber) 28%, transparent) !important;
+  color: #fff4e0 !important;
+  box-shadow: inset 0 0 0 1.5px var(--dg-amber),
+              0 0 0 3px color-mix(in srgb, var(--dg-amber) 22%, transparent);
 }
-/* 单元格里的子元素（NULL 占位、徽章等）自带颜色，亮底上必须跟着翻成深色 */
+/* 单元格里的子元素（NULL 占位、徽章等）自带颜色，命中态下要跟着走 */
 table.dg-rt tbody td.curhit *, table.dg-rt tbody td.curhit .nul { color: inherit !important; }
+/* 浅色主题：同一套层级，文字压到深棕 */
+.theme-light table.dg-rt tbody td.hit {
+  background: color-mix(in srgb, var(--dg-amber) 16%, transparent) !important;
+}
 .theme-light table.dg-rt tbody td.curhit {
-  background: #ffd54f !important; color: #3a2c05 !important; outline-color: #c99a17;
+  background: color-mix(in srgb, var(--dg-amber) 30%, transparent) !important;
+  color: #3d2c05 !important;
 }
 .dg-newrow td { padding: 2px 4px; }
 .dg-newrow td.nw { color: var(--dg-green); font-weight: 700; }

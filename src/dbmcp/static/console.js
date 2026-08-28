@@ -244,7 +244,7 @@
   <div class="dg-item tbl" :class="{sel: selected}" :style="{paddingLeft: pad+'px'}"
        @click="$emit('rowclick', $event)" @dblclick="$emit('opendata')"
        @contextmenu.prevent="$emit('ctxmenu', $event)" title="双击打开数据 · 右键菜单 · ⌘点多选">
-    <span class="tw" @click.stop="$emit('toggle')">{{ open ? "▾" : "▸" }}</span>
+    <span class="tw" :class="{open: open}" @click.stop="$emit('toggle')">{{ open ? "▾" : "▸" }}</span>
     <span class="ic ic-table"></span><span class="nm">{{ tname }}</span>
     <span v-if="size" class="sz">{{ size }}</span>
   </div>
@@ -252,14 +252,14 @@
     <div v-if="!meta" class="dg-empty" :style="{paddingLeft:(pad+22)+'px'}">加载中…</div>
     <template v-else>
       <div class="dg-item sub" :style="{paddingLeft:(pad+16)+'px'}" @click="$emit('togglesub','columns')">
-        <span class="tw">{{ sub.columns ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
+        <span class="tw" :class="{open: sub.columns}">{{ sub.columns ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
         <span class="nm">columns</span><span class="cnt">{{ meta.columns.length }}</span></div>
       <template v-if="sub.columns">
         <div v-for="c in meta.columns" :key="c.name" class="dg-col" :style="{paddingLeft:(pad+38)+'px'}">
           <span class="cn" :class="{pk: pkset[c.name]}">{{ c.name }}</span><span class="ct">{{ c.type }}</span></div>
       </template>
       <div class="dg-item sub" :style="{paddingLeft:(pad+16)+'px'}" @click="$emit('togglesub','keys')">
-        <span class="tw">{{ sub.keys ? "▾" : "▸" }}</span><span class="ic ic-key"></span>
+        <span class="tw" :class="{open: sub.keys}">{{ sub.keys ? "▾" : "▸" }}</span><span class="ic ic-key"></span>
         <span class="nm">keys</span><span class="cnt">{{ meta.primary_key.length ? 1 : 0 }}</span></div>
       <template v-if="sub.keys">
         <div v-if="!meta.primary_key.length" class="dg-empty" :style="{paddingLeft:(pad+38)+'px'}">（无主键）</div>
@@ -267,7 +267,7 @@
           <span class="cn pk">PRIMARY</span><span class="ct">{{ meta.primary_key.join(", ") }}</span></div>
       </template>
       <div class="dg-item sub" :style="{paddingLeft:(pad+16)+'px'}" @click="$emit('togglesub','indexes')">
-        <span class="tw">{{ sub.indexes ? "▾" : "▸" }}</span><span class="ic ic-idx"></span>
+        <span class="tw" :class="{open: sub.indexes}">{{ sub.indexes ? "▾" : "▸" }}</span><span class="ic ic-idx"></span>
         <span class="nm">indexes</span><span class="cnt">{{ meta.indexes.length }}</span></div>
       <template v-if="sub.indexes">
         <div v-if="!meta.indexes.length" class="dg-empty" :style="{paddingLeft:(pad+38)+'px'}">（无索引）</div>
@@ -3415,7 +3415,7 @@
                  placeholder="选择连接…" @update:model-value="setConn"/>
     </div>
     <div class="dg-acc">
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('tree')"><span class="caret">{{ acc.tree ? '▾' : '▸' }}</span><span>{{ needsDb ? "库 / 表" : "表" }}</span>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('tree')"><span class="caret" :class="{open: acc.tree}">{{ acc.tree ? "▾" : "▸" }}</span><span>{{ needsDb ? "库 / 表" : "表" }}</span>
         <span class="acc-acts" @click.stop>
         <span v-if="selCount" class="selinfo">已选 {{ selCount }} <a @click="clearSel">清除</a></span>
         <span class="act" @click="openTblSearch" title="全局搜表跳转（⌘/Ctrl+P）">⌕</span>
@@ -3438,11 +3438,11 @@
         <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>
         <template v-for="db in filteredDatabases" :key="db">
           <div class="dg-item" @click="toggleDb(db)" @contextmenu="openDbCtx($event, activeTab.conn)">
-            <span class="tw">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic ic-db"></span><span class="nm">{{ db }}</span>
+            <span class="tw" :class="{open: openDb[db]}">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic ic-db"></span><span class="nm">{{ db }}</span>
           </div>
           <template v-if="openDb[db]">
             <div class="dg-item sub" style="padding-left:22px" @click="toggleTf(db)">
-              <span class="tw">{{ openTf[db] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
+              <span class="tw" :class="{open: openTf[db]}">{{ openTf[db] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
               <span class="nm">tables</span><span class="cnt">{{ tablesByDb[db] ? tablesByDb[db].length : "…" }}</span></div>
             <template v-if="openTf[db]">
               <div v-if="!tablesByDb[db]" class="dg-empty" style="padding-left:40px">加载中…</div>
@@ -3460,7 +3460,7 @@
       </template>
       <template v-else>
         <div class="dg-item sub" @click="toggleTf('')" @contextmenu="openDbCtx($event, activeTab.conn)">
-          <span class="tw">{{ openTf[''] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
+          <span class="tw" :class="{open: openTf['']}">{{ openTf[''] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
           <span class="nm">tables</span><span class="cnt">{{ tablesByDb[''] ? tablesByDb[''].length : "…" }}</span></div>
         <template v-if="openTf['']">
           <div v-if="tablesLoading" class="dg-empty" style="padding-left:24px">加载中…</div>
@@ -3475,7 +3475,7 @@
         </template>
       </template>
       </div>
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('bm')"><span class="caret">{{ acc.bm ? '▾' : '▸' }}</span><span>书签{{ bmList.length ? "（"+bmList.length+"）" : "" }}</span>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('bm')"><span class="caret" :class="{open: acc.bm}">{{ acc.bm ? "▾" : "▸" }}</span><span>书签{{ bmList.length ? "（"+bmList.length+"）" : "" }}</span>
         <span class="acc-acts" @click.stop><span v-if="bmList.length" class="act" @click="clearBookmarks" title="清除本页所有书签">清空</span></span></div>
       <div v-show="acc.bm" class="acc-body cap">
         <div v-if="!bmList.length" class="dg-empty">把光标放到某行，按 <b>⌘/Ctrl+B</b> 加书签；之后点这里直接跳转。</div>
@@ -3485,7 +3485,7 @@
           <span class="run" @click.stop="runBookmark(b.line)" title="跳转并执行这句">▶</span>
         </div>
       </div>
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('wf')"><span class="caret">{{ acc.wf ? '▾' : '▸' }}</span><span>工作流</span>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('wf')"><span class="caret" :class="{open: acc.wf}">{{ acc.wf ? "▾" : "▸" }}</span><span>工作流</span>
         <span class="acc-acts" @click.stop>
         <a class="act" href="/admin/workflows" title="打开流程独立页">流程 →</a>
         <span class="act" @click="loadWorkflows" title="刷新">↻</span></span></div>
@@ -3499,7 +3499,7 @@
         <div class="c">⚗ {{ w.workspace }} · {{ w.sources.length }} 源 · {{ fmtTs(w.updated_at) }}</div>
       </div>
       </div>
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('hist')"><span class="caret">{{ acc.hist ? '▾' : '▸' }}</span><span>历史</span>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('hist')"><span class="caret" :class="{open: acc.hist}">{{ acc.hist ? "▾" : "▸" }}</span><span>历史</span>
         <span class="acc-acts" @click.stop><span class="act" @click="loadHistory" title="刷新">↻</span></span></div>
       <div v-show="acc.hist" class="acc-body cap">
         <div v-if="!history.length" class="dg-empty">（暂无历史）</div>
@@ -3509,7 +3509,7 @@
           <span class="tm">{{ fmtTs(h.ts).slice(5) }}</span>
         </div>
       </div>
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('snip')"><span class="caret">{{ acc.snip ? '▾' : '▸' }}</span><span>片段{{ visibleSnippets.length ? "（"+visibleSnippets.length+"）" : "" }}</span><span class="acc-acts" @click.stop><span v-if="snippets.length" class="act" @click="downloadAllSnippets" title="全部导出为一个 .sql 文件">⬇</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></span></div>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('snip')"><span class="caret" :class="{open: acc.snip}">{{ acc.snip ? "▾" : "▸" }}</span><span>片段{{ visibleSnippets.length ? "（"+visibleSnippets.length+"）" : "" }}</span><span class="acc-acts" @click.stop><span v-if="snippets.length" class="act" @click="downloadAllSnippets" title="全部导出为一个 .sql 文件">⬇</span><span class="act" @click="toggleSnipForm" title="保存当前 SQL 为片段">＋</span></span></div>
       <div v-show="acc.snip" class="acc-body cap">
       <div v-if="showSnipForm" class="dg-snipform">
         <input v-model="snipDraft.title" placeholder="标题">
