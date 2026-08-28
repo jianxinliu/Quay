@@ -3478,7 +3478,7 @@
       <div class="dg-sec-hd acc-hd" @click="toggleAcc('bm')"><span class="caret">{{ acc.bm ? '▾' : '▸' }}</span><span>书签{{ bmList.length ? "（"+bmList.length+"）" : "" }}</span>
         <span class="acc-acts" @click.stop><span v-if="bmList.length" class="act" @click="clearBookmarks" title="清除本页所有书签">清空</span></span></div>
       <div v-show="acc.bm" class="acc-body cap">
-        <div v-if="!bmList.length" class="dg-empty" style="line-height:1.5">给某句 SQL 加书签：把光标放到那行，按 <b>⌘/Ctrl+B</b> 或点行号左侧空白。之后在这里点它直接跳转/执行。</div>
+        <div v-if="!bmList.length" class="dg-empty">把光标放到某行，按 <b>⌘/Ctrl+B</b> 加书签；之后点这里直接跳转。</div>
         <div v-for="b in bmList" :key="b.line" class="dg-bm-row" @click="jumpBookmark(b.line)" :title="b.text">
           <span class="ln">{{ b.line }}</span>
           <span class="tx">{{ b.text }}</span>

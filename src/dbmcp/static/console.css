@@ -50,6 +50,8 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   --dg-text: #1f2530; --dg-muted: #5b6270; --dg-faint: #838a97;
   --dg-accent: #2563eb; --dg-accent-soft: #d6e2fb; --dg-hover: #eef1f6;
   --dg-green: #1f7a30; --dg-red: #c02a26; --dg-amber: #a9750f;
+  /* 树图标在浅底上要压深，否则中性灰会糊掉、琥珀会发白 */
+  --tree-ico: #6b7280; --tree-ico-table: #a9750f;
 }
 /* 浅色主题修正：选中态原本用近白字（配深色的 accent-soft），浅色下 accent-soft
    变浅蓝，浅字就看不见了 → 选中态文字改用深色文本，靠浅蓝底表达选中。 */
@@ -80,63 +82,99 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 /* ---------- 左栏：连接 / 表 / 片段 ---------- */
 .dg-left { display: flex; flex-direction: column; border-right: 1px solid var(--dg-border); overflow: hidden; flex: none; }
 .dg-conn { padding: 10px; border-bottom: 1px solid var(--dg-border); }
-.dg-conn select {
-  width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
-  border-radius: 6px; padding: 7px 9px; font-size: 12.5px; font-family: var(--dg-mono);
+/* ==================== 左栏 ====================
+   重做前的问题（用户反馈「不够清晰，不够美观」）：
+   ① 区标题（表/书签/工作流/历史/片段）是 10.5px 的 --dg-faint 等宽字，还套了对中文无效的
+      uppercase，等于没有标题——占了 90% 面积的「表」区，标签反而最弱、区与区之间也没有分界；
+   ② 树里五种图标五种颜色（青库/金表/蓝文件夹/琥珀钥匙/紫索引），实心与线框混用，
+      跟侧栏导航是同一个毛病：同屏色相太多，看不出哪一类才是要找的东西；
+   ③ 行右侧的元信息（行数估算、列类型）跟标识符几乎同等粗细，把主角压住了；
+   ④ 选中行是一条通栏实色蓝；⑤ 库/分组/表三级视觉权重相同，层级只靠缩进。
+
+   现在：区标题变成真标题（非等宽、加粗、区间有发丝分界）；图标统一线框、**只给「表」
+   一个强调色**（琥珀＝这是一张表），其余中性灰——一眼扫得到表；元信息退到 10px 的暗色；
+   行改成带圆角的胶囊、选中用淡色底＋细描边而不是实色通栏；分组行（tables/columns/keys/
+   indexes）降级成树内小标题，与表名拉开层级。 */
+:root {
+  --tree-ico: #7d8592;          /* 结构性图标：库/文件夹/键/索引，一律中性 */
+  --tree-ico-table: #c9a44c;    /* 唯一的强调色，只给「表」——扫视时眼睛要找的就是它 */
 }
-.dg-conn select:focus { outline: none; border-color: var(--dg-accent); }
-/* 左栏手风琴：各区各自展开、有界高度，工作流/片段贴底不被树挤掉 */
-.dg-acc { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 4px 0; }
-.dg-acc .acc-hd { cursor: pointer; justify-content: flex-start; gap: 4px; flex: 0 0 auto; }
-.dg-acc .acc-hd:hover { color: var(--dg-muted); }
-.dg-acc .acc-hd .caret { color: var(--dg-faint); font-size: 10px; width: 10px; }
-.dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px; text-transform: none; letter-spacing: 0; }
+.dg-acc { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 2px 0 4px; }
+.dg-acc .acc-hd { cursor: pointer; justify-content: flex-start; gap: 5px; flex: 0 0 auto;
+  border-top: 1px solid var(--dg-border); margin-top: 3px; padding-top: 8px; }
+.dg-acc .acc-hd:first-child { border-top: none; margin-top: 0; padding-top: 6px; }
+.dg-acc .acc-hd:hover { color: var(--dg-text); }
+.dg-acc .acc-hd .caret { color: var(--dg-faint); font-size: 9px; width: 10px; }
+.dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px;
+  text-transform: none; letter-spacing: 0; }
 .dg-acc .acc-body { overflow: auto; }
 .dg-acc .acc-body.grow { flex: 1 1 auto; min-height: 80px; }          /* 库/表：占据剩余空间、内部滚动 */
 .dg-acc .acc-body.cap { flex: 0 0 auto; max-height: 30vh; }           /* 工作流/历史/片段：有界、贴底、内部滚动 */
 .dg-sec-hd {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 12px; font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase;
-  color: var(--dg-faint); font-family: var(--dg-mono); user-select: none;
+  padding: 6px 12px; font-size: 11.5px; letter-spacing: .01em;
+  color: var(--dg-text); font-weight: 600; user-select: none;
 }
-.dg-sec-hd .act { cursor: pointer; color: var(--dg-muted); font-size: 12px; padding: 0 3px; }
+/* 区操作（⌕ ↻ ＋ ⬇）默认压暗，hover 区标题时才亮起来——常态下别跟标题抢注意力 */
+.dg-sec-hd .act { cursor: pointer; color: var(--dg-muted); font-size: 12px; padding: 0 3px;
+  opacity: .65; transition: opacity .12s, color .12s; }
+.dg-sec-hd:hover .act { opacity: 1; }
 .dg-sec-hd .act:hover { color: var(--dg-text); }
+
+/* ---- 树行 ---- */
 .dg-item {
-  display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer;
-  font-family: var(--dg-mono); font-size: 12.5px; white-space: nowrap;
+  position: relative; display: flex; align-items: center; gap: 7px;
+  padding: 3px 8px; margin: 0 6px; border-radius: 5px; cursor: pointer;
+  font-family: var(--dg-mono); font-size: 12.5px; line-height: 19px; white-space: nowrap;
 }
 .dg-item:hover { background: var(--dg-hover); }
-.dg-item .tw { width: 12px; color: var(--dg-muted); flex: none; font-size: 10px; }
-.dg-item .ic { color: var(--dg-muted); flex: none; }
-.dg-item .nm { overflow: hidden; text-overflow: ellipsis; }
+.dg-item .tw { width: 12px; color: var(--dg-faint); flex: none; font-size: 9px; }
+.dg-item .nm { overflow: hidden; text-overflow: ellipsis; color: var(--dg-text); }
 .dg-item .mini { margin-left: auto; opacity: 0; color: var(--dg-muted); font-size: 11px; }
 .dg-item:hover .mini { opacity: 1; }
 .dg-item .mini:hover { color: var(--dg-accent); }
-/* 树图标（SVG data-URI，DataGrip 风：青色库 / 金色表 / 蓝色文件夹 / 琥珀钥匙 / 紫索引） */
+/* 分组行（tables / columns / keys / indexes）：读作树内的小标题，不与表名同级 */
+.dg-item.sub .nm { color: var(--dg-muted); font-size: 11.5px; letter-spacing: .02em; }
+/* 元信息（行数估算 / 数量）退到最暗一档，让标识符自己站出来 */
+.dg-item .cnt, .dg-item .sz {
+  margin-left: auto; color: var(--dg-faint); font-size: 10px;
+  font-family: var(--dg-mono); font-variant-numeric: tabular-nums; padding-left: 8px;
+}
+.dg-item .sz { white-space: nowrap; }
+/* 选中：淡色底 + 一圈细描边，替代原来的通栏实色蓝——既明确又不压住行内文字 */
+.dg-item.sel { background: rgba(53, 116, 240, .20); box-shadow: inset 0 0 0 1px rgba(53, 116, 240, .5); }
+.dg-item.sel .nm { color: #dbe6ff; }
+/* 「已选 N · 清除」：数量用琥珀提示，清除是个链接——两者要拉开，别糊成一串 */
+.dg-sec-hd .selinfo { color: var(--dg-amber); font-size: 10.5px; font-weight: 400;
+  margin-left: auto; margin-right: 10px; }
+.dg-sec-hd .selinfo a { color: var(--dg-muted); cursor: pointer; margin-left: 9px; }
+.dg-sec-hd .selinfo a:hover { color: var(--dg-text); text-decoration: underline; }
+
+/* ---- 树图标 ----
+   与侧栏导航同一套做法：CSS mask 决定形状、background-color 决定颜色，
+   于是「换一个颜色规则」不用重画 SVG。五枚统一为 16×16 / 1.5 线宽线框。 */
 .ic-db, .ic-table, .ic-folder, .ic-key, .ic-idx {
   width: 14px; height: 14px; flex: none; display: inline-block;
-  background-position: center; background-repeat: no-repeat; background-size: contain;
+  background-color: var(--tree-ico);
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain;
 }
-.ic-db { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%234db6ac'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3C/svg%3E"); }
-.ic-table { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='2.5' width='13' height='11' rx='1.5' fill='none' stroke='%23e8b339' stroke-width='1.6'/%3E%3Cpath d='M1.5 6.5h13M6 2.5v11M10.5 2.5v11' stroke='%23e8b339' stroke-width='1.2'/%3E%3C/svg%3E"); }
-.ic-folder { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 4A1.5 1.5 0 0 1 3 2.5h3l1.5 2h6A1.5 1.5 0 0 1 15 6v6a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12z' fill='%236f8bd1'/%3E%3C/svg%3E"); }
-.ic-key { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5.5' cy='8' r='3' fill='none' stroke='%23d9a343' stroke-width='1.8'/%3E%3Cpath d='M8.5 8h6M12 8v3M14.5 8v2' stroke='%23d9a343' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
-.ic-idx { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 4.5h9M2 8h12M2 11.5h7' stroke='%23a48ae0' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.ic-table { background-color: var(--tree-ico-table); }
+.ic-db{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><ellipse cx='8' cy='4' rx='5.4' ry='2.3'/><path d='M2.6 4v8c0 1.3 2.4 2.3 5.4 2.3s5.4-1 5.4-2.3V4'/><path d='M2.6 8c0 1.3 2.4 2.3 5.4 2.3S13.4 9.3 13.4 8'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><ellipse cx='8' cy='4' rx='5.4' ry='2.3'/><path d='M2.6 4v8c0 1.3 2.4 2.3 5.4 2.3s5.4-1 5.4-2.3V4'/><path d='M2.6 8c0 1.3 2.4 2.3 5.4 2.3S13.4 9.3 13.4 8'/></svg>")}
+.ic-table{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='1.9' y='2.9' width='12.2' height='10.2' rx='1.6'/><path d='M1.9 6.4h12.2M6.1 6.4v6.7M10.1 6.4v6.7'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='1.9' y='2.9' width='12.2' height='10.2' rx='1.6'/><path d='M1.9 6.4h12.2M6.1 6.4v6.7M10.1 6.4v6.7'/></svg>")}
+.ic-folder{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M1.9 4.4c0-.8.7-1.5 1.5-1.5h2.7l1.5 2h4.5c.8 0 1.5.7 1.5 1.5v5.7c0 .8-.7 1.5-1.5 1.5H3.4c-.8 0-1.5-.7-1.5-1.5z'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M1.9 4.4c0-.8.7-1.5 1.5-1.5h2.7l1.5 2h4.5c.8 0 1.5.7 1.5 1.5v5.7c0 .8-.7 1.5-1.5 1.5H3.4c-.8 0-1.5-.7-1.5-1.5z'/></svg>")}
+.ic-key{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='5.6' cy='8' r='2.7'/><path d='M8.3 8h6M11.8 8v2.6M14.3 8v1.8'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='5.6' cy='8' r='2.7'/><path d='M8.3 8h6M11.8 8v2.6M14.3 8v1.8'/></svg>")}
+.ic-idx{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h8.4M2.4 8h11.2M2.4 11.4h6.4'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h8.4M2.4 8h11.2M2.4 11.4h6.4'/></svg>")}
 
-.dg-item.sel { background: var(--dg-accent-soft); }
-.dg-item.sel .nm { color: #d7e3ff; }
-.dg-item .cnt { margin-left: auto; color: var(--dg-faint); font-size: 10.5px; padding-right: 4px; }
-.dg-item .sz { margin-left: auto; color: var(--dg-faint); font-size: 10px; font-family: var(--dg-mono); padding-right: 4px; white-space: nowrap; }
-.dg-item .ic.fold { color: #8a95d8; }
-.dg-sec-hd .selinfo { color: var(--dg-amber); font-size: 10.5px; margin-left: auto; margin-right: 8px; }
-.dg-sec-hd .selinfo a { color: var(--dg-muted); cursor: pointer; margin-left: 4px; }
-.dg-sec-hd .selinfo a:hover { color: var(--dg-text); }
 .dg-cols { background: var(--dg-panel-2); }
-.dg-col { display: flex; gap: 8px; padding: 3px 12px 3px 34px; font-family: var(--dg-mono); font-size: 11.5px; }
+.dg-col { display: flex; gap: 8px; padding: 2px 14px 2px 40px; font-family: var(--dg-mono);
+  font-size: 11.5px; line-height: 18px; }
 .dg-col .cn { color: var(--dg-text); }
-.dg-col .ct { color: var(--dg-muted); margin-left: auto; }
+/* 列类型是次要信息：压小压暗，别和列名抢 */
+.dg-col .ct { color: var(--dg-faint); font-size: 10px; margin-left: auto; padding-left: 10px; }
 .dg-col .pk { color: var(--dg-amber); }
-.dg-empty { padding: 8px 14px; color: var(--dg-faint); font-size: 12px; }
+.dg-empty { padding: 7px 14px; color: var(--dg-faint); font-size: 11.5px; line-height: 1.55; }
 .dg-filter { padding: 6px 10px; }
 .dg-filter input {
   width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
