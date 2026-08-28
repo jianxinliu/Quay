@@ -2,36 +2,38 @@
 main { padding: 0 !important; max-width: none !important; height: 100vh; overflow: hidden; grid-column: 2; }
 .pending-banner { display: none !important; }  /* IDE 全屏，横幅让位；侧栏角标仍在 */
 
-/* -------- 左侧导航：常驻 64px 图标栏（图标 + 文字标签） --------
-   历史形态是 46px 纯图标条 + hover 才展开成 236px。两个实际问题：
-   ① 19px 图标不带文字，不 hover 根本认不出每一项是什么（用户反馈「不明显、图标太小」）；
-   ② hover 时 .side 变 position:fixed 脱离网格，主区要靠 grid-column:2 钉住才不露白。
-   现在：常驻 64px、图标放大到 24px、下方带 10px 文字标签、选中项左侧白色强调条，
-   不 hover 也一眼可辨，且尺寸恒定不再有展开/回缩的抖动。 */
-.shell { grid-template-columns: 64px 1fr !important; }
-.side { width: 64px; padding: 12px 4px !important; overflow: visible; }
-.side .brand { padding: 2px 0 14px !important; justify-content: center; }
+/* -------- 左侧导航：常驻 68px 图标栏（IDE 工具栏语言） --------
+   两轮迭代的结果。最早是 46px 纯图标条 + hover 才展开：19px 图标不带文字，不 hover
+   认不出每一项；且 hover 时 .side 变 position:fixed 脱离网格，主区要靠 grid-column:2
+   钉住才不露白。第二版加宽带上文字，但七个图标各带一种颜色（青/红/紫/蓝/绿/琥珀/灰）、
+   线框与实心混用，选中态又是一整块实色青——同屏看下来没有层级，也不成体系。
+
+   现在：**单色图标 + 单一强调色**。图标改走 CSS mask，颜色由 currentColor 决定，
+   于是 idle/hover/active 只是三档 color；选中态用半透明底 + 左边缘一根带微光的强调条，
+   把「重」只留给唯一一个该被看见的元素。图标本身也全部重画成同一套线框规范。
+   状态色 token 定义在 admin-chrome.css（--nav-idle/-hover/-active/-bar），两种侧栏形态共用。 */
+.shell { grid-template-columns: 68px 1fr !important; }
+.side { width: 68px; padding: 14px 4px 12px !important; overflow: visible; }
+.side .brand { padding: 0 0 12px !important; justify-content: center; }
 .side .brand > div { display: none; }
-.side .brand svg { width: 28px !important; height: 28px !important; }
-.side nav { gap: 3px; margin-top: 2px; }
+.side .brand svg { width: 26px !important; height: 26px !important; }
+.side nav { gap: 2px; margin-top: 8px; }
 .side nav a {
   position: relative; flex-direction: column; justify-content: center; align-items: center;
-  gap: 4px !important; padding: 9px 2px !important; border-radius: 10px; text-align: center;
+  gap: 6px !important; padding: 10px 3px 9px !important; border-radius: 10px; text-align: center;
 }
-.side nav a .nico { width: 24px; height: 24px; opacity: .92; }
-.side nav a.active .nico, .side nav a:hover .nico { opacity: 1; }
-.side nav a .nlabel { font-size: 10px; line-height: 1.15; letter-spacing: .2px; white-space: nowrap; }
+.side nav a .nico { width: 22px; height: 22px; }
+.side nav a .nlabel {
+  font-size: 11px; line-height: 1; letter-spacing: .02em; font-weight: 500; white-space: nowrap;
+}
 .side nav a .nav-count {
-  position: absolute; top: 3px; right: 5px; margin: 0 !important;
-  min-width: 15px; height: 15px; border-radius: 8px; font-size: 10px; padding: 0 4px;
+  position: absolute; top: 5px; right: 9px; margin: 0 !important;
+  min-width: 16px; height: 16px; border-radius: 8px; font-size: 10px; padding: 0 4px;
 }
-/* 选中项：高亮底 + 左侧强调条，扫一眼就知道当前在哪一页 */
-.side nav a.active::before {
-  content: ""; position: absolute; left: -4px; top: 9px; bottom: 9px; width: 3px;
-  border-radius: 0 3px 3px 0; background: #fff;
-}
+/* 竖条贴住栏的左边缘（.side 左内边距 4px），只占一段高度——像泊位标记，不像描边 */
+.side nav a.active::before { left: -4px; height: 26px; }
 .side .foot { padding-top: 10px; }
-.side .foot a { padding: 7px 2px !important; text-align: center; font-size: 10px; }
+.side .foot a { padding: 9px 2px !important; text-align: center; font-size: 11px; letter-spacing: .02em; }
 
 :root {
   --dg-bg: #1e1f22; --dg-panel: #2b2d30; --dg-panel-2: #26282b; --dg-border: #393b40;
