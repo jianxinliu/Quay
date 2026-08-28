@@ -505,7 +505,7 @@
     </div>
     <div class="rd-dbbar" v-if="db!=null">
       <span>数据库</span>
-      <dg-select :model-value="db" :options="dbOptions"
+      <dg-select :model-value="db" :options="dbOptions" drop="up"
                  placeholder="选择库" @update:model-value="selectDb"/>
     </div>
   </aside>

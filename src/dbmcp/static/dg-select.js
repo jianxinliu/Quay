@@ -10,7 +10,9 @@
 
   var DgSelect = {
     name: "dg-select",
-    props: ["modelValue", "options", "placeholder"],  // options: [{value, label, env?, ic?}]
+    // drop: 弹出方向。"down"（默认）｜"up"。放在容器底部的选择器（如 Redis 的库切换器）
+    // 必须给 "up"，否则弹层会向下冲出面板、被裁掉半截。
+    props: ["modelValue", "options", "placeholder", "drop"],  // options: [{value, label, env?, ic?}]
     emits: ["update:modelValue"],
     data: function () { return { open: false, q: "" }; },
     computed: {
@@ -37,6 +39,18 @@
         var q = this.q.trim().toLowerCase();
         return q ? this.options.filter(function (o) { return o.label.toLowerCase().indexOf(q) >= 0; })
                  : this.options;
+      },
+      // 选项带 group 字段时插入不可点的分组标题（替代原生 <optgroup>）。
+      // 筛选后空掉的分组自然不会出现——标题只在其下确实有项时才插。
+      rows: function () {
+        var out = [], last = null;
+        this.filtered.forEach(function (o) {
+          var g = o.group || null;
+          if (g && g !== last) out.push({ group: g });
+          last = g;
+          out.push({ o: o });
+        });
+        return out;
       }
     },
     methods: {
@@ -53,18 +67,20 @@
     mounted: function () { document.addEventListener("click", this.onDocClick); },
     unmounted: function () { document.removeEventListener("click", this.onDocClick); },
     template:
-      '<div class="dg-sel">'
+      '<div class="dg-sel" :class="{up: drop === \'up\'}">'
       + '<button type="button" class="dg-sel-btn" @click.stop="toggle" :title="label">'
       + '<img v-if="selIc" class="dg-eng" :src="selIc.src" :title="selIc.label" alt="">'
       + '<span v-if="selEnv" class="dg-env" :style="{background: envColor(selEnv)}">{{ selEnv }}</span>'
-      + '<span class="lb">{{ label }}</span><span class="ar">▾</span></button>'
+      + '<span class="lb">{{ label }}</span><span class="ar">{{ drop === \'up\' ? "▴" : "▾" }}</span></button>'
       + '<div v-if="open" class="dg-sel-pop" @click.stop>'
       +   '<input v-if="options.length > 8" ref="qEl" v-model="q" class="dg-sel-q" placeholder="筛选…">'
       +   '<div class="dg-sel-list">'
-      +     '<div v-for="o in filtered" :key="o.value" class="dg-sel-item"'
-      +       ' :class="{cur: o.value === modelValue}" @click="pick(o.value)">'
-      +       '<img v-if="o.ic" class="dg-eng" :src="o.ic.src" :title="o.ic.label" alt="">'
-      +       '<span v-if="o.env" class="dg-env" :style="{background: envColor(o.env)}">{{ o.env }}</span>{{ o.label }}</div>'
+      +     '<template v-for="(r, i) in rows" :key="i">'
+      +       '<div v-if="r.group" class="dg-sel-group">{{ r.group }}</div>'
+      +       '<div v-else class="dg-sel-item" :class="{cur: r.o.value === modelValue}" @click="pick(r.o.value)">'
+      +         '<img v-if="r.o.ic" class="dg-eng" :src="r.o.ic.src" :title="r.o.ic.label" alt="">'
+      +         '<span v-if="r.o.env" class="dg-env" :style="{background: envColor(r.o.env)}">{{ r.o.env }}</span>{{ r.o.label }}</div>'
+      +     '</template>'
       +     '<div v-if="!filtered.length" class="dg-sel-none">（无匹配）</div>'
       +   '</div>'
       + '</div>'

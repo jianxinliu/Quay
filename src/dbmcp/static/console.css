@@ -277,6 +277,8 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px; padding: 4px;
   box-shadow: 0 12px 36px rgba(0,0,0,.5); max-height: 320px; display: flex; flex-direction: column;
 }
+/* 向上弹出（drop="up"）：给贴在容器底部的选择器用，否则弹层会向下冲出面板被裁掉 */
+.dg-sel.up .dg-sel-pop { top: auto; bottom: 105%; box-shadow: 0 -12px 36px rgba(0,0,0,.5); }
 .dg-sel-q {
   margin: 2px 2px 4px; background: var(--dg-bg); border: 1px solid var(--dg-border);
   border-radius: 5px; color: var(--dg-text); padding: 5px 8px; font-size: 12px; font-family: var(--dg-mono);
@@ -290,6 +292,9 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-sel-item:hover { background: var(--dg-hover); }
 .dg-sel-item.cur { background: var(--dg-accent-soft); color: #d7e3ff; }
 .dg-sel-none { padding: 6px 10px; color: var(--dg-faint); font-size: 12px; }
+/* 分组标题（替代原生 <optgroup>）：只标不选 */
+.dg-sel-group { padding: 7px 10px 3px; color: var(--dg-faint); font-size: 10.5px;
+  letter-spacing: .06em; font-family: var(--dg-mono); }
 /* 批量 DROP 二次确认条（红，内联非弹框） */
 .dg-drop { background: #3a2224; border-bottom: 1px solid #7c3a3a; padding: 10px 14px; flex: none; }
 .dg-drop .hd { font-size: 13px; color: #f1b8b4; margin-bottom: 6px; }
