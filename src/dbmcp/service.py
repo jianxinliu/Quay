@@ -19,7 +19,7 @@ from .audit.redis_rules import classify_command, command_fingerprint, parse_comm
 from .audit.risk import assess
 from .config import AppConfig, ConnectionConfig
 from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
-from .masking import apply_mask
+from .masking import apply_mask, resolve_default_patterns
 from .metadata import MetadataCache
 from .notify import NoopNotifier, Notifier
 from . import engines, redis_engine
@@ -386,7 +386,10 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
-        rows, masked = apply_mask(result.columns, result.rows, cfg.policy) if mask else (result.rows, [])
+        rows, masked = (
+            apply_mask(result.columns, result.rows, cfg.policy, self.mask_default_patterns(cfg))
+            if mask else (result.rows, [])
+        )
         out = {
             "columns": result.columns,
             "rows": rows,
@@ -1513,6 +1516,14 @@ class DbmService:
         value = self._setting("approval_wait_seconds")
         return DEFAULT_APPROVAL_WAIT_S if value is None else int(value)
 
+    def mask_default_patterns(self, cfg: ConnectionConfig) -> bool:
+        """agent 查询是否按内置模式自动脱敏：连接级 Policy 优先，None 则跟随全局设置。
+
+        只用于 agent 路径；后台查询台/导出走 `_read(mask=False)`，压根不到这里。
+        """
+        return resolve_default_patterns(
+            cfg.policy, bool(self._setting("mask_sensitive_columns") is not False))
+
     def agent_result_budget(self, project: str, connection: str) -> int:
         """解析给 agent 的结果字符预算：连接级 Policy 优先，否则全局设置兜底。"""
         cfg = self.config.get_connection(project, connection)
@@ -1900,7 +1911,8 @@ class DbmService:
         def _run() -> dict:
             result = engines.sample_rows(engine, table, limit,
                                          max_cell_chars=cfg.policy.max_cell_chars)
-            rows, masked = apply_mask(result.columns, result.rows, cfg.policy)
+            rows, masked = apply_mask(result.columns, result.rows, cfg.policy,
+                                       self.mask_default_patterns(cfg))
             out = {
                 "columns": result.columns,
                 "rows": rows,

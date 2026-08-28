@@ -138,3 +138,27 @@ class TestReconnectRoute:
         tc, _ = client
         d = tc.post("/admin/sql/reconnect", data={"conn": "demo/nope"}).json()
         assert d["ok"] is False and d["error"]
+
+
+class TestMaskSettingRoutes:
+    """脱敏开关的后台入口：全局设置项 + 连接表单的三态下拉。"""
+
+    def test_global_switch_persists(self, client):
+        tc, svc = client
+        from dbmcp.settings import SettingsStore
+        svc.settings = SettingsStore(":memory:")
+        r = tc.post("/admin/settings/save", data={"mask_sensitive_columns": "false"})
+        assert r.json()["ok"] is True
+        assert svc.get_settings()["mask_sensitive_columns"] is False
+
+    def test_settings_page_shows_switch(self, client):
+        tc, _ = client
+        html = tc.get("/admin/settings?tab=db").text
+        assert "mask_sensitive_columns" in html
+        assert "只作用于 agent" in html
+
+    def test_connection_form_has_tristate(self, client):
+        tc, _ = client
+        html = tc.get("/admin/settings?tab=connections").text
+        assert 'name="mask_default_patterns"' in html
+        assert "跟随全局设置" in html

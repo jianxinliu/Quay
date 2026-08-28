@@ -25,6 +25,10 @@ DEFAULTS: dict[str, object] = {
     "sql_word_wrap": False,      # 编辑器是否自动换行
     "sql_max_rows": 1000,        # 结果默认行上限（自动 LIMIT 兜底 / 非分页读取上限）
     "sql_max_cell_chars": 4096,  # 单元格最大字符数（超长值截断）
+    # agent 查询（query/sample_rows）是否按内置模式自动脱敏敏感列（password/token/secret…）。
+    # **只作用于 agent 路径**——已认证的后台查询台与导出一律返回真实值。
+    # 连接级 Policy.mask_default_patterns 可覆盖（None = 跟随这里）。
+    "mask_sensitive_columns": True,
     # ——Redis 控制台
     "redis_page_size": 100,      # 结果每页行数（键详情集合 / 命令结果）
     "redis_key_limit": 1000,     # 键列表默认加载上限（SCAN）

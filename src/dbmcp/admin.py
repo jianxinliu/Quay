@@ -455,6 +455,11 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     hop_rows = "".join(_hop_row(h, identities) for h in existing_hops)
     empty_hop = _hop_row(None, identities)
     masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
+    mask_mode = "" if not cfg or cfg.policy.mask_default_patterns is None else (
+        "1" if cfg.policy.mask_default_patterns else "0")
+    mask_opts = "".join(
+        f"<option value='{v}'{' selected' if mask_mode == v else ''}>{_esc(t)}</option>"
+        for v, t in (("", "跟随全局设置"), ("1", "开：自动脱敏"), ("0", "关：返回真实值")))
     pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
     writer_user = cfg.writer.user if cfg and cfg.writer else ""
     is_edit_js = "true" if is_edit else "false"
@@ -508,7 +513,12 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
  <div class="muted" style="margin:-2px 0 6px">读超时限只读查询（SELECT）；写超时给 writer 账号的大 DELETE/UPDATE 留足时间，避免 socket 提前断开报 2013。跑飞的写可在查询台点「取消」KILL。</div>
  <div class="row">
   <div>{_field("脱敏列（逗号分隔）", "mask_columns", masks, ph="email, phone")}</div>
+  <div><label>敏感列自动脱敏</label>
+   <select name="mask_default_patterns" style="width:200px">{mask_opts}</select></div>
  </div>
+ <div class="muted" style="margin:-2px 0 6px">「自动脱敏」按内置词表（password / token / secret / id_card…）猜哪些列敏感，
+ <b>只作用于 agent 的 query / sample_rows</b>——你在查询台和导出里看到的一直是真实值。
+ 关掉后 agent 也能拿到这些列的明文；上面手动点名的「脱敏列」不受这个开关影响，始终脱敏。</div>
  <label style="margin-top:12px"><input type="checkbox" name="force_privileged" value="1" style="width:auto;margin-right:6px">强制使用高权限账号（该账号是 root/超级用户或拥有写权限，我确认知晓风险）</label>
  <div id="conn-test-result" style="display:none;margin:12px 0"></div>
  <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -834,6 +844,11 @@ def _settings_db_body(s: dict) -> str:
                        "缺 LIMIT 的查询自动兜底的行上限、非分页读取的截断上限。")
         + _num_setting("单元格最大字符数", "sql_max_cell_chars", s, 4096,
                        "超长 TEXT/BLOB 单元格截断的字符数。")
+        + _bool_setting("敏感列自动脱敏（agent 查询）", "mask_sensitive_columns", s, True,
+                        "开：自动脱敏（默认）", "关：返回真实值",
+                        "按内置词表（password / token / secret / id_card…）猜哪些列敏感，命中即以 ***MASKED*** 返回。"
+                        "<b>只作用于 agent 的 query / sample_rows</b>——查询台与导出一直是真实值。"
+                        "单个连接可在「连接管理」里覆盖这里；连接上手动点名的「脱敏列」不受本开关影响。")
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
                        "连接级 Policy 可单独覆盖。")
@@ -1849,6 +1864,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 ssh_options_extra=_list("ssh_options_extra", " "),
                 max_rows=int(str(f.get("max_rows") or "500")),
                 mask_columns=_list("mask_columns", ","),
+                mask_default_patterns=(
+                    None if str(f.get("mask_default_patterns") or "") == ""
+                    else str(f.get("mask_default_patterns")) in ("1", "on", "true")),
                 force_privileged=str(f.get("force_privileged") or "") in ("1", "on", "true"),
                 statement_timeout_s=int(str(f.get("statement_timeout_s") or "30")),
                 write_timeout_s=int(str(f.get("write_timeout_s") or "600")),
