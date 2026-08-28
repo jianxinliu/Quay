@@ -18,6 +18,7 @@ from starlette.responses import FileResponse, Response
 
 from .agent_format import render_agent_result
 from .approvals import STATUS_APPROVED, STATUS_CONSUMED, STATUS_PENDING, ApprovalError
+from .errors import translate_db_error
 from .health import ConnectionUnavailable
 from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
 
@@ -38,6 +39,31 @@ def _tool_error_from_unavailable(e: ConnectionUnavailable) -> ToolError:
         return ToolError(f"[connection_exhausted] {e}")
     hint = f"（建议 {e.retry_after_s} 秒后重试）" if e.retry_after_s else ""
     return ToolError(f"[connection_unavailable] {e}{hint}")
+
+
+def agent_error(e: BaseException) -> ToolError:
+    """**agent 侧唯一的错误出口**：任何异常在这里被翻译成分类化、已脱敏的 ToolError。
+
+    错误控制必须收在服务内部——不能让驱动异常（含 DSN 里的账号密码、绑定参数、
+    SQLAlchemy 的 traceback 与背景链接）冒泡到 agent 上下文，也不能变成传输层 500。
+    分类前缀让 agent 一眼知道下一步：
+
+    - `[connection_unavailable]` / `[connection_exhausted]`：连接问题，稍后重试 / 需人介入
+    - `[sql_syntax_error]` 等 DB 错误分类（见 errors.py）：改 SQL，别原样重发
+    - 其余业务拒绝（审批/只读限制/参数错）：原样透传服务层已经写好的人话
+
+    ToolError 本身直接放行（上游已经组织好文案）。
+    """
+    if isinstance(e, ToolError):
+        return e
+    if isinstance(e, ConnectionUnavailable):
+        return _tool_error_from_unavailable(e)
+    if isinstance(e, (QueryRejected, ValueError)):
+        return ToolError(str(e))
+    if isinstance(e, KeyError):
+        # KeyError 的 str() 是带引号的 repr，取原始消息更可读
+        return ToolError(str(e.args[0]) if e.args else "未找到指定资源")
+    return ToolError(translate_db_error(e).as_text())
 
 
 def _caller_from_ctx(ctx: Context | None) -> CallerInfo:
@@ -221,6 +247,13 @@ def build_mcp(service: DbmService) -> FastMCP:
             "`# types:` 列类型，随后首行列名、其余数据行，制表符分隔，`\\N`=NULL，大整数为字符串。"
             "结果有**两级硬上限**：行数（默认 1000）+ 字符预算（默认 ≈12k token）；元信息里 "
             "`truncated=true` 即没给全——**别重复拉全量**，用 WHERE/LIMIT/聚合收窄，或用分析工作台下推计算。"
+            "\n【错误怎么读】所有错误都带一个方括号分类前缀，照着它决定下一步，别盲目重发同一条 SQL："
+            "`[sql_syntax_error]` = 语法错（发到 DB 前就被拦下并由 DB 复核确认），必须改写 SQL；"
+            "`[table_not_found]`/`[column_not_found]` = 先用 list_tables / describe_table 核对名字；"
+            "`[permission_denied]`/`[readonly_violation]` = 只读账号不能写，数据变更走 execute 审批流；"
+            "`[query_timeout]` = 收窄范围或改用聚合/分析工作台；"
+            "`[connection_unavailable]` = 连接暂时断开、后台正在自动重连，按提示的秒数稍后重试即可；"
+            "`[connection_exhausted]` = 连续重连失败（仍在自动重试），提醒用户去后台看一眼连接。"
         ),
     )
 
@@ -241,17 +274,18 @@ def build_mcp(service: DbmService) -> FastMCP:
     @mcp.tool
     def list_projects() -> list[dict]:
         """列出所有项目及其下可用的数据库连接名。"""
-        return service.list_projects()
+        try:
+            return service.list_projects()
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def list_connections(project: str) -> list[dict]:
         """列出指定项目下的数据库连接（引擎、环境、库名等元信息，不含账号密码）。"""
         try:
             return service.list_connections(project)
-        except KeyError as e:
-            raise ToolError(str(e)) from e
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def begin_session(
@@ -267,8 +301,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """
         try:
             return service.begin_session(_caller_from_ctx(ctx), title, note)
-        except ValueError as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def query(
@@ -293,10 +327,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             result = service.query(project, connection, sql, _caller_from_ctx(ctx))
             budget = service.agent_result_budget(project, connection)
             return render_agent_result(result, budget)
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (QueryRejected, KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     async def execute(
@@ -331,22 +363,22 @@ def build_mcp(service: DbmService) -> FastMCP:
         """
         caller = _caller_from_ctx(ctx)
         run = partial(service.execute, project, connection, sql, caller, reason=reason)
+        # 首提、等待期间的批准后执行都在同一个 try 内：批准后真正落库时才暴露的 DB 错误
+        # （锁超时、约束冲突等）同样必须走 agent_error 翻译，不能裸奔到传输层。
         try:
             result = await anyio.to_thread.run_sync(partial(run, change_id=change_id))
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (QueryRejected, KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
-        if change_id is None:
-            result = await _maybe_elicit_approval(
-                service, ctx, project, connection, sql, caller, result,
-                resubmit=lambda cid: run(change_id=cid),
-            )
-            wait_s = service.approval_wait_seconds() if wait_seconds is None else wait_seconds
-            if result.get("status") == "approval_required" and wait_s > 0:
-                result = await _wait_then_execute(
-                    service, result, wait_s, ctx, resubmit=lambda cid: run(change_id=cid),
+            if change_id is None:
+                result = await _maybe_elicit_approval(
+                    service, ctx, project, connection, sql, caller, result,
+                    resubmit=lambda cid: run(change_id=cid),
                 )
+                wait_s = service.approval_wait_seconds() if wait_seconds is None else wait_seconds
+                if result.get("status") == "approval_required" and wait_s > 0:
+                    result = await _wait_then_execute(
+                        service, result, wait_s, ctx, resubmit=lambda cid: run(change_id=cid),
+                    )
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
         return result
 
     # Redis 有意不暴露为 MCP 工具：agent 碰不到 Redis。Redis 仅供人通过已登录的
@@ -360,8 +392,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """
         try:
             change = service.get_change(change_id)
-        except Exception as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
         return change_status_payload(change)
 
     @mcp.tool
@@ -383,8 +415,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         wait_s = service.approval_wait_seconds() if timeout_seconds is None else timeout_seconds
         try:
             service.get_change(change_id)  # 先确认审批单存在，不存在直接报错而不是空等
-        except Exception as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
         return await _wait_for_decision(service, change_id, wait_s, ctx)
 
     @mcp.tool
@@ -394,10 +426,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """列出连接可选择的库/schema；MySQL/ClickHouse 返回数据库，PostgreSQL 返回 schema。"""
         try:
             return service.list_databases(project, connection, _caller_from_ctx(ctx))
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def list_tables(
@@ -413,10 +443,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             return service.list_tables(
                 project, connection, _caller_from_ctx(ctx), schema=database
             )
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def describe_table(
@@ -433,10 +461,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             return service.describe_table(
                 project, connection, table, _caller_from_ctx(ctx), schema=database
             )
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def sample_rows(
@@ -451,10 +477,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             result = service.sample_rows(project, connection, table, limit, _caller_from_ctx(ctx))
             budget = service.agent_result_budget(project, connection)
             return render_agent_result(result, budget)
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     async def export_table(
@@ -491,12 +515,8 @@ def build_mcp(service: DbmService) -> FastMCP:
                     project, connection, table, fields, limit, format, caller, database
                 )
             )
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (QueryRejected, KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
         except Exception as e:  # noqa: BLE001
-            raise ToolError(f"{type(e).__name__}: {e}") from e
+            raise agent_error(e) from e
 
     @mcp.tool
     def analysis_workspaces() -> dict:
@@ -510,8 +530,8 @@ def build_mcp(service: DbmService) -> FastMCP:
                     "workflows": [{"name": w["name"], "workspace": w["workspace"],
                                    "kind": "graph" if w.get("graph") else "script"}
                                   for w in service.workflow_list()]}
-        except Exception as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     async def analysis_import(
@@ -534,12 +554,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             return await anyio.to_thread.run_sync(
                 lambda: service.analysis_import(workspace, dataset, project, connection,
                                                 sql, caller, limit, schema))
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (QueryRejected, KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
         except Exception as e:  # noqa: BLE001
-            raise ToolError(f"{type(e).__name__}: {e}") from e
+            raise agent_error(e) from e
 
     @mcp.tool
     async def analysis_sql(
@@ -557,10 +573,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         try:
             return await anyio.to_thread.run_sync(
                 lambda: service.analysis_sql(workspace, sql, caller, max_rows))
-        except (QueryRejected, KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
         except Exception as e:  # noqa: BLE001
-            raise ToolError(f"{type(e).__name__}: {e}") from e
+            raise agent_error(e) from e
 
     @mcp.tool
     async def run_workflow(
@@ -578,7 +592,7 @@ def build_mcp(service: DbmService) -> FastMCP:
             return await anyio.to_thread.run_sync(
                 lambda: service.workflow_run(name, caller))
         except Exception as e:  # noqa: BLE001
-            raise ToolError(str(e)) from e
+            raise agent_error(e) from e
 
     @mcp.tool
     async def save_workflow(
@@ -600,16 +614,14 @@ def build_mcp(service: DbmService) -> FastMCP:
                 lambda: service.workflow_save(name, workspace, script, caller,
                                               allow_replace_graph=False))
         except Exception as e:  # noqa: BLE001
-            raise ToolError(str(e)) from e
+            raise agent_error(e) from e
 
     @mcp.tool
     def test_connection(project: str, connection: str, ctx: Context | None = None) -> dict:
         """测试连接连通性（执行 SELECT 1）。"""
         try:
             return service.test_connection(project, connection, _caller_from_ctx(ctx))
-        except ConnectionUnavailable as e:
-            raise _tool_error_from_unavailable(e) from e
-        except (KeyError, ValueError) as e:
-            raise ToolError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     return mcp

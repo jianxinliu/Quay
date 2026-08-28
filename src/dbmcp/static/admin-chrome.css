@@ -19,13 +19,18 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 .side .brand svg{width:30px;height:30px;border-radius:8px;flex:none}
 .side .brand b{font-size:15px;font-weight:600;letter-spacing:.2px}
 .side .brand span{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1px;text-transform:uppercase}
-.side nav{display:flex;flex-direction:column;gap:2px;margin-top:6px}
-.side nav a{display:flex;align-items:center;gap:10px;color:#aeb6c2;padding:9px 11px;border-radius:8px;
+.side nav{display:flex;flex-direction:column;gap:3px;margin-top:6px}
+.side nav a{position:relative;display:flex;align-items:center;gap:11px;color:#aeb6c2;
+  padding:10px 12px;border-radius:9px;
   font-size:14px;transition:background .12s,color .12s;text-decoration:none}
 .side nav a:hover{background:var(--ink-2);color:#fff;text-decoration:none}
 .side nav a.active{background:var(--accent);color:#fff;font-weight:500}
-/* 每个页面的专属导航图标（SVG data-URI，与查询台树图标同风格）；收起态只显图标 */
-.side nav a .nico{width:17px;height:17px;flex:none;background-position:center;
+/* 选中项左侧白色强调条：仅靠底色区分在深色侧栏上不够跳，加一条竖杠一眼定位 */
+.side nav a.active::before{content:"";position:absolute;left:-4px;top:9px;bottom:9px;width:3px;
+  border-radius:0 3px 3px 0;background:#fff}
+/* 每个页面的专属导航图标（SVG data-URI，与查询台树图标同风格）。
+   查询台/Redis 等 SPA 页由 console.css 覆盖成 64px 图标栏（图标 24px + 文字标签）。 */
+.side nav a .nico{width:20px;height:20px;flex:none;background-position:center;
   background-repeat:no-repeat;background-size:contain;opacity:.85}
 .side nav a.active .nico,.side nav a:hover .nico{opacity:1}
 .nico-sql{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='2.5' width='13' height='11' rx='2' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3Cpath d='M4.5 6.5 7 8.5l-2.5 2' fill='none' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 10.5h3' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")}

@@ -373,6 +373,9 @@
         tabCtx: { show: false, x: 0, y: 0, id: null },  // 编辑区 tab 右键菜单
         dbCtx: { show: false, x: 0, y: 0, conn: "" },   // 左树「库/连接」节点右键菜单（重连）
         reconnecting: false,                            // 正在重连（禁用重复点击）
+        // 连接健康位快照 {"项目/连接": {state, fail_count, retry_in_s, probing, last_error}}。
+        // 只含**不健康**的连接（服务端不返回健康的），查不到即视为正常。
+        connHealth: {},
         renamingId: null, renameVal: "",                // tab 就地改名
         acc: { tree: true, bm: true, wf: true, hist: false, snip: true },  // 左栏手风琴各区展开状态
         dropPlan: null,         // {items:[{t,db}], running, results}
@@ -402,6 +405,12 @@
         var id = this.activeId, ts = this.tabs;
         for (var i = 0; i < ts.length; i++) if (ts[i].id === id) return ts[i];
         return null;
+      },
+      // 当前 tab 所在连接的健康位（正常时为 null）。驱动顶部告警条与结果区的重连按钮——
+      // 以前连接不可用只能靠左树右键菜单里的「重连数据库」，用户反馈根本找不到。
+      activeHealth: function () {
+        var t = this.activeTab;
+        return t && t.conn ? (this.connHealth[t.conn] || null) : null;
       },
       // 多单元格选中时的即时统计（Excel/DataGrip 状态栏风）：非空计数 + 可计算值的 sum/avg/min/max。
       // 用 computed（不是 method）避免模板里被多次调用重复遍历大选区。
@@ -621,7 +630,7 @@
         var id = seq++;
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
-                    sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, running: false,
+                    sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, errKind: "", running: false,
                     pinned: false, snippetId: opts.snippetId || null,   // 已保存到服务端片段库的 id（⌘S 覆盖同一条）
                     snipNote: opts.snipNote || "",                     // 片段备注（覆盖保存时保留，不被清空）
                     savedSql: opts.sql || "", dirty: false,            // 未保存改动标记（标题后 *）
@@ -1685,7 +1694,7 @@
           t.seq = null;
         }
         t.pendingSql = sql;
-        t.running = true; t.err = null; t.ok = null; t.confirm = null; t.explain = null; t.edit = null; t.wfSteps = null;
+        t.running = true; t.err = null; t.errKind = ""; t.ok = null; t.confirm = null; t.explain = null; t.edit = null; t.wfSteps = null;
         t.jobRunAt = Date.now();  // 客户端秒表起点
         // 执行状态字形定位：序列中沿用建立时算好的每条 marks（只切当前条）；
         // 普通单条执行在光标语句行放一个 mark；翻页/重载沿用上次 marks。
@@ -1705,7 +1714,7 @@
                                           expect_fingerprint: confData ? (confData.fingerprint || null) : null })
           .then(function (d) {
             // 连接忙被拒绝 / 其它提交错误 → 作为一个「出错结果页」呈现（不是顶部横幅）
-            if (!d.ok) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: d.error }); self.persist(); return; }
+            if (!d.ok) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: d.error, errKind: d.error_kind }); self.persist(); return; }
             t.jobId = d.job_id; t.jobPage = page;
             self.persist();
             self.pollJob(t.id, d.job_id, page);
@@ -1718,7 +1727,7 @@
         apiGet("/admin/sql/job?id=" + jobId).then(function (d) {
           var t2 = self.tabs.find(function (x) { return x.id === tabId; });
           if (!t2 || t2.jobId !== jobId) return;
-          if (!d.ok) { t2.running = false; t2.jobId = null; self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "任务丢失" }); self._seqAdvance(t2, false); self.persist(); return; }
+          if (!d.ok) { t2.running = false; t2.jobId = null; self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "任务丢失", errKind: d.error_kind }); self._seqAdvance(t2, false); self.persist(); return; }
           if (d.status === "running") {
             t2.running = true;
             // 客户端秒表锚定到服务端真实耗时（刷新后续接、以及首轮校准都准确，避免走得偏快/偏慢）
@@ -1729,7 +1738,12 @@
           t2.running = false; t2.jobId = null;
           // 出错 / 取消 → 也进一个结果页（而非顶部横幅），与成功结果统一在结果 tab 里
           if (d.status === "canceled") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error || "已取消" }); self._seqAdvance(t2, false); self.persist(); return; }
-          if (d.status === "error") { self.setExecGlyph(t2, "err"); self.pushOutcome(t2, t2.pendingSql, { err: d.error }); self._seqAdvance(t2, false); self.persist(); return; }
+          if (d.status === "error") {
+            self.setExecGlyph(t2, "err");
+            self.pushOutcome(t2, t2.pendingSql, { err: d.error, errKind: d.error_kind });
+            if (d.error_kind) self.loadHealth();   // 连接类错误：立刻刷新健康位，让告警条/重连按钮带上重试倒计时
+            self._seqAdvance(t2, false); self.persist(); return;
+          }
           var r = d.result || {};
           if (r.kind === "workflow") {
             // workflow 运行结果：步骤清单 + 输出预览（输出复用结果表格）
@@ -1788,6 +1802,30 @@
           self.flash(d.ok ? "已请求取消" : "任务已结束，无需取消");
         }).catch(function (e) { self.flash("取消失败：" + e); });
       },
+      // ---------- 连接健康位 ----------
+      // 拉取不健康连接的快照。服务端只返回非 ok 的连接，所以整表替换即可（不做增量合并）。
+      loadHealth: function () {
+        var self = this;
+        return apiGet("/admin/sql/health").then(function (d) {
+          if (d && d.ok) self.connHealth = d.conns || {};
+        }).catch(function () {});
+      },
+      // 某连接是否不健康（用于左树/连接选择器画状态点）
+      healthOf: function (conn) { return (conn && this.connHealth[conn]) || null; },
+      // 一次执行失败是否属于「连接问题」——服务端在 error_kind 里标好了，
+      // 这样第一次撞上连接错误（健康位还没打标）时也能立刻给出重连入口。
+      isConnErr: function (t) {
+        var k = t && t.errKind;
+        return !!(k && k.indexOf("connection") === 0) || !!(t && t.conn && this.connHealth[t.conn]);
+      },
+      healthText: function (h) {
+        if (!h) return "";
+        if (h.probing) return "正在重试连接…";
+        var base = h.state === "exhausted"
+          ? ("已连续 " + h.fail_count + " 次重连失败，仍在自动重试")
+          : "连接中断，后台正在自动重连";
+        return base + (h.retry_in_s > 0 ? ("，约 " + h.retry_in_s + " 秒后再试") : "");
+      },
       // 左树「库/连接」节点右键菜单：打开/关闭
       openDbCtx: function (e, conn) {
         if (!conn) return;
@@ -1808,11 +1846,13 @@
           self.reconnecting = false;
           if (d && d.ok) {
             // 清掉该连接下所有 tab 的连接错误提示，刷新当前树
-            self.tabs.forEach(function (t) { if (t.conn === conn && t.err) t.err = null; });
+            self.tabs.forEach(function (t) { if (t.conn === conn && t.err) { t.err = null; t.errKind = ""; } });
             self.flash("✓ 连接已恢复，可重新执行查询");
+            self.loadHealth();
             self.refreshTree();
           } else {
             self.flash("重连失败：" + ((d && d.error) || "未知错误"));
+            self.loadHealth();   // 失败也刷新：告警条上给出下一次自动重试的倒计时
           }
         }).catch(function (e) { self.reconnecting = false; self.flash("重连失败：" + e); });
       },
@@ -1834,14 +1874,17 @@
       // 把一次执行结果（成功/出错/取消）落成结果页：查询 tab 进结果 tab 条；其它类型 tab 用横幅
       pushOutcome: function (t, sql, o) {
         var err = o.err != null ? o.err : null, result = o.result || null;
-        if (t.type !== "query") { t.err = err; t.result = err ? null : result; return; }
-        t.err = err; t.result = result;
+        // errKind 由服务端给（connection_unavailable / connection_exhausted / connection_error…），
+        // 结果页要一起记住：切回这一页时重连按钮不能消失。
+        var kind = o.errKind || "";
+        if (t.type !== "query") { t.err = err; t.errKind = kind; t.result = err ? null : result; return; }
+        t.err = err; t.errKind = kind; t.result = result;
         if (t.isPaging && t.results[t.resultIdx]) {
-          var e = t.results[t.resultIdx]; e.sql = sql; e.result = result; e.err = err;  // 翻页/重载更新当前结果页
+          var e = t.results[t.resultIdx]; e.sql = sql; e.result = result; e.err = err; e.errKind = kind;  // 翻页/重载更新当前结果页
           e.used = ++useSeq;
         } else {
           var nid = t.results.length ? t.results[t.results.length - 1].rid + 1 : 1;
-          t.results.push({ rid: nid, sql: sql, result: result, err: err, used: ++useSeq });
+          t.results.push({ rid: nid, sql: sql, result: result, err: err, errKind: kind, used: ++useSeq });
           if (t.results.length > 10) t.results.shift();  // 上限，防 localStorage 膨胀
           t.resultIdx = t.results.length - 1;
         }
@@ -1862,8 +1905,8 @@
         var t = this.activeTab, entry = t && t.results[i]; if (!entry) return;
         entry.used = ++useSeq;  // 查看即刷新 LRU 使用序，避免常看的页被淘汰
         t.resultIdx = i; t.readSql = entry.sql; t.ok = null;
-        if (entry.err) { t.err = entry.err; t.result = null; this.persist(); return; }
-        t.err = null;
+        if (entry.err) { t.err = entry.err; t.errKind = entry.errKind || ""; t.result = null; this.persist(); return; }
+        t.err = null; t.errKind = "";
         if (entry.result) {
           t.result = entry.result; this.persist();
           if (t.view === "chart") this.$nextTick(this.renderChart);
@@ -1879,12 +1922,12 @@
         var t = this.activeTab; if (!t || !t.results[i]) return;
         var beforeActive = i < t.resultIdx;
         t.results.splice(i, 1);
-        if (!t.results.length) { t.result = null; t.err = null; t.ok = null; t.resultIdx = 0; this.persist(); return; }
+        if (!t.results.length) { t.result = null; t.err = null; t.errKind = ""; t.ok = null; t.resultIdx = 0; this.persist(); return; }
         var ni = beforeActive ? t.resultIdx - 1 : Math.min(t.resultIdx, t.results.length - 1);
         var entry = t.results[ni];
         entry.used = ++useSeq;
         t.resultIdx = ni; t.readSql = entry.sql; t.ok = null;
-        t.err = entry.err || null;
+        t.err = entry.err || null; t.errKind = entry.errKind || "";
         t.result = entry.err ? null : (entry.result || null);  // 被释放的历史结果显示占位，可点该页手动重跑
         this.persist();
         if (t.result && t.view === "chart") this.$nextTick(this.renderChart);
@@ -2938,7 +2981,7 @@
                      // 默认持久化所有结果页的行数据（点击切换不重查）；只有整体超预算时，
                      // 才在下面按 LRU（used 使用序）从最久未用的结果页开始淘汰其行数据
                      results: (t.results || []).map(function (rt) {
-                       return { rid: rt.rid, sql: rt.sql, err: rt.err || null,
+                       return { rid: rt.rid, sql: rt.sql, err: rt.err || null, errKind: rt.errKind || "",
                                 result: rt.result, used: rt.used || 0 };
                      }),
                      resultIdx: t.resultIdx || 0,
@@ -3335,6 +3378,10 @@
         }
       }).catch(function () {});
       this.loadConnections().then(function () { self.loadSnippets(); });
+      // 连接健康位轮询：不健康时页面上要能立刻看到「正在自动重连、N 秒后重试」并给出重连按钮。
+      // 服务端只返回非 ok 的连接，正常情况下这是个几十字节的空响应。
+      this.loadHealth();
+      setInterval(function () { self.loadHealth(); }, 10000);
       loadMonaco(function () { self.initEditor(); });
       window.addEventListener("beforeunload", function () { self.persist(); });
       document.addEventListener("click", function () { self.closeCtx(); self.closeTabCtx(); self.exportOpen = false; self.copyOpen = false; self.schemaPickOpen = false; });
@@ -3479,6 +3526,17 @@
   <section class="dg-main">
     <div v-if="isProd" class="dg-prod-ribbon" title="生产环境 · PROD · 写操作将影响线上数据，请谨慎"></div>
     <div v-else-if="isStaging" class="dg-prod-ribbon staging" title="预发布 · STAGING 环境"></div>
+    <!-- 连接不可用告警条：状态 + 自动重试倒计时 + 一键重连。
+         以前只能在左树右键菜单里找「重连数据库」，用户反馈找不到；现在连不上就挂在最显眼处。 -->
+    <div v-if="activeHealth" class="dg-connbar" :class="{gone: activeHealth.state==='exhausted'}">
+      <span class="dot"></span>
+      <b>{{ activeTab.conn }}</b>
+      <span class="msg">{{ healthText(activeHealth) }}</span>
+      <span v-if="activeHealth.last_error" class="why" :title="activeHealth.last_error">{{ activeHealth.last_error }}</span>
+      <button class="dg-btn" :disabled="reconnecting" @click="reconnect(activeTab.conn)">
+        {{ reconnecting ? "重连中…" : "↻ 立即重连" }}
+      </button>
+    </div>
     <!-- 顶部栏只在「分析工作区脚本」时显示（承载 存工作流）；
          普通 SQL 编辑器整条去掉：执行走 ⌘Enter/右键，schema 选择器浮在编辑器内 -->
     <div class="dg-top" v-if="activeTab && isAnalysis && activeTab.type==='query'">
@@ -3492,6 +3550,10 @@
           <span class="car">{{ tabGroupCollapsed[g.conn] ? '▸' : '▾' }}</span>
           <img v-if="g.meta.ic" class="dg-eng" :src="g.meta.ic.src" :title="g.meta.ic.label" alt="">
           <span class="gnm">{{ g.meta.name }}</span>
+          <!-- 该连接不健康时打个状态点：不用切到那个 tab 也知道哪条连接断了 -->
+          <span v-if="healthOf(g.conn)" class="dg-hdot"
+                :class="{gone: healthOf(g.conn).state==='exhausted'}"
+                :title="healthText(healthOf(g.conn))"></span>
           <span class="gcount">{{ g.tabs.length }}</span>
         </div>
         <template v-if="!tabGroupCollapsed[g.conn]">
@@ -3749,7 +3811,15 @@
             <span class="rx" @click.stop="closeResult(i)">✕</span>
           </div>
         </div>
-        <div v-if="activeTab.err" class="dg-res-err">⚠ {{ activeTab.err }}</div>
+        <div v-if="activeTab.err" class="dg-res-err">
+          <div class="msg">⚠ {{ activeTab.err }}</div>
+          <div v-if="isConnErr(activeTab)" class="dg-err-act">
+            <button class="dg-btn" :disabled="reconnecting" @click="reconnect(activeTab.conn)">
+              {{ reconnecting ? "重连中…" : "↻ 重连数据库" }}
+            </button>
+            <span class="tip">连接问题——后台会自动重连；想立刻恢复就点这里。</span>
+          </div>
+        </div>
         <div v-else-if="activeTab.ok" class="dg-res-ok">✓ 执行成功，影响 {{ activeTab.ok.affected_rows }} 行 · {{ activeTab.ok.duration_ms }} ms</div>
         <template v-else-if="activeTab.result">
           <div class="dg-res-meta">

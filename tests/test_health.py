@@ -122,14 +122,96 @@ class TestHealthMonitor:
 
     def test_exhausted_check_gives_actionable_message(self):
         m = HealthMonitor(probe=lambda p, c: (_ for _ in ()).throw(RuntimeError("down")))
-        # 直接推到 exhausted，绕过后台线程
-        h = Health(state="exhausted", fail_count=5, last_error="boom")
+        # 直接推到 exhausted，绕过后台线程；退避窗口内（下次重试还没到点）
+        h = Health(state="exhausted", fail_count=5, last_error="boom",
+                   next_retry_at=time.monotonic() + 60)
         m._entries[("p", "c")] = h
         with pytest.raises(ConnectionUnavailable) as ei:
             m.check("p", "c")
         assert ei.value.state == "exhausted"
-        assert ei.value.retry_after_s == 0
-        assert "管理员" in str(ei.value)
+        # 不再是"永久放弃"：仍给出下次重试时间，且文案说明在自动重试
+        assert ei.value.retry_after_s > 0
+        assert "自动重试" in str(ei.value)
+        m.stop()
+
+
+class TestCircuitBreakerHalfOpen:
+    """断路器半开：退避到点后放行一个真实请求去探路，成功即自愈、不需人工点重连。"""
+
+    def _down(self, state="unavailable", fail_count=1, due_in=60.0):
+        m = HealthMonitor(probe=lambda p, c: (_ for _ in ()).throw(RuntimeError("down")))
+        m._entries[("p", "c")] = Health(
+            state=state, fail_count=fail_count, last_error="boom",
+            next_retry_at=time.monotonic() + due_in)
+        return m
+
+    def test_within_backoff_window_fails_fast(self):
+        m = self._down(due_in=60)
+        with pytest.raises(ConnectionUnavailable):
+            m.check("p", "c")
+        m.stop()
+
+    def test_due_lets_exactly_one_request_through(self):
+        m = self._down(due_in=-1)          # 已到点
+        m.check("p", "c")                  # 第一个请求被放行去探路
+        assert m.get("p", "c").probing is True
+        with pytest.raises(ConnectionUnavailable):
+            m.check("p", "c")              # 并发的第二个仍快速失败，不重复打 DB
+        m.stop()
+
+    def test_exhausted_also_half_opens(self):
+        """exhausted 不再是死路：到点同样放行探路，DB 恢复后下一次调用即自愈。"""
+        m = self._down(state="exhausted", fail_count=5, due_in=-1)
+        m.check("p", "c")
+        m.mark_ok("p", "c")
+        assert m.get("p", "c").state == "ok"
+        m.check("p", "c")                  # 之后正常放行
+        m.stop()
+
+    def test_half_open_failure_reschedules_and_advances(self):
+        m = self._down(due_in=-1)
+        before = m.get("p", "c").fail_count
+        m.check("p", "c")
+        m.mark_failed("p", "c", "OperationalError: lost connection")
+        h = m.get("p", "c")
+        assert h.probing is False
+        assert h.fail_count == before + 1
+        assert h.next_retry_at > time.monotonic()   # 重新排了退避
+        with pytest.raises(ConnectionUnavailable):
+            m.check("p", "c")
+        m.stop()
+
+    def test_stale_probe_lease_expires(self, monkeypatch):
+        """探路者没回报成败（调用方异常退出）时不能把连接永久锁死。"""
+        monkeypatch.setattr("dbmcp.health.PROBE_LEASE_S", 0.05)
+        m = self._down(due_in=-1)
+        m.check("p", "c")
+        assert m.get("p", "c").probing is True
+        time.sleep(0.08)
+        m.check("p", "c")                  # 租约过期 → 允许新的探路
+        m.stop()
+
+    def test_never_gives_up_after_exhausted(self, monkeypatch):
+        """退避阶梯用完后仍持续重试——DB 恢复后无人访问也能自动转 ok。"""
+        attempts = []
+        recovered = threading.Event()
+
+        def probe(p, c):
+            attempts.append(1)
+            if len(attempts) < 6:          # 前 5 次失败足以走完退避阶梯进 exhausted
+                raise ConnectionRefusedError("nope")
+            recovered.set()
+
+        monkeypatch.setattr("dbmcp.health.BACKOFF_STEPS_S", (0.01, 0.01, 0.01))
+        monkeypatch.setattr("dbmcp.health._TICK_S", 0.01)
+        m = HealthMonitor(probe=probe)
+        m.mark_failed("p", "c", "boom")
+        assert recovered.wait(timeout=5), f"探测在 exhausted 后停了，attempts={len(attempts)}"
+        for _ in range(50):
+            if m.get("p", "c") and m.get("p", "c").state == "ok":
+                break
+            time.sleep(0.02)
+        assert m.get("p", "c").state == "ok"
         m.stop()
 
     def test_force_clear(self):

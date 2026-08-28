@@ -1,31 +1,37 @@
 /* 查询台：DataGrip 风深色 IDE。仅本页加载，覆盖后台浅色壳为全屏工作台。 */
-/* grid-column:2 把主区钉死在第 2 列：hover 时 .side 变 position:fixed 脱离网格，
-   若不钉死，main 会自动回填到第 1 列（46px）→ 1fr 区留空露出白色 body 背景（“遮盖”bug）。 */
 main { padding: 0 !important; max-width: none !important; height: 100vh; overflow: hidden; grid-column: 2; }
 .pending-banner { display: none !important; }  /* IDE 全屏，横幅让位；侧栏角标仍在 */
 
-/* 查询台页：后台左导航默认收起为窄条（IDE 要空间），悬浮展开 */
-.shell { grid-template-columns: 46px 1fr !important; }
-.side { width: 46px; padding: 14px 5px !important; overflow: hidden; transition: none; }
-.side .brand { padding: 0 0 16px !important; justify-content: center; }
+/* -------- 左侧导航：常驻 64px 图标栏（图标 + 文字标签） --------
+   历史形态是 46px 纯图标条 + hover 才展开成 236px。两个实际问题：
+   ① 19px 图标不带文字，不 hover 根本认不出每一项是什么（用户反馈「不明显、图标太小」）；
+   ② hover 时 .side 变 position:fixed 脱离网格，主区要靠 grid-column:2 钉住才不露白。
+   现在：常驻 64px、图标放大到 24px、下方带 10px 文字标签、选中项左侧白色强调条，
+   不 hover 也一眼可辨，且尺寸恒定不再有展开/回缩的抖动。 */
+.shell { grid-template-columns: 64px 1fr !important; }
+.side { width: 64px; padding: 12px 4px !important; overflow: visible; }
+.side .brand { padding: 2px 0 14px !important; justify-content: center; }
 .side .brand > div { display: none; }
-.side .brand svg { width: 26px !important; height: 26px !important; }
-.side nav a { font-size: 0; justify-content: center; gap: 0 !important; padding: 11px 0 !important; }
-.side nav a .nico { width: 19px; height: 19px; opacity: .9; }
-.side nav a .nav-count { font-size: 10px; position: absolute; transform: translate(10px, -8px); }
-.side nav a { position: relative; }
-.side .foot a { font-size: 0; padding: 8px 0 !important; text-align: center; }
-.side .foot a::before { content: "⎋"; font-size: 14px; }
-.side:hover {
-  position: fixed; left: 0; top: 0; bottom: 0; width: 236px; z-index: 85;
-  padding: 20px 14px !important; box-shadow: 12px 0 40px rgba(0,0,0,.45); overflow: visible;
+.side .brand svg { width: 28px !important; height: 28px !important; }
+.side nav { gap: 3px; margin-top: 2px; }
+.side nav a {
+  position: relative; flex-direction: column; justify-content: center; align-items: center;
+  gap: 4px !important; padding: 9px 2px !important; border-radius: 10px; text-align: center;
 }
-.side:hover .brand { justify-content: flex-start; padding: 4px 8px 20px !important; }
-.side:hover .brand > div { display: block; }
-.side:hover nav a { font-size: 14px; justify-content: flex-start; gap: 10px !important; padding: 9px 11px !important; }
-.side:hover nav a .nav-count { position: static; transform: none; font-size: 11px; }
-.side:hover .foot a { font-size: 13px; text-align: left; padding: 6px 11px !important; }
-.side:hover .foot a::before { content: ""; }
+.side nav a .nico { width: 24px; height: 24px; opacity: .92; }
+.side nav a.active .nico, .side nav a:hover .nico { opacity: 1; }
+.side nav a .nlabel { font-size: 10px; line-height: 1.15; letter-spacing: .2px; white-space: nowrap; }
+.side nav a .nav-count {
+  position: absolute; top: 3px; right: 5px; margin: 0 !important;
+  min-width: 15px; height: 15px; border-radius: 8px; font-size: 10px; padding: 0 4px;
+}
+/* 选中项：高亮底 + 左侧强调条，扫一眼就知道当前在哪一页 */
+.side nav a.active::before {
+  content: ""; position: absolute; left: -4px; top: 9px; bottom: 9px; width: 3px;
+  border-radius: 0 3px 3px 0; background: #fff;
+}
+.side .foot { padding-top: 10px; }
+.side .foot a { padding: 7px 2px !important; text-align: center; font-size: 10px; }
 
 :root {
   --dg-bg: #1e1f22; --dg-panel: #2b2d30; --dg-panel-2: #26282b; --dg-border: #393b40;
@@ -400,7 +406,10 @@ table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: v
 table.dg-rt td .nul { color: var(--dg-faint); font-style: italic; }
 table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 .dg-res-ok { padding: 12px 14px; color: var(--dg-green); }
-.dg-res-err { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; color: var(--dg-red); white-space: pre-wrap; word-break: break-word; font-family: var(--dg-mono); font-size: 12px; }
+/* 错误面板：错误正文保留原始换行（pre-wrap），下面的行动区（重连按钮）用普通排版——
+   容器整体 pre-wrap 会把模板缩进渲染成空行 */
+.dg-res-err { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; color: var(--dg-red); white-space: normal; word-break: break-word; font-family: var(--dg-mono); font-size: 12px; }
+.dg-res-err > .msg { white-space: pre-wrap; }
 .dg-res-empty { padding: 14px; color: var(--dg-faint); }
 /* 执行中加载态：顶部转圈条 + 数据 tab 的骨架行（列头已知，内容 shimmer 占位） */
 .dg-res-loading { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
@@ -729,6 +738,41 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   vertical-align: middle; object-fit: contain; flex: none;
 }
 /* 生产环境警示条 */
+/* -------- 连接不可用告警条（dg-main 顶部） --------
+   连接断了要在最显眼的位置说清三件事：哪条连接、系统在干什么（自动重连 + 倒计时）、
+   人可以做什么（立即重连）。以前这三件事只有右键菜单里一个「重连数据库」，等于没有。 */
+.dg-connbar {
+  /* 右侧留出全站铃铛（.dbm-bell 固定在 top:14 right:20、34px 宽）的位置，否则「立即重连」被压住 */
+  flex: none; display: flex; align-items: center; gap: 9px; padding: 7px 64px 7px 12px;
+  background: #4a3a1e; border-bottom: 1px solid var(--dg-amber); color: #f0d9a8; font-size: 12px;
+}
+.dg-connbar.gone { background: #4a2528; border-bottom-color: var(--dg-red); color: #f3c3c0; }
+.dg-connbar .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--dg-amber); flex: none;
+  animation: dg-pulse 1.4s ease-in-out infinite;
+}
+.dg-connbar.gone .dot { background: var(--dg-red); }
+.dg-connbar b { color: #fff; font-weight: 600; }
+.dg-connbar .msg { flex: none; }
+.dg-connbar .why {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: .75; font-family: var(--dg-mono); font-size: 11px;
+}
+.dg-connbar .dg-btn { flex: none; }
+@keyframes dg-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+.theme-light .dg-connbar { background: #fef3c7; border-bottom-color: #d97706; color: #78350f; }
+.theme-light .dg-connbar.gone { background: #fee2e2; border-bottom-color: #dc2626; color: #7f1d1d; }
+.theme-light .dg-connbar b { color: #431407; }
+/* 编辑区 tab 组头上的连接状态点：不切过去也知道哪条连接断了 */
+.dg-hdot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--dg-amber); flex: none;
+  margin-left: 5px; animation: dg-pulse 1.4s ease-in-out infinite;
+}
+.dg-hdot.gone { background: var(--dg-red); }
+/* 结果区错误下方的行动区：连接类错误直接给重连按钮，不用去左树右键 */
+.dg-err-act { margin-top: 12px; display: flex; align-items: center; gap: 10px; font-family: var(--dg-sans, inherit); }
+.dg-err-act .tip { color: var(--dg-muted); font-size: 12px; }
+
 .dg-prod-ribbon { flex: none; height: 8px; background: var(--dg-red); }
 .dg-prod-ribbon.staging { background: #d97706; }
 /* 全屏红框：套住整个查询台视口，一眼可辨生产环境 */

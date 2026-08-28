@@ -1,9 +1,15 @@
-"""连接健康状态位 + 后台重连。
+"""连接健康状态位 + 后台重连（断路器：closed / half-open / open）。
 
 每个 (project, connection) 一份 Health，与引擎池并行维护，覆盖 SQL 引擎与 Redis：
 - ok:              可用；工具直接执行
-- unavailable:     捕到连接级错误，后台正在重连；工具入口直接抛 ConnectionUnavailable
-- exhausted:       重连超过最大次数，需人为在管理后台"测试连接"或改配置
+- unavailable:     捕到连接级错误，后台正在退避重连；退避窗口内的请求快速失败
+- exhausted:       连续失败超过退避阶梯长度——**仍在以最长间隔持续重试**，只是标记
+                   「大概率需要人看一眼」，供后台/前端红色告警与通知使用
+
+**自愈保证**：无论处于哪个状态，都不会永久放弃——
+1. 后台重连线程一直在跑（退避封顶 BACKOFF_STEPS_S[-1]），DB 恢复后无人访问也能自动转 ok；
+2. 退避到点后，`check()` 会**放行一个真实请求**去探路（half-open）。成功即恢复、失败即
+   重新计时。这样 DB 恢复后的第一次调用就能自愈，不必等下一次定时探测，也不需要人工点重连。
 
 只当"连接级"异常触发标记（网络断/socket 超时/tunnel 死/连不上），SQL 语法错、
 权限拒、审批拒等业务错不打标——它们无法通过重连解决。
@@ -25,8 +31,16 @@ logger = logging.getLogger(__name__)
 
 State = Literal["ok", "unavailable", "exhausted"]
 
-# 退避阶梯（秒），第 N 次失败等第 N 项时间再试；索引超出后转 exhausted
+# 退避阶梯（秒），第 N 次失败等第 N 项时间再试；用完后**保持最后一档持续重试**（不放弃）
 BACKOFF_STEPS_S = (5, 15, 45, 120, 300)
+
+# 半开探路的租约：放行的那个请求若这么久还没回报成败（调用方异常退出等），
+# 视作租约过期、允许下一个请求再探路，避免连接被一个"卡住的探路者"永久锁死。
+PROBE_LEASE_S = 120.0
+
+# 后台重连线程的分段睡眠粒度：退避可能长达 300s，分段睡才能对 stop()/next_retry_at
+# 的变化及时响应（而不是死睡到点）。
+_TICK_S = 1.0
 
 
 class ConnectionUnavailable(Exception):
@@ -45,6 +59,8 @@ class Health:
     next_retry_at: float = 0.0      # time.monotonic() 单调时钟
     last_error: str = ""
     last_change_at: float = 0.0     # 供通知去重用
+    probing: bool = False           # 半开：已放行一个探路请求（或后台线程正在探测）
+    probe_started_at: float = 0.0   # 探路开始时刻，用于租约过期判定
     _thread: threading.Thread | None = field(default=None, repr=False)
 
 
@@ -67,19 +83,30 @@ class HealthMonitor:
         self._closed = False
 
     def check(self, project: str, connection: str) -> None:
-        """工具入口调用：若当前不可用抛 ConnectionUnavailable，否则放行。"""
+        """工具入口调用：健康就放行；不健康时退避窗口内快速失败、到点则放行一个探路请求。"""
         with self._lock:
             h = self._entries.get((project, connection))
             if h is None or h.state == "ok":
                 return
+            now = time.monotonic()
+            # 探路租约过期（探路者没回报成败）：解锁，允许重新探路
+            if h.probing and now - h.probe_started_at > PROBE_LEASE_S:
+                h.probing = False
+            if not h.probing and now >= h.next_retry_at:
+                # 半开：放行这一个请求去真实尝试，成败由 mark_ok / mark_failed 回收
+                h.probing = True
+                h.probe_started_at = now
+                return
+            wait = max(0, int(h.next_retry_at - now))
             if h.state == "exhausted":
                 raise ConnectionUnavailable(
-                    f"连接 {project}/{connection} 已确认不可用（连续 {h.fail_count} 次重连失败），"
-                    f"请联系管理员在后台检查。最近错误：{h.last_error or '未知'}",
-                    retry_after_s=0, state="exhausted",
+                    f"连接 {project}/{connection} 持续不可用（已连续 {h.fail_count} 次重连失败，"
+                    f"仍在每 {BACKOFF_STEPS_S[-1]} 秒自动重试，约 {wait} 秒后再试）。"
+                    f"长时间不恢复通常需要人工检查网络/账号/隧道配置。"
+                    f"最近错误：{h.last_error or '未知'}",
+                    retry_after_s=max(wait, 5), state="exhausted",
                 )
             # unavailable：告诉 agent 大约多久后可以重试
-            wait = max(0, int(h.next_retry_at - time.monotonic()))
             raise ConnectionUnavailable(
                 f"连接 {project}/{connection} 暂时不可用，后台正在自动重连"
                 f"（约 {wait} 秒后重试）。请稍后再试。最近错误：{h.last_error or '未知'}",
@@ -94,22 +121,35 @@ class HealthMonitor:
             # 拷贝一份返回（避免调用方看到线程内变化）
             return Health(state=h.state, fail_count=h.fail_count,
                           next_retry_at=h.next_retry_at, last_error=h.last_error,
-                          last_change_at=h.last_change_at)
+                          last_change_at=h.last_change_at, probing=h.probing,
+                          probe_started_at=h.probe_started_at)
+
+    def snapshot(self) -> dict[tuple[str, str], Health]:
+        """全量健康快照（供管理后台/查询台渲染状态灯）。只含非 ok 的记录才有意义，但全给。"""
+        with self._lock:
+            return {
+                k: Health(state=h.state, fail_count=h.fail_count,
+                          next_retry_at=h.next_retry_at, last_error=h.last_error,
+                          last_change_at=h.last_change_at, probing=h.probing)
+                for k, h in self._entries.items()
+            }
 
     def mark_ok(self, project: str, connection: str) -> None:
         """执行成功后调：清失败计数并转 ok。"""
         with self._lock:
             h = self._entries.get((project, connection))
-            if h is None or h.state == "ok":
+            if h is None or (h.state == "ok" and not h.probing):
                 return
             h.state = "ok"
             h.fail_count = 0
             h.last_error = ""
             h.next_retry_at = 0.0
+            h.probing = False
             h.last_change_at = time.monotonic()
 
     def mark_failed(self, project: str, connection: str, error: str) -> None:
-        """捕到连接级异常时调：进入 unavailable、启一次重连（若还没启）。"""
+        """捕到连接级异常时调：进入 unavailable / 推进退避，并确保后台重连线程在跑。"""
+        notify_err = ""
         with self._lock:
             if self._closed:
                 return
@@ -117,21 +157,28 @@ class HealthMonitor:
             if h is None:
                 h = Health()
                 self._entries[(project, connection)] = h
-            if h.state == "exhausted":
-                # 已确认不可用，保留状态，不再退化
-                return
-            first = h.state == "ok"
-            h.state = "unavailable"
             h.last_error = _short(error)
-            h.last_change_at = time.monotonic()
-            if first:
+            now = time.monotonic()
+            if h.state == "ok":
                 # 首次失败：从第一档退避开始探测
-                h.next_retry_at = time.monotonic() + BACKOFF_STEPS_S[0]
-                h.fail_count = 0  # 探测线程会在实际失败时 +1
-                self._start_reconnect(project, connection, h)
+                h.state = "unavailable"
+                h.fail_count = 0  # 探测失败时才 +1
+                h.probing = False
+                h.next_retry_at = now + BACKOFF_STEPS_S[0]
+                h.last_change_at = now
+            elif h.probing:
+                # 半开探路失败：计一次失败并推进退避
+                h.probing = False
+                if self._advance_backoff_locked(h, now):
+                    notify_err = h.last_error
+            # 非探路的重复失败（退避窗口内并发请求各自撞上）不重排退避，
+            # 否则高频请求会把退避一直往后推、永远等不到探测。
+            self._start_reconnect(project, connection, h)
+        if notify_err:
+            self._fire_exhausted(project, connection, notify_err)
 
     def force_clear(self, project: str, connection: str) -> None:
-        """后台"测试连接"/连接更新等场景：无条件清健康状态，让下一次访问重建。"""
+        """后台「测试连接」/「重连」/连接配置更新等场景：无条件清健康状态，让下一次访问重建。"""
         with self._lock:
             self._entries.pop((project, connection), None)
 
@@ -143,66 +190,95 @@ class HealthMonitor:
 
     # ---------- 内部 ----------
 
+    def _advance_backoff_locked(self, h: Health, now: float) -> bool:
+        """在锁内调用：失败计数 +1、排下一次退避。返回 True 表示刚转入 exhausted（需通知一次）。
+
+        退避阶梯用完后**保持最后一档持续重试**，不再有"终态放弃"——DB 恢复即自愈。
+        """
+        h.fail_count += 1
+        idx = min(h.fail_count, len(BACKOFF_STEPS_S) - 1)
+        h.next_retry_at = now + BACKOFF_STEPS_S[idx]
+        if h.fail_count >= len(BACKOFF_STEPS_S) and h.state != "exhausted":
+            h.state = "exhausted"
+            h.last_change_at = now
+            return True
+        return False
+
+    def _fire_exhausted(self, project: str, connection: str, error: str) -> None:
+        logger.warning("connection %s/%s exhausted (仍在持续重试): %s", project, connection, error)
+        try:
+            self._on_exhausted(project, connection, error)
+        except Exception:  # noqa: BLE001
+            logger.exception("on_exhausted callback failed")
+
     def _start_reconnect(self, project: str, connection: str, h: Health) -> None:
-        """在锁内调用；启一个 daemon 线程做退避探测。"""
+        """在锁内调用；启一个 daemon 线程做退避探测（线程已在跑则不重复启）。"""
         if h._thread is not None and h._thread.is_alive():
             return
 
+        key = (project, connection)
+
         def _loop() -> None:
             while True:
+                # 1) 等到退避到点（分段睡，便于 stop / next_retry_at 变化及时生效）
                 with self._lock:
                     if self._closed:
                         return
-                    cur = self._entries.get((project, connection))
+                    cur = self._entries.get(key)
                     if cur is None or cur.state == "ok":
                         return
-                    wait = max(0.0, cur.next_retry_at - time.monotonic())
-                if wait > 0:
-                    time.sleep(wait)
-                # 探测（不占用锁——外部 probe 可能耗时/阻塞）
+                    wait = cur.next_retry_at - time.monotonic()
+                    busy = cur.probing and (
+                        time.monotonic() - cur.probe_started_at <= PROBE_LEASE_S)
+                if wait > 0 or busy:
+                    # busy：已有真实请求在半开探路，等它的结果，别重复打 DB
+                    time.sleep(min(max(wait, 0.0), _TICK_S) if wait > 0 else _TICK_S)
+                    continue
+
+                # 2) 占住探路名额后再探测（与 check() 的半开互斥）
+                with self._lock:
+                    if self._closed:
+                        return
+                    cur = self._entries.get(key)
+                    if cur is None or cur.state == "ok":
+                        return
+                    if cur.probing:
+                        continue
+                    cur.probing = True
+                    cur.probe_started_at = time.monotonic()
+
                 try:
                     self._probe(project, connection)
-                    with self._lock:
-                        cur = self._entries.get((project, connection))
-                        if cur is not None:
-                            cur.state = "ok"
-                            cur.fail_count = 0
-                            cur.last_error = ""
-                            cur.next_retry_at = 0.0
-                            cur.last_change_at = time.monotonic()
-                    logger.info("connection %s/%s reconnected", project, connection)
-                    return
                 except Exception as e:  # noqa: BLE001
+                    notify_err = ""
                     with self._lock:
-                        cur = self._entries.get((project, connection))
+                        cur = self._entries.get(key)
                         if cur is None or self._closed:
                             return
-                        cur.fail_count += 1
+                        cur.probing = False
                         cur.last_error = _short(str(e))
-                        idx = min(cur.fail_count, len(BACKOFF_STEPS_S) - 1)
-                        if cur.fail_count >= len(BACKOFF_STEPS_S):
-                            cur.state = "exhausted"
-                            cur.next_retry_at = 0.0
-                            cur.last_change_at = time.monotonic()
-                            err_snapshot = cur.last_error
-                    if cur.state == "exhausted":
-                        logger.warning("connection %s/%s exhausted after %d retries: %s",
-                                       project, connection, cur.fail_count, err_snapshot)
-                        try:
-                            self._on_exhausted(project, connection, err_snapshot)
-                        except Exception:  # noqa: BLE001
-                            logger.exception("on_exhausted callback failed")
-                        return
-                    with self._lock:
-                        cur = self._entries.get((project, connection))
-                        if cur is not None:
-                            cur.next_retry_at = time.monotonic() + BACKOFF_STEPS_S[idx]
+                        if self._advance_backoff_locked(cur, time.monotonic()):
+                            notify_err = cur.last_error
+                    if notify_err:
+                        self._fire_exhausted(project, connection, notify_err)
+                    continue  # 关键：不再有"放弃"分支，继续按最长间隔重试
+
+                with self._lock:
+                    cur = self._entries.get(key)
+                    if cur is not None:
+                        cur.state = "ok"
+                        cur.fail_count = 0
+                        cur.last_error = ""
+                        cur.next_retry_at = 0.0
+                        cur.probing = False
+                        cur.last_change_at = time.monotonic()
+                logger.info("connection %s/%s reconnected", project, connection)
+                return
 
         t = threading.Thread(target=_loop, name=f"dbm-reconnect-{project}-{connection}",
                              daemon=True)
         h._thread = t
         t.start()
-
 
 # ---------- 连接级异常识别 ----------
 

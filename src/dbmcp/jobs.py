@@ -33,7 +33,7 @@ class Busy(Exception):
 
 class _Job:
     __slots__ = ("id", "key", "fn", "status", "submitted_ts", "started_ts",
-                 "finished_ts", "result", "error", "canceller", "canceling")
+                 "finished_ts", "result", "error", "error_kind", "canceller", "canceling")
 
     def __init__(self, job_id: str, key: Any, fn: JobFn) -> None:
         self.id = job_id
@@ -45,6 +45,9 @@ class _Job:
         self.finished_ts: float | None = None
         self.result: Any = None
         self.error: str | None = None
+        # 调用方在异常上挂 `dbm_error_kind` 即可把错误分类透传给轮询方（如「连接不可用」，
+        # 前端据此在错误处直接给出重连入口）。任务管理器本身不认识具体分类。
+        self.error_kind: str = ""
         self.canceller: Callable[[], None] | None = None
         self.canceling = False
 
@@ -88,6 +91,7 @@ class JobManager:
                 "elapsed_ms": max(elapsed_ms, 0),
                 "result": job.result if job.status == "done" else None,
                 "error": job.error if job.status in ("error", "canceled") else None,
+                "error_kind": job.error_kind if job.status == "error" else "",
             }
 
     def cancel(self, job_id: str) -> bool:
@@ -138,6 +142,7 @@ class JobManager:
                 else:
                     job.status = "error"
                     job.error = str(e) or f"{type(e).__name__}"
+                    job.error_kind = str(getattr(e, "dbm_error_kind", "") or "")
                 job.finished_ts = time.time()
         finally:
             with self._lock:

@@ -143,6 +143,22 @@ run_workflow(name)   → {steps: [每步 ✓/✗ 与行数], output: 最终结�
 - Redis 不对 agent 开放：没有 Redis MCP 工具，`list_connections` 也不会返回 Redis 连接。
   Redis 只能由人在管理后台的 Redis 控制台操作，需要 Redis 数据时请让用户去后台处理。
 
+## 错误怎么读
+
+所有错误都带一个方括号分类前缀。**照分类决定下一步，别盲目重发同一条 SQL**——
+服务端把驱动异常统一翻译过了，你不会看到裸的 traceback 或连接串。
+
+| 分类 | 含义 | 你该做什么 |
+| --- | --- | --- |
+| `[sql_syntax_error]` | SQL 语法错。**发到 DB 前就被拦下**：解析器初筛失败后，还让目标库「只解析不执行」地复核过一遍，所以这个结论是确定的 | 改写 SQL。原样重发一定还是失败，也不会浪费一次人工审批 |
+| `[table_not_found]` / `[column_not_found]` | 表/列不存在 | 先 `list_tables` / `describe_table` 核对名字（未绑默认库时用「库名.表名」） |
+| `[permission_denied]` / `[readonly_violation]` | 只读账号不能写 | 数据变更改走 `execute` 的审批流 |
+| `[query_timeout]` | 查询超时 | 用 WHERE 收窄、走索引，或改用聚合／分析工作台下推计算 |
+| `[duplicate_key]` / `[constraint_violation]` | 唯一键或外键/非空约束冲突 | 检查待写数据，或改用 UPSERT 语义 |
+| `[connection_unavailable]` | 连接暂时断开，后台正在自动退避重连 | 按提示的秒数**稍后重试**即可，连接恢复后会自动放行 |
+| `[connection_exhausted]` | 连续重连失败（**仍在每 5 分钟自动重试**，不会永久放弃） | 告诉用户去管理后台看一眼；后台查询台的连接告警条上有「立即重连」 |
+| `[db_error]` | 未归类的数据库错误（已脱敏） | 按错误正文调整，不要原样重试 |
+
 ## 写 SQL 的约定（务必遵守）
 
 - **时区**：本服务**不固定数据库会话时区**，`@@session.time_zone` 继承各库设置（可能是
