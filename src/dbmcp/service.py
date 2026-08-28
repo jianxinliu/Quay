@@ -19,7 +19,7 @@ from .audit.redis_rules import classify_command, command_fingerprint, parse_comm
 from .audit.risk import assess
 from .config import AppConfig, ConnectionConfig
 from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
-from .masking import apply_mask
+from .masking import apply_mask, resolve_default_patterns
 from .metadata import MetadataCache
 from .notify import NoopNotifier, Notifier
 from . import engines, redis_engine
@@ -38,6 +38,14 @@ DEFAULT_APPROVAL_WAIT_S = 120  # execute 等待人工审批的默认秒数（set
 
 class QueryRejected(Exception):
     """SQL 被审计规则拒绝。message 面向 agent，说明原因与下一步动作。"""
+
+
+class SqlSyntaxError(QueryRejected):
+    """SQL 语法错误——sqlglot 初筛失败**且**目标 DB 只解析不执行地复核也报语法错。
+
+    与普通 QueryRejected 分开，是为了让 agent 一眼分辨「改 SQL」与「走审批/换工具」：
+    语法错重发相同 SQL 永远不会成功，也不该浪费一次人工审批。
+    """
 
 
 def _is_no_database_error(e: Exception) -> bool:
@@ -378,7 +386,10 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
-        rows, masked = apply_mask(result.columns, result.rows, cfg.policy) if mask else (result.rows, [])
+        rows, masked = (
+            apply_mask(result.columns, result.rows, cfg.policy, self.mask_default_patterns(cfg))
+            if mask else (result.rows, [])
+        )
         out = {
             "columns": result.columns,
             "rows": rows,
@@ -394,6 +405,20 @@ class DbmService:
     def query(self, project: str, connection: str, sql: str, caller: CallerInfo) -> dict:
         cfg = self.config.get_connection(project, connection)
         verdict = classify(sql, cfg.engine)
+        if verdict.statement_kind == "ParseError":
+            # 解析失败先走语法预检：DB 复核也报语法错就直接给出精确的语法错误，
+            # 而不是让 agent 收到误导性的「仅允许只读语句」。
+            self._syntax_precheck(project, connection, cfg, sql, caller, "query")
+            # DB 认这条语法（或无法复核）：仍然不能放行——解析不了就判定不了只读性，
+            # 按「默认拒绝」红线拒，但把真实原因说清楚。
+            rec = self._base_record(project, connection, cfg, "query", sql, caller)
+            rec.status = "rejected"
+            rec.detail = verdict.reason
+            self.store.record(rec)
+            raise QueryRejected(
+                f"无法解析该 SQL（{verdict.reason}），因而无法判定它是否只读，出于安全默认拒绝。"
+                "若确为只读查询，请改写成标准写法重试；若是数据变更，请改用 execute 工具。"
+            )
         if not verdict.readonly:
             rec = self._base_record(project, connection, cfg, "query", sql, caller)
             rec.status = "rejected"
@@ -1266,6 +1291,11 @@ class DbmService:
             return self._execute_approved(project, connection, cfg, sql, change_id, caller)
 
         verdict = classify(sql, cfg.engine)
+        if verdict.statement_kind == "ParseError":
+            # 语法预检放在建审批单之前：真语法错的 SQL 不该浪费一次人工审批
+            # （审批人批了也只会在 DB 上 1064）。DB 复核认这条语法（或无法复核）时
+            # 静默返回，继续走原有的「默认拒绝 → 审批流」，保留方言兜底能力。
+            self._syntax_precheck(project, connection, cfg, sql, caller, "execute")
         if verdict.readonly:
             return {"status": "executed", "readonly": True, **self.query(project, connection, sql, caller)}
         return self._request_approval(project, connection, cfg, sql, reason, caller)
@@ -1485,6 +1515,14 @@ class DbmService:
         """execute 首提被拒后，服务端默认等待人工决策的秒数（0 = 不等待）。"""
         value = self._setting("approval_wait_seconds")
         return DEFAULT_APPROVAL_WAIT_S if value is None else int(value)
+
+    def mask_default_patterns(self, cfg: ConnectionConfig) -> bool:
+        """agent 查询是否按内置模式自动脱敏：连接级 Policy 优先，None 则跟随全局设置。
+
+        只用于 agent 路径；后台查询台/导出走 `_read(mask=False)`，压根不到这里。
+        """
+        return resolve_default_patterns(
+            cfg.policy, bool(self._setting("mask_sensitive_columns") is not False))
 
     def agent_result_budget(self, project: str, connection: str) -> int:
         """解析给 agent 的结果字符预算：连接级 Policy 优先，否则全局设置兜底。"""
@@ -1873,7 +1911,8 @@ class DbmService:
         def _run() -> dict:
             result = engines.sample_rows(engine, table, limit,
                                          max_cell_chars=cfg.policy.max_cell_chars)
-            rows, masked = apply_mask(result.columns, result.rows, cfg.policy)
+            rows, masked = apply_mask(result.columns, result.rows, cfg.policy,
+                                       self.mask_default_patterns(cfg))
             out = {
                 "columns": result.columns,
                 "rows": rows,
@@ -1968,6 +2007,45 @@ class DbmService:
         rec.status = "ok"
         self.store.record(rec)
         return result
+
+    def _syntax_precheck(
+        self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
+        caller: CallerInfo, tool: str,
+    ) -> None:
+        """agent 侧 SQL 的语法预检（仅在 sqlglot 解析失败后调用）。
+
+        让目标 DB **只解析不执行**地复核一次（MySQL PREPARE / SQLite EXPLAIN / …）：
+        - DB 明确报语法错 → 记审计并抛 SqlSyntaxError，不再往下走（不建审批单）；
+        - DB 认这条语法，或该引擎/语句无法复核 → 静默返回，交回调用方原有的保守路径。
+
+        为什么不直接信 sqlglot：它的方言覆盖不完整（MySQL 无括号的 DROP PARTITION 是合法
+        SQL 但 sqlglot 解析不了），只信它会误拒合法语句。见 CLAUDE.md 同名教训。
+        """
+        if cfg.engine == "redis":
+            return
+        def _do() -> "engines.SyntaxCheck":
+            engine = self.pool.get(project, connection, cfg)
+            return engines.dry_run_syntax_check(engine, sql, cfg.engine)
+
+        try:
+            res = self._run_touching_db(project, connection, _do)
+        except ConnectionUnavailable:
+            raise
+        except Exception:  # noqa: BLE001
+            # 复核本身出错（引擎建不起来等）不该改变主流程的判定，退回保守路径
+            logger.debug("syntax precheck failed for %s/%s", project, connection, exc_info=True)
+            return
+        if not res.supported or res.ok:
+            return
+        where = f"（第 {res.stmt_index} 条语句）" if res.stmt_index > 1 else ""
+        rec = self._base_record(project, connection, cfg, tool, sql, caller)
+        rec.status = "rejected"
+        rec.detail = f"SQL 语法错误: {res.error}"
+        self.store.record(rec)
+        raise SqlSyntaxError(
+            f"[sql_syntax_error] SQL 语法错误{where}，已由目标数据库（{cfg.engine}）复核确认："
+            f"{res.error}。请修正语法后重试，不要原样重发。"
+        )
 
     def _run_touching_db(self, project: str, connection: str, fn):  # noqa: ANN001
         """任何"会触达 DB/隧道"的动作都过这里：入口先查健康位、出错时按类别打标。

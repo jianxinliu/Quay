@@ -133,6 +133,31 @@ def _fmt_ts(ts: object) -> str:
         return str(ts)
 
 
+def error_payload(e: BaseException) -> dict:
+    """异常 → 查询台可行动的 JSON 错误。
+
+    连接类错误额外带 `error_kind`，前端据此在错误处**直接给出「重连数据库」按钮**
+    （原先只能在左树右键菜单里找，用户反馈难发现）：
+    - `connection_unavailable` / `connection_exhausted`：健康位已判不可用，后台正在退避重连
+    - `connection_error`：这一次刚撞上连接级错误（健康位可能还没来得及打标）
+
+    消息一律过 `sanitize_db_message`：管理后台虽已认证，也不该把 DSN 里的密码、
+    绑定参数原样打到页面上。
+    """
+    from .errors import sanitize_db_message
+    from .health import ConnectionUnavailable, is_connection_error
+    from .service import QueryRejected
+
+    if isinstance(e, ConnectionUnavailable):
+        return {"ok": False, "error": str(e), "error_kind": f"connection_{e.state}"}
+    if isinstance(e, (QueryRejected, KeyError, ValueError)):
+        return {"ok": False, "error": str(e)}
+    msg = sanitize_db_message(f"{type(e).__name__}: {e}")
+    if is_connection_error(e):
+        return {"ok": False, "error": msg, "error_kind": "connection_error"}
+    return {"ok": False, "error": msg}
+
+
 def _format_sql(sql: str, engine: str) -> str:
     """用 sqlglot 美化 SQL（缩进/关键字对齐）；解析失败则原样返回。"""
     if not sql:
@@ -182,15 +207,15 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>Quay</b><span>gatekeeper</span></div></div>
   <nav>
-   <a href="/admin/sql"><span class="nico nico-sql"></span>查询台</a>
-   <a href="/admin/redis"><span class="nico nico-redis"></span>Redis</a>
-   <a href="/admin/workflows"><span class="nico nico-flow"></span>流程</a>
-   <a href="/admin/exports"><span class="nico nico-export"></span>临时导出</a>
-   <a href="/admin/approvals"><span class="nico nico-approve"></span>审批中心{nav_badge}</a>
-   <a href="/admin/audit"><span class="nico nico-audit"></span>操作审计</a>
-   <a href="/admin/settings"><span class="nico nico-settings"></span>系统设置</a>
+   <a href="/admin/sql"><span class="nico nico-sql"></span><span class="nlabel">查询台</span></a>
+   <a href="/admin/redis"><span class="nico nico-redis"></span><span class="nlabel">Redis</span></a>
+   <a href="/admin/workflows"><span class="nico nico-flow"></span><span class="nlabel">流程</span></a>
+   <a href="/admin/exports"><span class="nico nico-export"></span><span class="nlabel">临时导出</span></a>
+   <a href="/admin/approvals"><span class="nico nico-approve"></span><span class="nlabel">审批中心</span>{nav_badge}</a>
+   <a href="/admin/audit"><span class="nico nico-audit"></span><span class="nlabel">操作审计</span></a>
+   <a href="/admin/settings"><span class="nico nico-settings"></span><span class="nlabel">系统设置</span></a>
   </nav>
-  <div class="foot"><a href="/admin/logout">退出登录</a></div>
+  <div class="foot"><a href="/admin/logout"><span class="nlabel">退出登录</span></a></div>
  </aside>
  <main>{banner}{body}</main>
 </div>
@@ -430,6 +455,11 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     hop_rows = "".join(_hop_row(h, identities) for h in existing_hops)
     empty_hop = _hop_row(None, identities)
     masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
+    mask_mode = "" if not cfg or cfg.policy.mask_default_patterns is None else (
+        "1" if cfg.policy.mask_default_patterns else "0")
+    mask_opts = "".join(
+        f"<option value='{v}'{' selected' if mask_mode == v else ''}>{_esc(t)}</option>"
+        for v, t in (("", "跟随全局设置"), ("1", "开：自动脱敏"), ("0", "关：返回真实值")))
     pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
     writer_user = cfg.writer.user if cfg and cfg.writer else ""
     is_edit_js = "true" if is_edit else "false"
@@ -483,7 +513,12 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
  <div class="muted" style="margin:-2px 0 6px">读超时限只读查询（SELECT）；写超时给 writer 账号的大 DELETE/UPDATE 留足时间，避免 socket 提前断开报 2013。跑飞的写可在查询台点「取消」KILL。</div>
  <div class="row">
   <div>{_field("脱敏列（逗号分隔）", "mask_columns", masks, ph="email, phone")}</div>
+  <div><label>敏感列自动脱敏</label>
+   <select name="mask_default_patterns" style="width:200px">{mask_opts}</select></div>
  </div>
+ <div class="muted" style="margin:-2px 0 6px">「自动脱敏」按内置词表（password / token / secret / id_card…）猜哪些列敏感，
+ <b>只作用于 agent 的 query / sample_rows</b>——你在查询台和导出里看到的一直是真实值。
+ 关掉后 agent 也能拿到这些列的明文；上面手动点名的「脱敏列」不受这个开关影响，始终脱敏。</div>
  <label style="margin-top:12px"><input type="checkbox" name="force_privileged" value="1" style="width:auto;margin-right:6px">强制使用高权限账号（该账号是 root/超级用户或拥有写权限，我确认知晓风险）</label>
  <div id="conn-test-result" style="display:none;margin:12px 0"></div>
  <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -809,6 +844,11 @@ def _settings_db_body(s: dict) -> str:
                        "缺 LIMIT 的查询自动兜底的行上限、非分页读取的截断上限。")
         + _num_setting("单元格最大字符数", "sql_max_cell_chars", s, 4096,
                        "超长 TEXT/BLOB 单元格截断的字符数。")
+        + _bool_setting("敏感列自动脱敏（agent 查询）", "mask_sensitive_columns", s, True,
+                        "开：自动脱敏（默认）", "关：返回真实值",
+                        "按内置词表（password / token / secret / id_card…）猜哪些列敏感，命中即以 ***MASKED*** 返回。"
+                        "<b>只作用于 agent 的 query / sample_rows</b>——查询台与导出一直是真实值。"
+                        "单个连接可在「连接管理」里覆盖这里；连接上手动点名的「脱敏列」不受本开关影响。")
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
                        "连接级 Policy 可单独覆盖。")
@@ -1824,6 +1864,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 ssh_options_extra=_list("ssh_options_extra", " "),
                 max_rows=int(str(f.get("max_rows") or "500")),
                 mask_columns=_list("mask_columns", ","),
+                mask_default_patterns=(
+                    None if str(f.get("mask_default_patterns") or "") == ""
+                    else str(f.get("mask_default_patterns")) in ("1", "on", "true")),
                 force_privileged=str(f.get("force_privileged") or "") in ("1", "on", "true"),
                 statement_timeout_s=int(str(f.get("statement_timeout_s") or "30")),
                 write_timeout_s=int(str(f.get("write_timeout_s") or "600")),
@@ -2864,7 +2907,6 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     @mcp.custom_route("/admin/sql/run_async", methods=["POST"])
     @guard
     async def _sql_run_async(req: Request) -> JSONResponse:
-        from .service import QueryRejected
         f = await req.form()
         sql = str(f.get("sql") or "")
         confirm = str(f.get("confirm") or "") in ("1", "on", "true")
@@ -2901,8 +2943,13 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 return service.admin_run_sql(project, connection, sql, caller,
                                              confirm, page, None, schema, on_start=register,
                                              confirm_text=confirm_text, expect_fingerprint=expect_fp)
-            except (QueryRejected, KeyError, ValueError) as e:
-                raise RuntimeError(str(e)) from e
+            except Exception as e:  # noqa: BLE001
+                # 统一成已脱敏的文案；连接类错误打上 dbm_error_kind，JobManager 会把它
+                # 透传到 /admin/sql/job 快照里，前端据此在结果区直接显示「重连」按钮。
+                payload = error_payload(e)
+                wrapped = RuntimeError(payload["error"])
+                wrapped.dbm_error_kind = payload.get("error_kind", "")
+                raise wrapped from e
 
         # 按连接串行只约束编辑器里手写的 SQL（同一连接同时只跑一条，忙时直接拒绝、前端明确提示）；
         # 双击表名打开的数据 tab（parallel=1）用独立 key 立即并行、不占用连接串行名额、也不互拒。
@@ -2929,6 +2976,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             out["result"] = snap["result"]
         elif snap["status"] in ("error", "canceled"):
             out["error"] = snap["error"]
+            out["error_kind"] = snap.get("error_kind") or ""
         return JSONResponse(out)
 
     @mcp.custom_route("/admin/sql/cancel", methods=["POST"])
@@ -2938,6 +2986,31 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         f = await req.form()
         job_id = str(f.get("id") or "")
         return JSONResponse({"ok": _jobmgr.cancel(job_id)})
+
+    @mcp.custom_route("/admin/sql/health", methods=["GET"])
+    @guard
+    async def _sql_health(_req: Request) -> JSONResponse:
+        """各连接的健康位快照，供查询台左树/连接选择器画状态灯。
+
+        只返回**非健康**的连接（健康的不占带宽，前端把「查不到」当作正常）。
+        retry_in_s 是距离下一次自动重试的秒数——前端据此显示「N 秒后自动重连」，
+        让人知道系统在自愈、不必手忙脚乱地点重连。
+        """
+        import time as _time
+
+        snap = service.health.snapshot()
+        now = _time.monotonic()
+        conns = {
+            f"{proj}/{conn}": {
+                "state": h.state,
+                "fail_count": h.fail_count,
+                "retry_in_s": max(0, int(h.next_retry_at - now)),
+                "probing": h.probing,
+                "last_error": h.last_error,
+            }
+            for (proj, conn), h in snap.items() if h.state != "ok"
+        }
+        return JSONResponse({"ok": True, "conns": conns})
 
     @mcp.custom_route("/admin/sql/reconnect", methods=["POST"])
     @guard
@@ -2958,13 +3031,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             out = await anyio.to_thread.run_sync(
                 lambda: service.reconnect_connection(project, connection, _caller(req)))
         except Exception as e:  # noqa: BLE001
-            return JSONResponse({"ok": False, "error": str(e)})
+            return JSONResponse(error_payload(e))
         return JSONResponse(out)
 
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard
     async def _sql_run(req: Request) -> JSONResponse:
-        from .service import QueryRejected
         f = await req.form()
         sql = str(f.get("sql") or "")
         confirm = str(f.get("confirm") or "") in ("1", "on", "true")
@@ -2993,10 +3065,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 lambda: service.admin_run_sql(
                     project, connection, sql, _caller(req), confirm, page, None, schema,
                     confirm_text=confirm_text, expect_fingerprint=expect_fp))
-        except (QueryRejected, KeyError, ValueError) as e:
-            return JSONResponse({"ok": False, "error": str(e)})
-        except Exception as e:
-            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **result})
 
     @mcp.custom_route("/admin/sql/format", methods=["POST"])

@@ -5,6 +5,9 @@
   --ink:#14181f; --ink-2:#1c222c; --paper:#f4f5f7; --surface:#fff;
   --border:#e6e8ec; --line:#eef0f3; --text:#1a1f28; --muted:#6b7280; --faint:#9aa1ac;
   --accent:#0d9488; --accent-ink:#0b7268; --accent-soft:#e6faf6;
+  /* 导航状态色：图标与文字同色（图标走 CSS mask + background-color），
+     所以一个 color 就决定了整项的观感，idle/hover/active 三档而已 */
+  --nav-idle:#8b95a4; --nav-hover:#e7ebf1; --nav-active:#5eead4; --nav-bar:#14b8a6;
   --mono:ui-monospace,'SF Mono',Menlo,Monaco,'Cascadia Code',monospace;
   --sans:-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif;
 }
@@ -15,35 +18,47 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 /* 侧栏 */
 .side{background:var(--ink);color:#c7cdd6;display:flex;flex-direction:column;padding:20px 14px;
   position:sticky;top:0;height:100vh}
-.side .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 20px;color:#fff}
+.side .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 16px;color:#fff;
+  border-bottom:1px solid rgba(255,255,255,.07)}
 .side .brand svg{width:30px;height:30px;border-radius:8px;flex:none}
 .side .brand b{font-size:15px;font-weight:600;letter-spacing:.2px}
 .side .brand span{display:block;font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:1px;text-transform:uppercase}
-.side nav{display:flex;flex-direction:column;gap:2px;margin-top:6px}
-.side nav a{display:flex;align-items:center;gap:10px;color:#aeb6c2;padding:9px 11px;border-radius:8px;
-  font-size:14px;transition:background .12s,color .12s;text-decoration:none}
-.side nav a:hover{background:var(--ink-2);color:#fff;text-decoration:none}
-.side nav a.active{background:var(--accent);color:#fff;font-weight:500}
-/* 每个页面的专属导航图标（SVG data-URI，与查询台树图标同风格）；收起态只显图标 */
-.side nav a .nico{width:17px;height:17px;flex:none;background-position:center;
-  background-repeat:no-repeat;background-size:contain;opacity:.85}
-.side nav a.active .nico,.side nav a:hover .nico{opacity:1}
-.nico-sql{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='2.5' width='13' height='11' rx='2' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3Cpath d='M4.5 6.5 7 8.5l-2.5 2' fill='none' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 10.5h3' stroke='%234db6ac' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")}
-.nico-approve{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5 13.5 3.5v4c0 3.2-2.3 5.8-5.5 7-3.2-1.2-5.5-3.8-5.5-7v-4z' fill='none' stroke='%2356d364' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='m5.5 8 1.8 1.8L10.8 6' fill='none' stroke='%2356d364' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
-.nico-audit{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 3.5h8M2 8h6M2 12.5h5' stroke='%23e8b339' stroke-width='1.7' stroke-linecap='round'/%3E%3Ccircle cx='11.5' cy='10.5' r='3' fill='none' stroke='%23e8b339' stroke-width='1.5'/%3E%3Cpath d='M11.5 9v1.7l1.2.8' fill='none' stroke='%23e8b339' stroke-width='1.3' stroke-linecap='round'/%3E%3C/svg%3E")}
-.nico-conn{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%236f9be8'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%236f9be8' stroke-width='1.6'/%3E%3C/svg%3E")}
-.nico-redis{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2.5 13 4 8 5.5 3 4Z' fill='%23d9534f'/%3E%3Cpath d='M8 6.5 13 8 8 9.5 3 8Z' fill='%23d9534f'/%3E%3Cpath d='M8 10.5 13 12 8 13.5 3 12Z' fill='%23d9534f'/%3E%3C/svg%3E")}
-.nico-flow{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='3' cy='4' r='1.8' fill='%23c084fc'/%3E%3Ccircle cx='3' cy='12' r='1.8' fill='%23c084fc'/%3E%3Ccircle cx='13' cy='8' r='1.8' fill='%23c084fc'/%3E%3Cpath d='M4.5 4.6 11.5 7.4M4.5 11.4 11.5 8.6' stroke='%23c084fc' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E")}
-.nico-export{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 1.8h6.3L13 5.5v8.7H3z' fill='none' stroke='%2338bdf8' stroke-width='1.5' stroke-linejoin='round'/%3E%3Cpath d='M9.2 1.8v3.8H13M8 6.8v4.1m0 0-2-2m2 2 2-2' fill='none' stroke='%2338bdf8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")}
-.nico-settings{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='2.2' fill='none' stroke='%23aab2c0' stroke-width='1.5'/%3E%3Cpath d='M8 1.3v2.2M8 12.5v2.2M14.7 8h-2.2M3.5 8H1.3M12.7 3.3l-1.6 1.6M4.9 11.1l-1.6 1.6M12.7 12.7l-1.6-1.6M4.9 4.9 3.3 3.3' stroke='%23aab2c0' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E")}
-.nav-count{margin-left:auto;background:#dc2626;color:#fff;font-size:11px;font-weight:700;
-  min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}
+.side nav{display:flex;flex-direction:column;gap:2px;margin-top:10px}
+.side nav a{position:relative;display:flex;align-items:center;gap:11px;color:var(--nav-idle);
+  padding:9px 12px;border-radius:9px;
+  font-size:14px;transition:background .14s,color .14s;text-decoration:none}
+.side nav a:hover{background:rgba(255,255,255,.055);color:var(--nav-hover);text-decoration:none}
+.side nav a.active{background:rgba(20,184,166,.12);color:var(--nav-active);font-weight:500}
+/* 选中指示：贴着侧栏左边缘的一小段发光竖条。比整块实色底更克制，
+   也让「当前在哪一页」在余光里就能扫到。 */
+.side nav a.active::before{content:"";position:absolute;left:-14px;top:50%;
+  transform:translateY(-50%);width:3px;height:20px;border-radius:0 3px 3px 0;
+  background:var(--nav-bar);box-shadow:0 0 10px rgba(20,184,166,.55)}
+/* 图标用 CSS mask 而非 background-image：形状由 mask 决定、**颜色由 currentColor 决定**，
+   于是 idle/hover/active 只需改 color，图标自动跟着走。
+   （原先是七个各自带色的 SVG——青/红/紫/蓝/绿/琥珀/灰同屏，既不成体系也压不住层级。）
+   七枚图标统一重画为 16×16、1.5 线宽、纯线框。 */
+.side nav a .nico{width:20px;height:20px;flex:none;background-color:currentColor;
+  -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+  -webkit-mask-position:center;mask-position:center;
+  -webkit-mask-size:contain;mask-size:contain}
+.nico-sql{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='1.9' y='2.9' width='12.2' height='10.2' rx='2.2'/><path d='M4.9 7.1 7 9l-2.1 1.9'/><path d='M8.7 11h2.7'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='1.9' y='2.9' width='12.2' height='10.2' rx='2.2'/><path d='M4.9 7.1 7 9l-2.1 1.9'/><path d='M8.7 11h2.7'/></svg>")}
+.nico-redis{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 1.8 14 5 8 8.2 2 5Z'/><path d='M2 8.4 8 11.6 14 8.4'/><path d='M2 11.6 8 14.8 14 11.6'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 1.8 14 5 8 8.2 2 5Z'/><path d='M2 8.4 8 11.6 14 8.4'/><path d='M2 11.6 8 14.8 14 11.6'/></svg>")}
+.nico-flow{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='3.6' cy='4' r='2.1'/><circle cx='3.6' cy='12' r='2.1'/><circle cx='12.4' cy='8' r='2.1'/><path d='m5.6 4.9 4.8 2.2M5.6 11.1l4.8-2.2'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='3.6' cy='4' r='2.1'/><circle cx='3.6' cy='12' r='2.1'/><circle cx='12.4' cy='8' r='2.1'/><path d='m5.6 4.9 4.8 2.2M5.6 11.1l4.8-2.2'/></svg>")}
+.nico-export{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 2.3v6.5m0 0L5.6 6.4M8 8.8l2.4-2.4'/><path d='M2.9 10.1v2.3c0 .8.6 1.4 1.4 1.4h7.4c.8 0 1.4-.6 1.4-1.4v-2.3'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 2.3v6.5m0 0L5.6 6.4M8 8.8l2.4-2.4'/><path d='M2.9 10.1v2.3c0 .8.6 1.4 1.4 1.4h7.4c.8 0 1.4-.6 1.4-1.4v-2.3'/></svg>")}
+.nico-approve{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 1.9 13.4 3.8v3.8c0 3.1-2.2 5.6-5.4 6.7-3.2-1.1-5.4-3.6-5.4-6.7V3.8Z'/><path d='m5.6 7.8 1.8 1.8 3.3-3.5'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 1.9 13.4 3.8v3.8c0 3.1-2.2 5.6-5.4 6.7-3.2-1.1-5.4-3.6-5.4-6.7V3.8Z'/><path d='m5.6 7.8 1.8 1.8 3.3-3.5'/></svg>")}
+.nico-audit{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.3 3.7h7.9M2.3 8h5.3M2.3 12.3h4.3'/><circle cx='11.6' cy='10.6' r='2.9'/><path d='M11.6 9.2v1.6l1.2.8'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.3 3.7h7.9M2.3 8h5.3M2.3 12.3h4.3'/><circle cx='11.6' cy='10.6' r='2.9'/><path d='M11.6 9.2v1.6l1.2.8'/></svg>")}
+.nico-settings{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h3.9M9.7 4.6h3.9M2.4 11.4h5.9M11.7 11.4h1.9'/><circle cx='8' cy='4.6' r='1.7'/><circle cx='10' cy='11.4' r='1.7'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h3.9M9.7 4.6h3.9M2.4 11.4h5.9M11.7 11.4h1.9'/><circle cx='8' cy='4.6' r='1.7'/><circle cx='10' cy='11.4' r='1.7'/></svg>")}
+.nav-count{margin-left:auto;background:#e5484d;color:#fff;font-size:11px;font-weight:700;
+  min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;
+  box-shadow:0 0 0 2px var(--ink)}
 .pending-banner{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
   padding:11px 16px;border-radius:10px;margin-bottom:20px;font-size:14px;font-weight:500;text-decoration:none}
 .pending-banner:hover{background:#fee2e2;text-decoration:none} .pending-banner b{font-size:16px}
-.side .foot{margin-top:auto;border-top:1px solid #262d38;padding-top:12px}
-.side .foot a{color:var(--faint);font-size:13px;padding:6px 11px;display:block;border-radius:6px}
-.side .foot a:hover{color:#fff;background:var(--ink-2);text-decoration:none}
+.side .foot{margin-top:auto;border-top:1px solid rgba(255,255,255,.07);padding-top:10px}
+.side .foot a{color:var(--nav-idle);font-size:13px;padding:8px 12px;display:block;border-radius:9px;
+  transition:background .14s,color .14s}
+.side .foot a:hover{color:var(--nav-hover);background:rgba(255,255,255,.055);text-decoration:none}
 @media (max-width:720px){
   .shell{grid-template-columns:1fr}
   .side{position:static;height:auto;flex-direction:row;align-items:center;padding:12px 16px;gap:8px;overflow-x:auto}

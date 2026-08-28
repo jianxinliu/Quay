@@ -1,31 +1,39 @@
 /* 查询台：DataGrip 风深色 IDE。仅本页加载，覆盖后台浅色壳为全屏工作台。 */
-/* grid-column:2 把主区钉死在第 2 列：hover 时 .side 变 position:fixed 脱离网格，
-   若不钉死，main 会自动回填到第 1 列（46px）→ 1fr 区留空露出白色 body 背景（“遮盖”bug）。 */
 main { padding: 0 !important; max-width: none !important; height: 100vh; overflow: hidden; grid-column: 2; }
 .pending-banner { display: none !important; }  /* IDE 全屏，横幅让位；侧栏角标仍在 */
 
-/* 查询台页：后台左导航默认收起为窄条（IDE 要空间），悬浮展开 */
-.shell { grid-template-columns: 46px 1fr !important; }
-.side { width: 46px; padding: 14px 5px !important; overflow: hidden; transition: none; }
-.side .brand { padding: 0 0 16px !important; justify-content: center; }
+/* -------- 左侧导航：常驻 68px 图标栏（IDE 工具栏语言） --------
+   两轮迭代的结果。最早是 46px 纯图标条 + hover 才展开：19px 图标不带文字，不 hover
+   认不出每一项；且 hover 时 .side 变 position:fixed 脱离网格，主区要靠 grid-column:2
+   钉住才不露白。第二版加宽带上文字，但七个图标各带一种颜色（青/红/紫/蓝/绿/琥珀/灰）、
+   线框与实心混用，选中态又是一整块实色青——同屏看下来没有层级，也不成体系。
+
+   现在：**单色图标 + 单一强调色**。图标改走 CSS mask，颜色由 currentColor 决定，
+   于是 idle/hover/active 只是三档 color；选中态用半透明底 + 左边缘一根带微光的强调条，
+   把「重」只留给唯一一个该被看见的元素。图标本身也全部重画成同一套线框规范。
+   状态色 token 定义在 admin-chrome.css（--nav-idle/-hover/-active/-bar），两种侧栏形态共用。 */
+.shell { grid-template-columns: 68px 1fr !important; }
+.side { width: 68px; padding: 14px 4px 12px !important; overflow: visible; }
+.side .brand { padding: 0 0 12px !important; justify-content: center; }
 .side .brand > div { display: none; }
 .side .brand svg { width: 26px !important; height: 26px !important; }
-.side nav a { font-size: 0; justify-content: center; gap: 0 !important; padding: 11px 0 !important; }
-.side nav a .nico { width: 19px; height: 19px; opacity: .9; }
-.side nav a .nav-count { font-size: 10px; position: absolute; transform: translate(10px, -8px); }
-.side nav a { position: relative; }
-.side .foot a { font-size: 0; padding: 8px 0 !important; text-align: center; }
-.side .foot a::before { content: "⎋"; font-size: 14px; }
-.side:hover {
-  position: fixed; left: 0; top: 0; bottom: 0; width: 236px; z-index: 85;
-  padding: 20px 14px !important; box-shadow: 12px 0 40px rgba(0,0,0,.45); overflow: visible;
+.side nav { gap: 2px; margin-top: 8px; }
+.side nav a {
+  position: relative; flex-direction: column; justify-content: center; align-items: center;
+  gap: 6px !important; padding: 10px 3px 9px !important; border-radius: 10px; text-align: center;
 }
-.side:hover .brand { justify-content: flex-start; padding: 4px 8px 20px !important; }
-.side:hover .brand > div { display: block; }
-.side:hover nav a { font-size: 14px; justify-content: flex-start; gap: 10px !important; padding: 9px 11px !important; }
-.side:hover nav a .nav-count { position: static; transform: none; font-size: 11px; }
-.side:hover .foot a { font-size: 13px; text-align: left; padding: 6px 11px !important; }
-.side:hover .foot a::before { content: ""; }
+.side nav a .nico { width: 22px; height: 22px; }
+.side nav a .nlabel {
+  font-size: 11px; line-height: 1; letter-spacing: .02em; font-weight: 500; white-space: nowrap;
+}
+.side nav a .nav-count {
+  position: absolute; top: 5px; right: 9px; margin: 0 !important;
+  min-width: 16px; height: 16px; border-radius: 8px; font-size: 10px; padding: 0 4px;
+}
+/* 竖条贴住栏的左边缘（.side 左内边距 4px），只占一段高度——像泊位标记，不像描边 */
+.side nav a.active::before { left: -4px; height: 26px; }
+.side .foot { padding-top: 10px; }
+.side .foot a { padding: 9px 2px !important; text-align: center; font-size: 11px; letter-spacing: .02em; }
 
 :root {
   --dg-bg: #1e1f22; --dg-panel: #2b2d30; --dg-panel-2: #26282b; --dg-border: #393b40;
@@ -42,6 +50,8 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   --dg-text: #1f2530; --dg-muted: #5b6270; --dg-faint: #838a97;
   --dg-accent: #2563eb; --dg-accent-soft: #d6e2fb; --dg-hover: #eef1f6;
   --dg-green: #1f7a30; --dg-red: #c02a26; --dg-amber: #a9750f;
+  /* 树图标在浅底上要压深，否则中性灰会糊掉、琥珀会发白 */
+  --tree-ico: #6b7280; --tree-ico-table: #a9750f;
 }
 /* 浅色主题修正：选中态原本用近白字（配深色的 accent-soft），浅色下 accent-soft
    变浅蓝，浅字就看不见了 → 选中态文字改用深色文本，靠浅蓝底表达选中。 */
@@ -72,63 +82,124 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 /* ---------- 左栏：连接 / 表 / 片段 ---------- */
 .dg-left { display: flex; flex-direction: column; border-right: 1px solid var(--dg-border); overflow: hidden; flex: none; }
 .dg-conn { padding: 10px; border-bottom: 1px solid var(--dg-border); }
-.dg-conn select {
-  width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
-  border-radius: 6px; padding: 7px 9px; font-size: 12.5px; font-family: var(--dg-mono);
+/* ==================== 左栏 ====================
+   重做前的问题（用户反馈「不够清晰，不够美观」）：
+   ① 区标题（表/书签/工作流/历史/片段）是 10.5px 的 --dg-faint 等宽字，还套了对中文无效的
+      uppercase，等于没有标题——占了 90% 面积的「表」区，标签反而最弱、区与区之间也没有分界；
+   ② 树里五种图标五种颜色（青库/金表/蓝文件夹/琥珀钥匙/紫索引），实心与线框混用，
+      跟侧栏导航是同一个毛病：同屏色相太多，看不出哪一类才是要找的东西；
+   ③ 行右侧的元信息（行数估算、列类型）跟标识符几乎同等粗细，把主角压住了；
+   ④ 选中行是一条通栏实色蓝；⑤ 库/分组/表三级视觉权重相同，层级只靠缩进。
+
+   现在：区标题变成真标题（非等宽、加粗、区间有发丝分界）；图标统一线框、**只给「表」
+   一个强调色**（琥珀＝这是一张表），其余中性灰——一眼扫得到表；元信息退到 10px 的暗色；
+   行改成带圆角的胶囊、选中用淡色底＋细描边而不是实色通栏；分组行（tables/columns/keys/
+   indexes）降级成树内小标题，与表名拉开层级。 */
+:root {
+  --tree-ico: #7d8592;          /* 结构性图标：库/文件夹/键/索引，一律中性 */
+  --tree-ico-table: #c9a44c;    /* 唯一的强调色，只给「表」——扫视时眼睛要找的就是它 */
 }
-.dg-conn select:focus { outline: none; border-color: var(--dg-accent); }
-/* 左栏手风琴：各区各自展开、有界高度，工作流/片段贴底不被树挤掉 */
-.dg-acc { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 4px 0; }
-.dg-acc .acc-hd { cursor: pointer; justify-content: flex-start; gap: 4px; flex: 0 0 auto; }
-.dg-acc .acc-hd:hover { color: var(--dg-muted); }
-.dg-acc .acc-hd .caret { color: var(--dg-faint); font-size: 10px; width: 10px; }
-.dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px; text-transform: none; letter-spacing: 0; }
+.dg-acc { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; padding: 2px 0 4px; }
+.dg-acc .acc-hd { cursor: pointer; justify-content: flex-start; gap: 5px; flex: 0 0 auto;
+  border-top: 1px solid var(--dg-border); margin-top: 3px; padding-top: 8px; }
+.dg-acc .acc-hd:first-child { border-top: none; margin-top: 0; padding-top: 6px; }
+.dg-acc .acc-hd:hover { color: var(--dg-text); }
+/* 展开/收起箭头：**不再用 ▸▾ 字形**。这两个字符的实际墨迹远小于字号（12px 也看不清），
+   而且各字体渲染差异大。改成用 CSS 画的 chevron——边框粗细、尺寸、颜色都可控，
+   展开时旋转 90°（顺带得到一个自然的微交互）。
+   模板里的 ▾/▸ 文字被 font-size:0 藏起来，只作为可访问性/复制时的兜底；
+   开合状态靠 :class="{open: …}" 传给 CSS（CSS 选不到文本内容）。 */
+.dg-item .tw, .dg-acc .acc-hd .caret {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; font-size: 0;
+}
+.dg-item .tw::before, .dg-acc .acc-hd .caret::before {
+  content: ""; display: block; border-style: solid; border-color: currentColor;
+  border-width: 0 var(--tw-stroke) var(--tw-stroke) 0;
+  width: var(--tw-size); height: var(--tw-size);
+  transform: rotate(-45deg); transform-origin: 55% 55%;
+  transition: transform .16s cubic-bezier(.4, 0, .2, 1);
+}
+.dg-item .tw.open::before, .dg-acc .acc-hd .caret.open::before { transform: rotate(45deg); }
+.dg-acc .acc-hd .caret {
+  --tw-size: 6px; --tw-stroke: 1.9px;
+  width: 14px; height: 14px; color: var(--dg-muted);
+}
+.dg-acc .acc-hd:hover .caret { color: var(--dg-text); }
+.dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px;
+  text-transform: none; letter-spacing: 0; }
 .dg-acc .acc-body { overflow: auto; }
 .dg-acc .acc-body.grow { flex: 1 1 auto; min-height: 80px; }          /* 库/表：占据剩余空间、内部滚动 */
 .dg-acc .acc-body.cap { flex: 0 0 auto; max-height: 30vh; }           /* 工作流/历史/片段：有界、贴底、内部滚动 */
 .dg-sec-hd {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 6px 12px; font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase;
-  color: var(--dg-faint); font-family: var(--dg-mono); user-select: none;
+  padding: 6px 12px; font-size: 11.5px; letter-spacing: .01em;
+  color: var(--dg-text); font-weight: 600; user-select: none;
 }
-.dg-sec-hd .act { cursor: pointer; color: var(--dg-muted); font-size: 12px; padding: 0 3px; }
+/* 区操作（⌕ ↻ ＋ ⬇）默认压暗，hover 区标题时才亮起来——常态下别跟标题抢注意力 */
+.dg-sec-hd .act { cursor: pointer; color: var(--dg-muted); font-size: 12px; padding: 0 3px;
+  opacity: .65; transition: opacity .12s, color .12s; }
+.dg-sec-hd:hover .act { opacity: 1; }
 .dg-sec-hd .act:hover { color: var(--dg-text); }
+
+/* ---- 树行 ---- */
 .dg-item {
-  display: flex; align-items: center; gap: 6px; padding: 4px 12px; cursor: pointer;
-  font-family: var(--dg-mono); font-size: 12.5px; white-space: nowrap;
+  position: relative; display: flex; align-items: center; gap: 7px;
+  padding: 3px 8px; margin: 0 6px; border-radius: 5px; cursor: pointer;
+  font-family: var(--dg-mono); font-size: 12.5px; line-height: 19px; white-space: nowrap;
 }
 .dg-item:hover { background: var(--dg-hover); }
-.dg-item .tw { width: 12px; color: var(--dg-muted); flex: none; font-size: 10px; }
-.dg-item .ic { color: var(--dg-muted); flex: none; }
-.dg-item .nm { overflow: hidden; text-overflow: ellipsis; }
+.dg-item .tw {
+  --tw-size: 5.5px; --tw-stroke: 1.8px;
+  width: 15px; height: 15px; color: var(--dg-muted); transition: color .12s;
+}
+.dg-item:hover .tw, .dg-item.sel .tw { color: var(--dg-text); }
+.dg-item .tw:hover { color: var(--dg-accent); }
+.dg-item .nm { overflow: hidden; text-overflow: ellipsis; color: var(--dg-text); }
 .dg-item .mini { margin-left: auto; opacity: 0; color: var(--dg-muted); font-size: 11px; }
 .dg-item:hover .mini { opacity: 1; }
 .dg-item .mini:hover { color: var(--dg-accent); }
-/* 树图标（SVG data-URI，DataGrip 风：青色库 / 金色表 / 蓝色文件夹 / 琥珀钥匙 / 紫索引） */
+/* 分组行（tables / columns / keys / indexes）：读作树内的小标题，不与表名同级 */
+.dg-item.sub .nm { color: var(--dg-muted); font-size: 11.5px; letter-spacing: .02em; }
+/* 元信息（行数估算 / 数量）退到最暗一档，让标识符自己站出来 */
+.dg-item .cnt, .dg-item .sz {
+  margin-left: auto; color: var(--dg-faint); font-size: 10px;
+  font-family: var(--dg-mono); font-variant-numeric: tabular-nums; padding-left: 8px;
+}
+.dg-item .sz { white-space: nowrap; }
+/* 选中：淡色底 + 一圈细描边，替代原来的通栏实色蓝——既明确又不压住行内文字 */
+.dg-item.sel { background: rgba(53, 116, 240, .20); box-shadow: inset 0 0 0 1px rgba(53, 116, 240, .5); }
+.dg-item.sel .nm { color: #dbe6ff; }
+/* 「已选 N · 清除」：数量用琥珀提示，清除是个链接——两者要拉开，别糊成一串 */
+.dg-sec-hd .selinfo { color: var(--dg-amber); font-size: 10.5px; font-weight: 400;
+  margin-left: auto; margin-right: 10px; }
+.dg-sec-hd .selinfo a { color: var(--dg-muted); cursor: pointer; margin-left: 9px; }
+.dg-sec-hd .selinfo a:hover { color: var(--dg-text); text-decoration: underline; }
+
+/* ---- 树图标 ----
+   与侧栏导航同一套做法：CSS mask 决定形状、background-color 决定颜色，
+   于是「换一个颜色规则」不用重画 SVG。五枚统一为 16×16 / 1.5 线宽线框。 */
 .ic-db, .ic-table, .ic-folder, .ic-key, .ic-idx {
   width: 14px; height: 14px; flex: none; display: inline-block;
-  background-position: center; background-repeat: no-repeat; background-size: contain;
+  background-color: var(--tree-ico);
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain;
 }
-.ic-db { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='3.6' rx='5.5' ry='2.4' fill='%234db6ac'/%3E%3Cpath d='M2.5 3.6v8.8c0 1.3 2.5 2.4 5.5 2.4s5.5-1.1 5.5-2.4V3.6' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3Cpath d='M2.5 8c0 1.3 2.5 2.4 5.5 2.4S13.5 9.3 13.5 8' fill='none' stroke='%234db6ac' stroke-width='1.6'/%3E%3C/svg%3E"); }
-.ic-table { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1.5' y='2.5' width='13' height='11' rx='1.5' fill='none' stroke='%23e8b339' stroke-width='1.6'/%3E%3Cpath d='M1.5 6.5h13M6 2.5v11M10.5 2.5v11' stroke='%23e8b339' stroke-width='1.2'/%3E%3C/svg%3E"); }
-.ic-folder { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 4A1.5 1.5 0 0 1 3 2.5h3l1.5 2h6A1.5 1.5 0 0 1 15 6v6a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12z' fill='%236f8bd1'/%3E%3C/svg%3E"); }
-.ic-key { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5.5' cy='8' r='3' fill='none' stroke='%23d9a343' stroke-width='1.8'/%3E%3Cpath d='M8.5 8h6M12 8v3M14.5 8v2' stroke='%23d9a343' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
-.ic-idx { background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 4.5h9M2 8h12M2 11.5h7' stroke='%23a48ae0' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.ic-table { background-color: var(--tree-ico-table); }
+.ic-db{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><ellipse cx='8' cy='4' rx='5.4' ry='2.3'/><path d='M2.6 4v8c0 1.3 2.4 2.3 5.4 2.3s5.4-1 5.4-2.3V4'/><path d='M2.6 8c0 1.3 2.4 2.3 5.4 2.3S13.4 9.3 13.4 8'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><ellipse cx='8' cy='4' rx='5.4' ry='2.3'/><path d='M2.6 4v8c0 1.3 2.4 2.3 5.4 2.3s5.4-1 5.4-2.3V4'/><path d='M2.6 8c0 1.3 2.4 2.3 5.4 2.3S13.4 9.3 13.4 8'/></svg>")}
+.ic-table{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='1.9' y='2.9' width='12.2' height='10.2' rx='1.6'/><path d='M1.9 6.4h12.2M6.1 6.4v6.7M10.1 6.4v6.7'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='1.9' y='2.9' width='12.2' height='10.2' rx='1.6'/><path d='M1.9 6.4h12.2M6.1 6.4v6.7M10.1 6.4v6.7'/></svg>")}
+.ic-folder{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M1.9 4.4c0-.8.7-1.5 1.5-1.5h2.7l1.5 2h4.5c.8 0 1.5.7 1.5 1.5v5.7c0 .8-.7 1.5-1.5 1.5H3.4c-.8 0-1.5-.7-1.5-1.5z'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M1.9 4.4c0-.8.7-1.5 1.5-1.5h2.7l1.5 2h4.5c.8 0 1.5.7 1.5 1.5v5.7c0 .8-.7 1.5-1.5 1.5H3.4c-.8 0-1.5-.7-1.5-1.5z'/></svg>")}
+.ic-key{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='5.6' cy='8' r='2.7'/><path d='M8.3 8h6M11.8 8v2.6M14.3 8v1.8'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='5.6' cy='8' r='2.7'/><path d='M8.3 8h6M11.8 8v2.6M14.3 8v1.8'/></svg>")}
+.ic-idx{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h8.4M2.4 8h11.2M2.4 11.4h6.4'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h8.4M2.4 8h11.2M2.4 11.4h6.4'/></svg>")}
 
-.dg-item.sel { background: var(--dg-accent-soft); }
-.dg-item.sel .nm { color: #d7e3ff; }
-.dg-item .cnt { margin-left: auto; color: var(--dg-faint); font-size: 10.5px; padding-right: 4px; }
-.dg-item .sz { margin-left: auto; color: var(--dg-faint); font-size: 10px; font-family: var(--dg-mono); padding-right: 4px; white-space: nowrap; }
-.dg-item .ic.fold { color: #8a95d8; }
-.dg-sec-hd .selinfo { color: var(--dg-amber); font-size: 10.5px; margin-left: auto; margin-right: 8px; }
-.dg-sec-hd .selinfo a { color: var(--dg-muted); cursor: pointer; margin-left: 4px; }
-.dg-sec-hd .selinfo a:hover { color: var(--dg-text); }
 .dg-cols { background: var(--dg-panel-2); }
-.dg-col { display: flex; gap: 8px; padding: 3px 12px 3px 34px; font-family: var(--dg-mono); font-size: 11.5px; }
+.dg-col { display: flex; gap: 8px; padding: 2px 14px 2px 40px; font-family: var(--dg-mono);
+  font-size: 11.5px; line-height: 18px; }
 .dg-col .cn { color: var(--dg-text); }
-.dg-col .ct { color: var(--dg-muted); margin-left: auto; }
+/* 列类型是次要信息：压小压暗，别和列名抢 */
+.dg-col .ct { color: var(--dg-faint); font-size: 10px; margin-left: auto; padding-left: 10px; }
 .dg-col .pk { color: var(--dg-amber); }
-.dg-empty { padding: 8px 14px; color: var(--dg-faint); font-size: 12px; }
+.dg-empty { padding: 7px 14px; color: var(--dg-faint); font-size: 11.5px; line-height: 1.55; }
 .dg-filter { padding: 6px 10px; }
 .dg-filter input {
   width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
@@ -269,6 +340,8 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px; padding: 4px;
   box-shadow: 0 12px 36px rgba(0,0,0,.5); max-height: 320px; display: flex; flex-direction: column;
 }
+/* 向上弹出（drop="up"）：给贴在容器底部的选择器用，否则弹层会向下冲出面板被裁掉 */
+.dg-sel.up .dg-sel-pop { top: auto; bottom: 105%; box-shadow: 0 -12px 36px rgba(0,0,0,.5); }
 .dg-sel-q {
   margin: 2px 2px 4px; background: var(--dg-bg); border: 1px solid var(--dg-border);
   border-radius: 5px; color: var(--dg-text); padding: 5px 8px; font-size: 12px; font-family: var(--dg-mono);
@@ -282,6 +355,9 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-sel-item:hover { background: var(--dg-hover); }
 .dg-sel-item.cur { background: var(--dg-accent-soft); color: #d7e3ff; }
 .dg-sel-none { padding: 6px 10px; color: var(--dg-faint); font-size: 12px; }
+/* 分组标题（替代原生 <optgroup>）：只标不选 */
+.dg-sel-group { padding: 7px 10px 3px; color: var(--dg-faint); font-size: 10.5px;
+  letter-spacing: .06em; font-family: var(--dg-mono); }
 /* 批量 DROP 二次确认条（红，内联非弹框） */
 .dg-drop { background: #3a2224; border-bottom: 1px solid #7c3a3a; padding: 10px 14px; flex: none; }
 .dg-drop .hd { font-size: 13px; color: #f1b8b4; margin-bottom: 6px; }
@@ -400,7 +476,10 @@ table.dg-rt th { position: sticky; top: 0; background: var(--dg-panel); color: v
 table.dg-rt td .nul { color: var(--dg-faint); font-style: italic; }
 table.dg-rt tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
 .dg-res-ok { padding: 12px 14px; color: var(--dg-green); }
-.dg-res-err { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; color: var(--dg-red); white-space: pre-wrap; word-break: break-word; font-family: var(--dg-mono); font-size: 12px; }
+/* 错误面板：错误正文保留原始换行（pre-wrap），下面的行动区（重连按钮）用普通排版——
+   容器整体 pre-wrap 会把模板缩进渲染成空行 */
+.dg-res-err { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; color: var(--dg-red); white-space: normal; word-break: break-word; font-family: var(--dg-mono); font-size: 12px; }
+.dg-res-err > .msg { white-space: pre-wrap; }
 .dg-res-empty { padding: 14px; color: var(--dg-faint); }
 /* 执行中加载态：顶部转圈条 + 数据 tab 的骨架行（列头已知，内容 shimmer 占位） */
 .dg-res-loading { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
@@ -645,8 +724,42 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
 .dg-rt tr.rcur td.gut { background: color-mix(in srgb, var(--dg-accent) 14%, var(--dg-bg)); color: var(--dg-text); }
 .dg-rt tr.rsel td { background: var(--dg-accent-soft); }
 .dg-rt tr.rsel td.gut { color: #cfe0ff; }
-.dg-rt td.hit { outline: 1px solid var(--dg-amber); outline-offset: -1px; }
-.dg-rt td.curhit { background: #4a3c14; outline: 1.5px solid var(--dg-amber); }
+/* ⌘F 网格内搜索的命中高亮。
+   原来当前命中是深橄榄底 #4a3c14 + 常规浅灰字 —— 两个都偏暗，实际根本读不出内容
+   （用户反馈「根本看不清」）。改用浏览器「页内查找」那套人人都认的配色：
+   **当前命中＝亮黄底 + 深色字**，其余命中只给淡淡的黄底 + 描边做定位。 */
+/* ⌘F 网格内搜索的命中高亮。
+   两版都推翻过：最早是深橄榄底 + 常规浅灰字，太暗读不出；换成浏览器那种亮黄底 + 黑字，
+   在这套深色 IDE 里又太扎眼。现在走深色 UI 该有的做法——**不整块翻成亮色，而是把文字
+   提亮、底色只做微微的暖色抬升，当前命中再加一圈干净的琥珀描边**。对比来自描边和字色，
+   不是来自一块荧光笔。
+   另：命中格同时可能带 .rcur（当前行）/.csel（单元格选区）/.vsel（值编辑，自带
+   !important）/.edited 的底色，按特异性它们会盖掉命中高亮（实测计算值拿到的是 rcur 的
+   蓝色而不是这里设的），而「我搜的那一个在哪」必须永远压过其它状态 —— 这里的
+   !important 是有意为之。 */
+/* 其余命中：只有一层很淡的暖色底，说明「这里有」，安静不抢戏——给每个都描边的话，
+   71 个命中同时框起来，反而看不出当前在哪一个。 */
+table.dg-rt tbody td.hit {
+  background: color-mix(in srgb, var(--dg-amber) 12%, transparent) !important;
+}
+/* 当前命中：底色加深一档 + 一圈干净的琥珀环 + 一点外扩微光，字提到暖白。
+   层级差是靠「只有它有环」拉开的，不是靠把它涂成荧光块。 */
+table.dg-rt tbody td.curhit {
+  background: color-mix(in srgb, var(--dg-amber) 28%, transparent) !important;
+  color: #fff4e0 !important;
+  box-shadow: inset 0 0 0 1.5px var(--dg-amber),
+              0 0 0 3px color-mix(in srgb, var(--dg-amber) 22%, transparent);
+}
+/* 单元格里的子元素（NULL 占位、徽章等）自带颜色，命中态下要跟着走 */
+table.dg-rt tbody td.curhit *, table.dg-rt tbody td.curhit .nul { color: inherit !important; }
+/* 浅色主题：同一套层级，文字压到深棕 */
+.theme-light table.dg-rt tbody td.hit {
+  background: color-mix(in srgb, var(--dg-amber) 16%, transparent) !important;
+}
+.theme-light table.dg-rt tbody td.curhit {
+  background: color-mix(in srgb, var(--dg-amber) 30%, transparent) !important;
+  color: #3d2c05 !important;
+}
 .dg-newrow td { padding: 2px 4px; }
 .dg-newrow td.nw { color: var(--dg-green); font-weight: 700; }
 .dg-newrow input {
@@ -729,6 +842,41 @@ table.dg-rt td.vsel { outline: 2px solid var(--dg-accent); outline-offset: -2px;
   vertical-align: middle; object-fit: contain; flex: none;
 }
 /* 生产环境警示条 */
+/* -------- 连接不可用告警条（dg-main 顶部） --------
+   连接断了要在最显眼的位置说清三件事：哪条连接、系统在干什么（自动重连 + 倒计时）、
+   人可以做什么（立即重连）。以前这三件事只有右键菜单里一个「重连数据库」，等于没有。 */
+.dg-connbar {
+  /* 右侧留出全站铃铛（.dbm-bell 固定在 top:14 right:20、34px 宽）的位置，否则「立即重连」被压住 */
+  flex: none; display: flex; align-items: center; gap: 9px; padding: 7px 64px 7px 12px;
+  background: #4a3a1e; border-bottom: 1px solid var(--dg-amber); color: #f0d9a8; font-size: 12px;
+}
+.dg-connbar.gone { background: #4a2528; border-bottom-color: var(--dg-red); color: #f3c3c0; }
+.dg-connbar .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--dg-amber); flex: none;
+  animation: dg-pulse 1.4s ease-in-out infinite;
+}
+.dg-connbar.gone .dot { background: var(--dg-red); }
+.dg-connbar b { color: #fff; font-weight: 600; }
+.dg-connbar .msg { flex: none; }
+.dg-connbar .why {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  opacity: .75; font-family: var(--dg-mono); font-size: 11px;
+}
+.dg-connbar .dg-btn { flex: none; }
+@keyframes dg-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+.theme-light .dg-connbar { background: #fef3c7; border-bottom-color: #d97706; color: #78350f; }
+.theme-light .dg-connbar.gone { background: #fee2e2; border-bottom-color: #dc2626; color: #7f1d1d; }
+.theme-light .dg-connbar b { color: #431407; }
+/* 编辑区 tab 组头上的连接状态点：不切过去也知道哪条连接断了 */
+.dg-hdot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--dg-amber); flex: none;
+  margin-left: 5px; animation: dg-pulse 1.4s ease-in-out infinite;
+}
+.dg-hdot.gone { background: var(--dg-red); }
+/* 结果区错误下方的行动区：连接类错误直接给重连按钮，不用去左树右键 */
+.dg-err-act { margin-top: 12px; display: flex; align-items: center; gap: 10px; font-family: var(--dg-sans, inherit); }
+.dg-err-act .tip { color: var(--dg-muted); font-size: 12px; }
+
 .dg-prod-ribbon { flex: none; height: 8px; background: var(--dg-red); }
 .dg-prod-ribbon.staging { background: #d97706; }
 /* 全屏红框：套住整个查询台视口，一眼可辨生产环境 */
@@ -898,8 +1046,9 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
   cursor: pointer; white-space: nowrap; }
 .dg-ai-empty { color: var(--dg-muted); padding: 4px 2px; }
 .dg-ai-schema { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; color: var(--dg-muted); font-size: 11px; }
-.dg-ai-schema select { background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-border);
-  border-radius: 4px; padding: 2px 6px; font-size: 11px; max-width: 150px; }
+/* AI 面板的库选择器用 dg-select，压到面板的紧凑尺寸 */
+.dg-ai-schema .dg-sel { width: 150px; }
+.dg-ai-schema .dg-sel-btn { padding: 3px 7px; font-size: 11px; }
 .dg-ai-schema .hint { color: var(--dg-faint); }
 .dg-ai-picked { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
 .dg-ai-picked .chip { font-size: 10.5px; color: var(--dg-accent); background: var(--dg-bg);

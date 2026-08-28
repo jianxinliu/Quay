@@ -78,6 +78,19 @@
       };
     },
     computed: {
+      // dg-select 的选项。与查询台同一个自绘下拉组件——原生 <select> 的弹出列表
+      // 无法样式化，在深色 IDE 里是唯一一块系统外观的控件，两边观感对不上。
+      connOptions: function () {
+        return [{ value: "", label: "选择 Redis 连接…", env: "" }].concat(
+          this.conns.map(function (c) {
+            return { value: c.value, label: c.connection, env: c.environment || "" };
+          }));
+      },
+      dbOptions: function () {
+        return this.dbs.map(function (d) {
+          return { value: d.db, label: "db" + d.db + (d.keys > 0 ? "（" + d.keys + "）" : "") };
+        });
+      },
       connMeta: function () {
         for (var i = 0; i < this.conns.length; i++)
           if (this.conns[i].value === this.conn) return this.conns[i];
@@ -452,10 +465,8 @@
 <div class="rd-root" :class="{'env-prod': isProd, 'env-staging': isStaging, 'theme-light': theme==='light'}">
   <aside class="rd-left" :style="{width: leftW + 'px'}">
     <div class="rd-conn">
-      <select :value="conn" @change="setConn($event.target.value)">
-        <option value="">选择 Redis 连接…</option>
-        <option v-for="c in conns" :key="c.value" :value="c.value">{{ c.connection }} · {{ c.environment || 'local' }}</option>
-      </select>
+      <dg-select :model-value="conn" :options="connOptions"
+                 placeholder="选择 Redis 连接…" @update:model-value="setConn"/>
     </div>
     <div class="rd-search">
       <input v-model="filter" @keydown.enter="loadKeys" placeholder="键匹配（如 offer:* ，回车扫描）">
@@ -494,9 +505,8 @@
     </div>
     <div class="rd-dbbar" v-if="db!=null">
       <span>数据库</span>
-      <select :value="db" @change="selectDb(Number($event.target.value))">
-        <option v-for="d in dbs" :key="d.db" :value="d.db">db{{ d.db }}{{ d.keys>0 ? '（'+d.keys+'）' : '' }}</option>
-      </select>
+      <dg-select :model-value="db" :options="dbOptions" drop="up"
+                 placeholder="选择库" @update:model-value="selectDb"/>
     </div>
   </aside>
   <div class="rd-vsplit" @mousedown="beginDrag($event,'left')"></div>
@@ -633,5 +643,6 @@
 </div>`
   });
 
+  if (window.DgSelect) app.component("dg-select", window.DgSelect);
   app.mount("#dbm-redis");
 })();

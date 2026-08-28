@@ -143,6 +143,8 @@ class ConnectionManager:
         max_rows: int,
         mask_columns: list[str],
         force_privileged: bool = False,
+        # 内置敏感列模式开关（agent 查询）：None = 跟随全局设置，True/False = 连接级覆盖
+        mask_default_patterns: bool | None = None,
         statement_timeout_s: int | None = None,
         write_timeout_s: int | None = None,
     ) -> None:
@@ -173,7 +175,8 @@ class ConnectionManager:
 
         # policy：以旧值为基准增量覆盖，避免编辑连接时把未在表单里的字段（脱敏/审批开关等）
         # 重置回默认值；读/写超时留空则沿用旧值（新连接用默认）。
-        policy_update: dict = {"max_rows": max_rows, "mask_columns": mask_columns}
+        policy_update: dict = {"max_rows": max_rows, "mask_columns": mask_columns,
+                               "mask_default_patterns": mask_default_patterns}
         if statement_timeout_s is not None:
             policy_update["statement_timeout_s"] = statement_timeout_s
         if write_timeout_s is not None:

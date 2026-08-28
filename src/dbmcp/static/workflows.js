@@ -656,6 +656,49 @@
                 { value: "RIGHT", label: "RIGHT" }, { value: "FULL", label: "FULL" }];
       },
       maxPorts: function () { return JOIN_MAX_PORTS; },
+      // 以下几个 *Options 都是喂给 dg-select 的。节点配置面板里原来用的是原生 <select>，
+      // 深色 IDE 里弹出列表是系统外观、和其它页对不上（查询台/Redis 早就统一用 dg-select）。
+      whereColOptions: function () {
+        return [{ value: "", label: "列…" }].concat(
+          this.srcSchemaCols.map(function (c) { return { value: c.name, label: c.name }; }));
+      },
+      whereOpOptions: function () {
+        return ["=", "!=", ">", ">=", "<", "<=", "LIKE", "NOT LIKE",
+                "IN", "NOT IN", "IS NULL", "IS NOT NULL"].map(function (o) {
+          return { value: o, label: o };
+        });
+      },
+      chartTypeOptions: function () {
+        return [
+          { value: "bar", label: "柱状图", group: "基础" },
+          { value: "line", label: "折线图", group: "基础" },
+          { value: "area", label: "面积图", group: "基础" },
+          { value: "pie", label: "饼图", group: "基础" },
+          { value: "scatter", label: "散点图", group: "基础" },
+          { value: "stacked", label: "堆叠柱状", group: "多列" },
+          { value: "grouped", label: "分组柱状", group: "多列" },
+          { value: "multi_line", label: "多折线", group: "多列" },
+          { value: "multi_area", label: "堆叠面积", group: "多列" },
+          { value: "histogram", label: "直方图（单列分布）", group: "统计" },
+          { value: "heatmap", label: "热力图（相关矩阵）", group: "统计" },
+          { value: "boxplot", label: "箱线图（分位数）", group: "统计" },
+          { value: "funnel", label: "漏斗图", group: "业务" }
+        ];
+      },
+      chartXOptions: function () {
+        var cols = this.previewCols.map(function (c) { return { value: c, label: c }; });
+        if (!cols.length) return [{ value: "", label: "（先「预览」运行拿到列）" }];
+        return [{ value: "", label: "（不选）" }].concat(cols);
+      },
+      chartYOptions: function () {
+        var cols = this.previewCols.map(function (c) { return { value: c, label: c }; });
+        return cols.length ? cols : [{ value: "", label: "（先「预览」运行拿到列）" }];
+      },
+      chartAggOptions: function () {
+        return [{ value: "", label: "不聚合" }, { value: "sum", label: "SUM" },
+                { value: "avg", label: "AVG" }, { value: "count", label: "COUNT" },
+                { value: "min", label: "MIN" }, { value: "max", label: "MAX" }];
+      },
       upstreamNames: function () {
         return upstreamNamesOf(this.graph, this.nodeId);
       },
@@ -1041,18 +1084,10 @@
       +           '<div v-if="srcTable" class="row">'
       +             '<label>WHERE 条件 <a href="#" @click.prevent="addWhereRow" class="wf-hint-link">＋ 加条件</a></label>'
       +             '<div v-for="(w, i) in srcWhere" :key="i" class="wf-where-row">'
-      +               '<select v-model="w.col" @change="onWhereChange" class="wf-where-col">'
-      +                 '<option value="">列…</option>'
-      +                 '<option v-for="c in srcSchemaCols" :key="c.name" :value="c.name">{{ c.name }}</option>'
-      +               '</select>'
-      +               '<select v-model="w.op" @change="onWhereChange" class="wf-where-op">'
-      +                 '<option>=</option><option>!=</option>'
-      +                 '<option>&gt;</option><option>&gt;=</option>'
-      +                 '<option>&lt;</option><option>&lt;=</option>'
-      +                 '<option>LIKE</option><option>NOT LIKE</option>'
-      +                 '<option>IN</option><option>NOT IN</option>'
-      +                 '<option>IS NULL</option><option>IS NOT NULL</option>'
-      +               '</select>'
+      +               '<dg-select class="wf-where-col" :model-value="w.col" :options="whereColOptions"'
+      +                 ' placeholder="列…" @update:model-value="v => { w.col = v; onWhereChange() }"/>'
+      +               '<dg-select class="wf-where-op" :model-value="w.op" :options="whereOpOptions"'
+      +                 ' @update:model-value="v => { w.op = v; onWhereChange() }"/>'
       +               '<input v-model="w.val" @change="onWhereChange" class="wf-where-val" placeholder="值">'
       +               '<button class="dg-btn sm" @click="delWhereRow(i)">−</button>'
       +             '</div>'
@@ -1192,53 +1227,21 @@
       +         '</div>'
       +         '<template v-if="node.cfg.view===\'chart\'">'
       +           '<div class="row"><label>图表类型</label>'
-      +             '<select v-model="node.cfg.chart.type" @change="persist" class="wf-chart-cfg-in">'
-      +               '<optgroup label="基础">'
-      +                 '<option value="bar">柱状图</option>'
-      +                 '<option value="line">折线图</option>'
-      +                 '<option value="area">面积图</option>'
-      +                 '<option value="pie">饼图</option>'
-      +                 '<option value="scatter">散点图</option>'
-      +               '</optgroup>'
-      +               '<optgroup label="多列">'
-      +                 '<option value="stacked">堆叠柱状</option>'
-      +                 '<option value="grouped">分组柱状</option>'
-      +                 '<option value="multi_line">多折线</option>'
-      +                 '<option value="multi_area">堆叠面积</option>'
-      +               '</optgroup>'
-      +               '<optgroup label="统计">'
-      +                 '<option value="histogram">直方图（单列分布）</option>'
-      +                 '<option value="heatmap">热力图（相关矩阵）</option>'
-      +                 '<option value="boxplot">箱线图（分位数）</option>'
-      +               '</optgroup>'
-      +               '<optgroup label="业务">'
-      +                 '<option value="funnel">漏斗图</option>'
-      +               '</optgroup>'
-      +             '</select></div>'
+      +             '<dg-select class="wf-chart-cfg-in" :model-value="node.cfg.chart.type"'
+      +               ' :options="chartTypeOptions" @update:model-value="v => { node.cfg.chart.type = v; persist() }"/></div>'
       +           '<div class="row"><label>X 轴列<span class="wf-hint">（boxplot 用作分组、heatmap 忽略）</span></label>'
-      +             '<select v-model="node.cfg.chart.x" @change="persist" class="wf-chart-cfg-in">'
-      +               '<option value="">（不选）</option>'
-      +               '<option v-for="c in previewCols" :key="c" :value="c">{{ c }}</option>'
-      +               '<option v-if="!previewCols.length" value="">（先「预览」运行拿到列）</option>'
-      +             '</select></div>'
+      +             '<dg-select class="wf-chart-cfg-in" :model-value="node.cfg.chart.x"'
+      +               ' :options="chartXOptions" @update:model-value="v => { node.cfg.chart.x = v; persist() }"/></div>'
       +           '<div class="row" v-if="!/^(stacked|grouped|multi_)/.test(node.cfg.chart.type||\'\') && node.cfg.chart.type!==\'heatmap\' && node.cfg.chart.type!==\'boxplot\'"><label>Y 轴列</label>'
-      +             '<select v-model="node.cfg.chart.y" @change="persist" class="wf-chart-cfg-in">'
-      +               '<option v-for="c in previewCols" :key="c" :value="c">{{ c }}</option>'
-      +               '<option v-if="!previewCols.length" value=""></option>'
-      +             '</select></div>'
+      +             '<dg-select class="wf-chart-cfg-in" :model-value="node.cfg.chart.y"'
+      +               ' :options="chartYOptions" @update:model-value="v => { node.cfg.chart.y = v; persist() }"/></div>'
       +           '<div class="row" v-if="/^(stacked|grouped|multi_)/.test(node.cfg.chart.type||\'\')"><label>Y 列（逗号分隔多列）</label>'
       +             '<input v-model="node.cfg.chart.ys" @change="persist" spellcheck="false" placeholder="revenue, cost, roi"></div>'
       +           '<div class="row" v-if="node.cfg.chart.type===\'histogram\'"><label>分箱数</label>'
       +             '<input type="number" v-model.number="node.cfg.chart.bins" @change="persist" placeholder="留空自动（√N）"></div>'
       +           '<div class="row" v-if="!/^(heatmap|boxplot|histogram|multi_|stacked|grouped)$/.test(node.cfg.chart.type||\'\')"><label>聚合</label>'
-      +             '<select v-model="node.cfg.chart.agg" @change="persist" class="wf-chart-cfg-in">'
-      +               '<option value="">不聚合</option>'
-      +               '<option value="sum">SUM</option>'
-      +               '<option value="avg">AVG</option>'
-      +               '<option value="count">COUNT</option>'
-      +               '<option value="min">MIN</option>'
-      +               '<option value="max">MAX</option>'
-      +             '</select></div>'
+      +             '<dg-select class="wf-chart-cfg-in" :model-value="node.cfg.chart.agg"'
+      +               ' :options="chartAggOptions" @update:model-value="v => { node.cfg.chart.agg = v; persist() }"/></div>'
       +         '</template>'
       +       '</template>'
       +     '</div>'
@@ -1318,6 +1321,16 @@
       };
     },
     computed: {
+      // 调度对话框的两个下拉也走 dg-select（本页最后两处原生 <select>）
+      cronTypeOptions: function () {
+        return [{ value: "interval", label: "每 N 分钟" }, { value: "daily", label: "每天" },
+                { value: "weekly", label: "每周" }, { value: "monthly", label: "每月" },
+                { value: "cron", label: "Cron 表达式（高级）" }];
+      },
+      notifyOnOptions: function () {
+        return [{ value: "failure", label: "仅失败时（推荐）" }, { value: "success", label: "仅成功时" },
+                { value: "always", label: "每次都通知" }, { value: "none", label: "不通知" }];
+      },
       workspaceOptions: function () {
         var opts = (this.wsList || []).map(function (w) {
           return { value: w.workspace, label: w.workspace
@@ -2142,13 +2155,8 @@
       +       '<div class="row">'
       +         '<label>频率</label>'
       +         '<div class="wf-sched-cron">'
-      +           '<select v-model="schedForm.cron_type">'
-      +             '<option value="interval">每 N 分钟</option>'
-      +             '<option value="daily">每天</option>'
-      +             '<option value="weekly">每周</option>'
-      +             '<option value="monthly">每月</option>'
-      +             '<option value="cron">Cron 表达式（高级）</option>'
-      +           '</select>'
+      +           '<dg-select :model-value="schedForm.cron_type" :options="cronTypeOptions"'
+      +             ' @update:model-value="v => schedForm.cron_type = v"/>'
       +           '<input v-model="schedForm.cron_value" '
       +              ':placeholder="schedForm.cron_type===\'interval\'?\'5\':'
       +              'schedForm.cron_type===\'daily\'?\'09:30\':'
@@ -2159,12 +2167,8 @@
       +       '<div class="row"><label><input type="checkbox" v-model="schedForm.enabled"> 启用</label></div>'
       +       '<div class="row">'
       +         '<label>通知策略</label>'
-      +         '<select v-model="schedForm.notify_on">'
-      +           '<option value="failure">仅失败时（推荐）</option>'
-      +           '<option value="success">仅成功时</option>'
-      +           '<option value="always">每次都通知</option>'
-      +           '<option value="none">不通知</option>'
-      +         '</select>'
+      +         '<dg-select :model-value="schedForm.notify_on" :options="notifyOnOptions"'
+      +           ' @update:model-value="v => schedForm.notify_on = v"/>'
       +       '</div>'
       +       '<div class="row">'
       +         '<label>通知产物</label>'

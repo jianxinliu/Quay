@@ -19,10 +19,8 @@
 .rd-left { display: flex; flex-direction: column; border-right: 1px solid var(--dg-border);
   overflow: hidden; flex: none; }
 .rd-conn { padding: 10px; border-bottom: 1px solid var(--dg-border); }
-.rd-conn select, .rd-dbbar select {
-  width: 100%; background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);
-  border-radius: 6px; padding: 7px 9px; font-size: 12.5px; font-family: var(--dg-mono); }
-.rd-conn select:focus, .rd-dbbar select:focus { outline: none; border-color: var(--dg-accent); }
+/* 连接/库选择器用查询台同款自绘下拉（dg-select），这里只给宽度 */
+.rd-conn .dg-sel, .rd-dbbar .dg-sel { width: 100%; }
 .rd-search { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--dg-border); }
 .rd-search input {
   flex: 1; min-width: 0; background: var(--dg-panel); color: var(--dg-text);
@@ -59,7 +57,7 @@
 
 .rd-dbbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   border-top: 1px solid var(--dg-border); color: var(--dg-muted); font-size: 12px; }
-.rd-dbbar select { flex: 1; }
+.rd-dbbar .dg-sel { flex: 1; }
 
 /* ---------- 主区：命令窗口 + 结果 ---------- */
 .rd-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -175,7 +173,7 @@
 .rd-item .cnt, .rd-db .cnt { font-size: 12px; }
 .rd-db { font-size: 13px; }
 .rd-db .nm { color: var(--dg-text); }
-.rd-conn select, .rd-dbbar select, .rd-search input { font-size: 13px; }
+.rd-conn .dg-sel-btn, .rd-dbbar .dg-sel-btn, .rd-search input { font-size: 13px; }
 .rd-cmdbar .ttl { font-size: 13.5px; color: var(--dg-text); }
 .rd-cmdbar .hint { font-size: 12px; }
 .rd-tabs .t { font-size: 13px; }

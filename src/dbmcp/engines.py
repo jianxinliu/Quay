@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import decimal
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -851,3 +852,129 @@ def _col_categories(ncols: int, rows: list) -> list[str]:
                 cats[j] = _value_category(row[j])
                 break
     return cats
+
+
+# ---------- SQL 语法的 DB 侧权威复核 ----------
+
+# 背景：sqlglot 解析失败 **不等于** SQL 真有语法错——它的方言覆盖并不完整。
+# 已踩过的坑：MySQL 合法的 `ALTER TABLE t DROP PARTITION p1, p2`（无括号）sqlglot 解析不了
+# （见 CLAUDE.md「sqlglot 与 MySQL 对 DROP PARTITION 语法要求恰好相反」）。
+# 所以 agent 侧的语法预检采用两级：sqlglot 初筛 → 失败时让目标 DB **只解析不执行**地复核，
+# DB 也说语法错才拒绝。零假阳性，代价是一次轻量往返（仅在初筛失败时发生）。
+#
+# 各引擎的「只解析不执行」手段：
+#   MySQL       PREPARE ... FROM @var（覆盖 DML 与 DDL，最完整）
+#   PostgreSQL  PREPARE ... AS <sql>（**只支持 DML**，DDL 会被误报语法错 → 不复核）
+#   SQLite      EXPLAIN <sql>（编译成 VDBE 程序但不执行，覆盖所有语句）
+#   ClickHouse  EXPLAIN SYNTAX <sql>（只支持 SELECT）
+# 无法复核的组合返回 supported=False，由调用方退回「默认拒绝」的保守路径。
+
+# PG 的 PREPARE 只接受这些开头的语句；其余（DDL 等）交给它会报**语法错**，是假阳性来源
+_PG_PREPARABLE_HEADS = ("select", "insert", "update", "delete", "values", "with", "table")
+_CH_EXPLAINABLE_HEADS = ("select", "with")
+
+_SYNTAX_CHECK_STMT_NAME = "dbm_syntax_chk"
+
+
+@dataclass(frozen=True)
+class SyntaxCheck:
+    """DB 侧语法复核结果。
+
+    supported=False：该引擎/语句无法复核，调用方不应据此判死。
+    supported=True 且 ok=False：DB 明确报了语法错，error 是已脱敏的错误摘要。
+    """
+
+    supported: bool
+    ok: bool
+    error: str = ""
+    stmt_index: int = 0   # 多语句批量时，出错的是第几条（从 1 计）
+
+
+def first_sql_keyword(sql: str) -> str:
+    """取 SQL 的首个关键字（跳过前导注释/空白），小写返回。空串表示取不到。"""
+    text_ = sql.strip()
+    while True:
+        if text_.startswith("--"):
+            nl = text_.find("\n")
+            if nl < 0:
+                return ""
+            text_ = text_[nl + 1:].lstrip()
+            continue
+        if text_.startswith("/*"):
+            end = text_.find("*/")
+            if end < 0:
+                return ""
+            text_ = text_[end + 2:].lstrip()
+            continue
+        break
+    m = re.match(r"[A-Za-z_]+", text_)
+    return m.group(0).lower() if m else ""
+
+
+def _syntax_check_supported(engine_kind: str, stmt: str) -> bool:
+    head = first_sql_keyword(stmt)
+    if not head:
+        return False
+    if engine_kind == "mysql":
+        return True
+    if engine_kind == "sqlite":
+        return True
+    if engine_kind == "postgres":
+        return head in _PG_PREPARABLE_HEADS
+    if engine_kind == "clickhouse":
+        return head in _CH_EXPLAINABLE_HEADS
+    return False
+
+
+def _check_one_statement(conn, stmt: str, engine_kind: str) -> SyntaxCheck:  # noqa: ANN001
+    """在已有连接上复核单条语句。**只解析不执行**，不提交任何事务。"""
+    from .errors import classify_db_error, sanitize_db_message
+
+    try:
+        if engine_kind == "mysql":
+            # 用会话变量传 SQL 文本（参数化，SQL 本身不拼进语句）
+            conn.execute(text("SET @dbm_syntax_sql = :s"), {"s": stmt})
+            conn.execute(text(f"PREPARE {_SYNTAX_CHECK_STMT_NAME} FROM @dbm_syntax_sql"))
+        elif engine_kind == "postgres":
+            # PG 的 PREPARE 不接受参数化的语句文本，只能内嵌；这条 SQL 本就是调用方要执行的，
+            # 不构成注入面放大。整个复核不提交，PREPARE 随事务回滚。
+            conn.execute(text(f"PREPARE {_SYNTAX_CHECK_STMT_NAME} AS {stmt}"))
+        elif engine_kind == "sqlite":
+            conn.execute(text(f"EXPLAIN {stmt}"))
+        elif engine_kind == "clickhouse":
+            conn.execute(text(f"EXPLAIN SYNTAX {stmt}"))
+        else:
+            return SyntaxCheck(supported=False, ok=True)
+    except Exception as e:  # noqa: BLE001
+        if classify_db_error(e) == "sql_syntax_error":
+            return SyntaxCheck(supported=True, ok=False, error=sanitize_db_message(str(e)))
+        # 权限不足 / 表不存在 / 其它——语法本身 DB 是认的，不该按语法错拒
+        return SyntaxCheck(supported=True, ok=True)
+    finally:
+        if engine_kind in ("mysql", "postgres"):
+            try:
+                conn.execute(text(f"DEALLOCATE PREPARE {_SYNTAX_CHECK_STMT_NAME}"))
+            except Exception:  # noqa: BLE001
+                pass  # PREPARE 本身失败时没东西可释放，忽略
+    return SyntaxCheck(supported=True, ok=True)
+
+
+def dry_run_syntax_check(engine: SAEngine, sql: str, engine_kind: str) -> SyntaxCheck:
+    """让目标 DB 只解析不执行地复核 SQL 语法。多语句逐条复核，报第一条出错的。
+
+    绝不执行语句、绝不提交事务。任何非语法类错误（权限/表不存在）都按「语法没问题」处理，
+    交给正常执行路径去报真实原因。
+    """
+    from .workflows import split_statements  # 懒加载避免循环导入
+
+    stmts = [s for s in split_statements(sql) if s.strip()] or [sql]
+    if not all(_syntax_check_supported(engine_kind, s) for s in stmts):
+        return SyntaxCheck(supported=False, ok=True)
+    with engine.connect() as conn:
+        for i, stmt in enumerate(stmts, start=1):
+            res = _check_one_statement(conn, stmt, engine_kind)
+            if not res.ok:
+                return SyntaxCheck(supported=True, ok=False, error=res.error, stmt_index=i)
+            if not res.supported:
+                return SyntaxCheck(supported=False, ok=True)
+    return SyntaxCheck(supported=True, ok=True)

@@ -115,8 +115,10 @@ class Policy(BaseModel):
     # 给 agent 返回结果的字符预算（≈token×4）；None = 用全局设置兜底。行数上限之外的第二道
     # 硬限：宽表 200 行也可能几万 token，按序列化后大小截断才真正盯住上下文成本
     agent_max_result_chars: int | None = None
-    # 敏感字段脱敏：内置模式（password/token/secret 等）+ 自定义列名（不区分大小写）
-    mask_default_patterns: bool = True
+    # 敏感字段脱敏：内置模式（password/token/secret 等）+ 自定义列名（不区分大小写）。
+    # **只作用于 agent 路径**（query/sample_rows）——已认证的后台查询台与导出一律看真实值。
+    # None = 跟随全局设置 mask_sensitive_columns（默认开）；True/False 为连接级覆盖。
+    mask_default_patterns: bool | None = None
     mask_columns: list[str] = Field(default_factory=list)
     # elicitation 快捷审批：None = 按环境自动（local/dev 开、staging/prod 关）
     elicitation_approval: bool | None = None

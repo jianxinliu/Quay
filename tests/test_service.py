@@ -85,13 +85,16 @@ class TestReconnect:
         assert out == {"ok": True, "engine": "sqlite"}
 
     def test_reconnect_clears_exhausted(self, service):
-        # 模拟连接已被判定 exhausted（后台重连线程已放弃）
+        # 模拟连接已被判定 exhausted，且还没到下一次自动重试的点
+        import time as _time
+
         from dbmcp.health import Health
 
         service.health._entries[("demo", "main")] = Health(
-            state="exhausted", fail_count=5, last_error="lost connection"
+            state="exhausted", fail_count=5, last_error="lost connection",
+            next_retry_at=_time.monotonic() + 300,
         )
-        # test_connection 走健康位，exhausted 时会被直接挡下、根本连不上
+        # 退避窗口内 test_connection 走健康位会被挡下（快速失败，不去打 DB）
         with pytest.raises(Exception):
             service.test_connection("demo", "main", CALLER)
         # reconnect 绕过健康位强制重建，成功后健康位清空、连接恢复可用
@@ -99,6 +102,20 @@ class TestReconnect:
         assert out["ok"] is True
         assert service.health.get("demo", "main") is None
         service.test_connection("demo", "main", CALLER)  # 现在可用了
+
+    def test_exhausted_self_heals_without_manual_reconnect(self, service):
+        """退避到点后，下一次真实调用会被放行去探路，DB 恢复即自愈——不需要人点重连。"""
+        import time as _time
+
+        from dbmcp.health import Health
+
+        service.health._entries[("demo", "main")] = Health(
+            state="exhausted", fail_count=9, last_error="lost connection",
+            next_retry_at=_time.monotonic() - 1,   # 已到重试点
+        )
+        # 半开放行：这次调用真的去连 DB（sqlite 是通的）→ 成功 → 健康位自动转 ok
+        service.test_connection("demo", "main", CALLER)
+        assert service.health.get("demo", "main").state == "ok"
 
     def test_reconnect_probe_failure_reenters_backoff(self, service, monkeypatch):
         """探测仍失败：原样抛出，并重新进入后台退避重连（unavailable）。"""
