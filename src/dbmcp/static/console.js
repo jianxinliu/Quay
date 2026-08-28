@@ -516,6 +516,10 @@
       isAnalysis: function () {
         var t = this.activeTab; return !!t && (t.conn || "").indexOf("analysis/") === 0;
       },
+      // AI 面板的库选择器也走 dg-select（页面里最后一处原生 <select>，观感与别处不统一）
+      dbPickOptions: function () {
+        return this.databases.map(function (d) { return { value: d, label: d }; });
+      },
       schemaOptions: function () {
         var m = this.connMeta;
         var head = { value: "", label: m && m.database ? "默认（" + m.database + "）" : "未指定" };
@@ -3650,9 +3654,8 @@
             </div>
             <div v-if="databases.length" class="dg-ai-schema">
               <span>库</span>
-              <select :value="aiPanel.schema" @change="aiSetSchema($event.target.value)">
-                <option v-for="db in databases" :key="db" :value="db">{{ db }}</option>
-              </select>
+              <dg-select :model-value="aiPanel.schema" :options="dbPickOptions"
+                         placeholder="选择库" @update:model-value="aiSetSchema"/>
               <span class="hint">可切库跨 schema 勾选</span>
             </div>
             <div v-if="aiPickCount()" class="dg-ai-picked">

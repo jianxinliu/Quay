@@ -944,8 +944,9 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
   cursor: pointer; white-space: nowrap; }
 .dg-ai-empty { color: var(--dg-muted); padding: 4px 2px; }
 .dg-ai-schema { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; color: var(--dg-muted); font-size: 11px; }
-.dg-ai-schema select { background: var(--dg-bg); color: var(--dg-text); border: 1px solid var(--dg-border);
-  border-radius: 4px; padding: 2px 6px; font-size: 11px; max-width: 150px; }
+/* AI 面板的库选择器用 dg-select，压到面板的紧凑尺寸 */
+.dg-ai-schema .dg-sel { width: 150px; }
+.dg-ai-schema .dg-sel-btn { padding: 3px 7px; font-size: 11px; }
 .dg-ai-schema .hint { color: var(--dg-faint); }
 .dg-ai-picked { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
 .dg-ai-picked .chip { font-size: 10.5px; color: var(--dg-accent); background: var(--dg-bg);
