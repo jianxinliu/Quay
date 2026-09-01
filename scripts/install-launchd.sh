@@ -76,10 +76,24 @@ for _ in $(seq 1 20); do
   if ! lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then break; fi
   sleep 0.3
 done
-if ! launchctl bootstrap "gui/$UID_NUM" "$PLIST"; then
-  echo "bootstrap 失败，重试一次…" >&2
-  sleep 1
-  launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+# bootout 之后 launchd 需要一小会儿才肯接受同 label 的 bootstrap，早了会报
+# `Bootstrap failed: 5: Input/output error`。原来只重试一次、且失败后被 set -e 直接
+# 打断——结果是**旧实例已经 bootout、新实例没起来，服务停在下线状态且无人知道**。
+# 改成递增退避多试几次，全失败就把日志尾巴打出来再退出，别静默留下一个死掉的服务。
+bootstrapped=0
+for attempt in 1 2 3 4 5; do
+  if launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null; then
+    bootstrapped=1
+    break
+  fi
+  echo "bootstrap 第 $attempt 次失败，${attempt}s 后重试…" >&2
+  sleep "$attempt"
+done
+if [ "$bootstrapped" -ne 1 ]; then
+  echo "❌ bootstrap 连续 5 次失败，服务当前是**下线**状态。最近日志：" >&2
+  tail -20 "$LOG" >&2 || true
+  echo "可手动重试：launchctl bootstrap gui/$UID_NUM $PLIST" >&2
+  exit 1
 fi
 launchctl enable "gui/$UID_NUM/$LABEL"
 
