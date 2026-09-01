@@ -324,7 +324,7 @@ class TestServiceHotReload:
                               writer_password=None, jump_hosts=[],
                               ssh_options_extra=[], max_rows=10, mask_columns=[])
         svc.query("local", "s", "SELECT 1", CallerInfo(agent="t"))
-        assert ("local", "s", "reader", "") in svc.pool._entries
+        assert ("local", "s", "reader", "", "") in svc.pool._entries
         # 改配置 → 池应被回收
         svc.upsert_connection("local", "s", CallerInfo(agent="t"),
                               engine="sqlite", environment="local", host=None, port=None,

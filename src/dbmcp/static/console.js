@@ -363,6 +363,10 @@
         tblSearch: null,   // {q, results, sel, loading} 全局表名搜索浮层（⌘P）
         // 树状态（当前连接）
         databases: [], tablesByDb: {}, tableMeta: {}, tableSizes: {},
+        // PG 的「库」这一层：一条 PG 连接只绑一个 database，跨库查询在协议层就不存在，
+        // 所以换库 = 换连接（服务端按 database 建独立引擎）。同一时刻只展开一个库——
+        // 同时摊开两个会暗示能跨库查询，而 PG 做不到。
+        serverDbs: [], pgDb: "", pgDbSel: {},   // pgDbSel: 每个连接上次选的库（持久化）
         openDb: {}, openTf: {}, openTbl: {}, openSub: {},
         tablesLoading: false, lastLoadedConn: null, schemaFilter: "",
         treeCache: {},          // conn -> 树快照（切连接/切页保活）
@@ -465,7 +469,17 @@
       },
       needsDb: function () {
         var m = this.connMeta;
-        return !!m && (m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse") && !m.database;
+        if (!m) return false;
+        // PG 恒为真：库与 schema 是**两层**，就算连接绑了默认库，同一台服务器上的别的库
+        // 也该能浏览（换库 = 换连接，服务端按 database 另建引擎）。
+        // MySQL / ClickHouse 的「schema」本身就是库，绑了默认库就不用再选。
+        if (m.engine === "postgres") return true;
+        return (m.engine === "mysql" || m.engine === "clickhouse") && !m.database;
+      },
+      treeHeadLabel: function () {
+        var m = this.connMeta;
+        if (m && m.engine === "postgres") return "库 / schema / 表";
+        return this.needsDb ? "库 / 表" : "表";
       },
       aiFabStyle: function () {
         // ✨AI 按钮浮在编辑器右上角（对齐 schema 选择器）；有 schema 选择器时左移让位
@@ -523,7 +537,10 @@
       },
       schemaOptions: function () {
         var m = this.connMeta;
-        var head = { value: "", label: m && m.database ? "默认（" + m.database + "）" : "未指定" };
+        // 「默认」指的是当前所在库的默认 search_path。PG 切库后这里要跟着显示新库名，
+        // 否则在 shop 里却写着「默认（testdb）」，看着像还在原来那个库。
+        var base = this.pgDb || (m && m.database) || "";
+        var head = { value: "", label: base ? "默认（" + base + "）" : "未指定" };
         return [head].concat(this.databases.map(function (d) { return { value: d, label: d }; }));
       },
       isProd: function () { var m = this.connMeta; return !!m && m.environment === "prod"; },
@@ -635,6 +652,8 @@
         var id = seq++;
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
+                    // PG 的执行库：跟着左树当前选中的库（换库时会统一改写同连接的所有 tab）
+                    db: opts.db != null ? opts.db : (this.pgDbSel[_conn] || ""),
                     sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, errKind: "", running: false,
                     pinned: false, snippetId: opts.snippetId || null,   // 已保存到服务端片段库的 id（⌘S 覆盖同一条）
                     snipNote: opts.snipNote || "",                     // 片段备注（覆盖保存时保留，不被清空）
@@ -955,6 +974,7 @@
         if (!this.lastLoadedConn) return;
         this.treeCache[this.lastLoadedConn] = {
           databases: this.databases, tablesByDb: this.tablesByDb, tableMeta: this.tableMeta,
+          serverDbs: this.serverDbs, pgDb: this.pgDb,
           tableSizes: this.tableSizes,
           openDb: this.openDb, openTf: this.openTf, openTbl: this.openTbl, openSub: this.openSub,
           schemaFilter: this.schemaFilter,
@@ -975,21 +995,44 @@
         this.databases = []; this.tablesByDb = {}; this.tableMeta = {}; this.tableSizes = {};
         this.openDb = {}; this.openTf = {}; this.openTbl = {}; this.openSub = {};
         this.schemaFilter = ""; this.selected = {};
+        this.serverDbs = []; this.pgDb = "";
         if (!t || !t.conn) { this.lastLoadedConn = null; currentTables = []; currentConn = ""; return; }
         this.lastLoadedConn = t.conn; currentConn = t.conn;
         this.loadHistory();
+        var m = this.connMeta;
         var cached = !force && this.treeCache[t.conn];
+        // 空快照不算数：首次进页面时 loadTree 会先于连接列表跑一遍（connMeta 还是 null，
+        // 认不出引擎、什么都没拉到），如果把那次的空结果写进缓存并在下一次直接命中返回，
+        // 树就永远停在空的状态。PG 尤其明显——库这一层一个都不出来。
+        if (cached && m && m.engine === "postgres" && !(cached.serverDbs || []).length) {
+          cached = null;
+        }
         if (cached) {  // 快照恢复：不发任何请求
           this.databases = cached.databases; this.tablesByDb = cached.tablesByDb;
           this.tableMeta = cached.tableMeta; this.tableSizes = cached.tableSizes || {};
+          this.serverDbs = cached.serverDbs || []; this.pgDb = cached.pgDb || "";
           this.openDb = cached.openDb;
           this.openTf = cached.openTf; this.openTbl = cached.openTbl; this.openSub = cached.openSub;
           this.schemaFilter = cached.schemaFilter || "";
           this.rebuildCompletion();
           return;
         }
-        var m = this.connMeta;
-        if (m && (m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse")) {
+        if (m && m.engine === "postgres") {
+          // PG：库与 schema 是两层。先列服务器上的库（pg_database），选定一个再列它的 schema。
+          // 默认选连接绑定的那个库（没绑就选第一个），与执行上下文保持一致。
+          apiGet("/admin/sql/server_databases?conn=" + encodeURIComponent(t.conn)).then(function (d) {
+            if (!d || !d.ok) { self.flash((d && d.error) || "无法列出数据库"); return; }
+            self.serverDbs = d.databases || [];
+            var want = self.pgDbSel[t.conn] || m.database || "";
+            if (self.serverDbs.indexOf(want) < 0) want = self.serverDbs[0] || "";
+            // 已经选好同一个库就别再走一遍 selectPgDb（会把已加载的 schema 子树清掉重拉）
+            if (want && want !== self.pgDb) self.selectPgDb(want);
+            else if (want && !self.databases.length) self.fetchSchemas();
+            else self.persist();
+          });
+          return;
+        }
+        if (m && (m.engine === "mysql" || m.engine === "clickhouse")) {
           apiGet("/admin/sql/databases?conn=" + encodeURIComponent(t.conn)).then(function (d) {
             self.databases = d && d.ok ? d.databases : [];
             if (d && !d.ok) self.flash(d.error);
@@ -1017,11 +1060,41 @@
           if (self.openTf[db] && !self.tablesByDb[db]) self.fetchTables(db);
         });
       },
+      // 所有会打到 DB 的请求都要带上当前库（PG 才有值，其它引擎恒为空串）
+      dbQs: function () {
+        return this.pgDb ? "&db=" + encodeURIComponent(this.pgDb) : "";
+      },
+      // 切库：清掉 schema 及以下的整棵子树，重新拉这个库的 schema 列表。
+      // **不做「再点一次收起」**——库这一层同时只能开一个，收起等于把树清空、还得再点回来；
+      // 而且初始化时会用当前库名调一次本方法，做成 toggle 会「刚选中就被自己收起」。
+      selectPgDb: function (db) {
+        if (!db) return;
+        this.pgDb = db;
+        var t = this.activeTab;
+        if (t) this.pgDbSel[t.conn] = this.pgDb;
+        this.databases = []; this.tablesByDb = {}; this.tableMeta = {}; this.tableSizes = {};
+        this.openDb = {}; this.openTf = {}; this.openTbl = {}; this.openSub = {};
+        this.selected = {};
+        // 执行上下文跟着走：这个连接下所有 tab 的 SQL 都在选中的库里跑
+        this.tabs.forEach(function (tb) { if (t && tb.conn === t.conn) tb.db = this.pgDb; }, this);
+        if (this.pgDb) this.fetchSchemas();
+        this.persist();
+      },
+      fetchSchemas: function () {
+        var self = this, t = this.activeTab;
+        if (!t) return;
+        apiGet("/admin/sql/databases?conn=" + encodeURIComponent(t.conn) + this.dbQs())
+          .then(function (d) {
+            self.databases = d && d.ok ? d.databases : [];
+            if (d && !d.ok) self.flash(d.error);
+            self.persist();
+          });
+      },
       fetchTables: function (db) {
         var self = this, t = this.activeTab;
         this.tablesLoading = true;
         apiGet("/admin/sql/tables?conn=" + encodeURIComponent(t.conn)
-               + (db ? "&schema=" + encodeURIComponent(db) : "")).then(function (d) {
+               + (db ? "&schema=" + encodeURIComponent(db) : "") + this.dbQs()).then(function (d) {
           self.tablesLoading = false;
           if (!d.ok) { self.flash(d.error); self.tablesByDb[db] = []; return; }
           self.tablesByDb[db] = d.tables || [];
@@ -1067,7 +1140,7 @@
       fetchMeta: function (t, db) {
         var self = this, tab = this.activeTab, k = this.mk(t, db);
         return apiGet("/admin/sql/table?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
-               + (db ? "&schema=" + encodeURIComponent(db) : "")).then(function (d) {
+               + (db ? "&schema=" + encodeURIComponent(db) : "") + this.dbQs()).then(function (d) {
           if (!d.ok) { self.flash(d.error); return; }
           var cols = (d.columns || []).map(function (c) {
             return Object.assign({}, c, { type: self.cleanType(c.type) });  // 类型去掉字符编码
@@ -1128,6 +1201,7 @@
         p.loading = true; p.tables = []; p.error = "";
         var qs = "?conn=" + encodeURIComponent(t.conn);
         if (p.schema) qs += "&schema=" + encodeURIComponent(p.schema);
+        qs += this.dbQs();
         apiGet("/admin/sql/tables" + qs).then(function (d) {
           if (!self.aiPanel) return;
           p.loading = false;
@@ -1714,7 +1788,7 @@
         // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询。
         // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
         apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
-                                          page: page, schema: t.schema || null,
+                                          page: page, schema: t.schema || null, db: t.db || null,
                                           parallel: t.type === "data" ? "1" : null,
                                           expect_fingerprint: confData ? (confData.fingerprint || null) : null })
           .then(function (d) {
@@ -2410,7 +2484,7 @@
         this._tst = setTimeout(function () {
           s.loading = true;
           apiGet("/admin/sql/search_tables?conn=" + encodeURIComponent(self.activeTab.conn)
-                 + "&q=" + encodeURIComponent(s.q))
+                 + "&q=" + encodeURIComponent(s.q) + self.dbQs())
             .then(function (d) {
               if (self.tblSearch !== s) return;  // 已关闭/重开
               s.loading = false;
@@ -2481,7 +2555,7 @@
         p.running = true;
         var tab = this.activeTab;
         apiPost("/admin/sql/import", {
-          conn: tab.conn, table: p.t, schema: p.db || null,
+          conn: tab.conn, table: p.t, schema: p.db || null, db: tab.db || null,
           columns: JSON.stringify(p.parsed.columns), rows: JSON.stringify(p.parsed.rows),
         }).then(function (d) {
           p.running = false;
@@ -2827,7 +2901,8 @@
         var sql = t.type === "data" ? this.buildDataSql(t) : this.stmtAtCursor();
         if (!sql.trim()) { this.flash("请输入 SQL"); return; }
         t.explain = { loading: true };
-        apiPost("/admin/sql/explain", { conn: t.conn, sql: sql, schema: t.schema || null })
+        apiPost("/admin/sql/explain", { conn: t.conn, sql: sql, schema: t.schema || null,
+                                        db: t.db || null })
           .then(function (d) {
             if (!d.ok) { t.explain = null; self.flash(d.error); return; }
             if (d.format === "json") {
@@ -3292,7 +3367,7 @@
                 var cachedT = self.tablesByDb[dbHit];
                 var p = cachedT ? Promise.resolve(cachedT)
                   : fetch("/admin/sql/tables?conn=" + encodeURIComponent(currentConn)
-                          + "&schema=" + encodeURIComponent(dbHit))
+                          + "&schema=" + encodeURIComponent(dbHit) + self.dbQs())
                       .then(function (r) { return r.json(); })
                       .then(function (d) {
                         if (d.ok) self.tablesByDb[dbHit] = d.tables || [];
@@ -3422,7 +3497,7 @@
                  placeholder="选择连接…" @update:model-value="setConn"/>
     </div>
     <div class="dg-acc">
-      <div class="dg-sec-hd acc-hd" @click="toggleAcc('tree')"><span class="caret" :class="{open: acc.tree}">{{ acc.tree ? "▾" : "▸" }}</span><span>{{ needsDb ? "库 / 表" : "表" }}</span>
+      <div class="dg-sec-hd acc-hd" @click="toggleAcc('tree')"><span class="caret" :class="{open: acc.tree}">{{ acc.tree ? "▾" : "▸" }}</span><span>{{ treeHeadLabel }}</span>
         <span class="acc-acts" @click.stop>
         <span v-if="selCount" class="selinfo">已选 {{ selCount }} <a @click="clearSel">清除</a></span>
         <span class="act" @click="openTblSearch" title="全局搜表跳转（⌘/Ctrl+P）">⌕</span>
@@ -3441,14 +3516,28 @@
             </label>
           </div>
         </div>
-        <div v-if="!databases.length" class="dg-empty">（加载中或无可用库）</div>
+        <!-- PG：库这一层。同一时刻只展开一个——一条 PG 连接只绑一个 database，
+             跨库查询在协议层就不存在，同时摊开两个会误导。 -->
+        <template v-if="serverDbs.length">
+          <template v-for="sdb in serverDbs" :key="'sdb-'+sdb">
+            <div class="dg-item" @click="selectPgDb(sdb)"
+                 @contextmenu="openDbCtx($event, activeTab.conn)">
+              <span class="tw" :class="{open: pgDb === sdb}">{{ pgDb === sdb ? "▾" : "▸" }}</span>
+              <span class="ic ic-db"></span><span class="nm">{{ sdb }}</span>
+              <span v-if="pgDb === sdb" class="cnt">当前</span>
+            </div>
+            <div v-if="pgDb === sdb && !databases.length" class="dg-empty" style="padding-left:24px">加载中…</div>
+          </template>
+        </template>
+        <div v-if="!databases.length && !serverDbs.length" class="dg-empty">（加载中或无可用库）</div>
         <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>
         <template v-for="db in filteredDatabases" :key="db">
-          <div class="dg-item" @click="toggleDb(db)" @contextmenu="openDbCtx($event, activeTab.conn)">
-            <span class="tw" :class="{open: openDb[db]}">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic ic-db"></span><span class="nm">{{ db }}</span>
+          <div class="dg-item" :style="serverDbs.length ? 'padding-left:18px' : ''"
+               @click="toggleDb(db)" @contextmenu="openDbCtx($event, activeTab.conn)">
+            <span class="tw" :class="{open: openDb[db]}">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic" :class="serverDbs.length ? 'ic-folder' : 'ic-db'"></span><span class="nm">{{ db }}</span>
           </div>
           <template v-if="openDb[db]">
-            <div class="dg-item sub" style="padding-left:22px" @click="toggleTf(db)">
+            <div class="dg-item sub" :style="serverDbs.length ? 'padding-left:40px' : 'padding-left:22px'" @click="toggleTf(db)">
               <span class="tw" :class="{open: openTf[db]}">{{ openTf[db] ? "▾" : "▸" }}</span><span class="ic ic-folder"></span>
               <span class="nm">tables</span><span class="cnt">{{ tablesByDb[db] ? tablesByDb[db].length : "…" }}</span></div>
             <template v-if="openTf[db]">
@@ -4061,7 +4150,7 @@
       <button @click="openPrivileges(dbCtx.conn)">用户与权限…</button>
     </div>
   </template>
-  <priv-panel v-if="privConn" :conn="privConn" @close="privConn = ''"></priv-panel>
+  <priv-panel v-if="privConn" :conn="privConn" :database="pgDb" @close="privConn = ''"></priv-panel>
   <!-- 列显示类型菜单（数值列右键；仅展示不改值） -->
   <template v-if="colMenu.show">
     <div class="dg-ctx-backdrop" @click="closeColMenu" @contextmenu.prevent="closeColMenu"></div>

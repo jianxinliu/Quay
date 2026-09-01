@@ -338,6 +338,7 @@ class DbmService:
         caller: CallerInfo, max_rows: int, schema: str | None = None,
         on_start=None,  # noqa: ANN001
         max_cell_chars: int | None = None, mask: bool = True,
+        database: str | None = None,
     ) -> dict:
         """执行一条已判定只读的 SQL：跑 reader、落审计、脱敏，返回结果 dict。
 
@@ -352,7 +353,7 @@ class DbmService:
             rec.detail = f"schema={schema}"
 
         def _do() -> "engines.QueryResult":
-            engine = self.pool.get(project, connection, cfg, schema=schema)
+            engine = self.pool.get(project, connection, cfg, schema=schema, database=database)
             return engines.run_query(
                 engine, sql, max_rows,
                 max_cell_chars=max_cell_chars or cfg.policy.max_cell_chars,
@@ -447,6 +448,7 @@ class DbmService:
         page: int = 0, page_size: int | None = None, schema: str | None = None,
         on_start=None,  # noqa: ANN001
         confirm_text: str | None = None, expect_fingerprint: str | None = None,
+        database: str | None = None,
     ) -> dict:
         """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
 
@@ -481,7 +483,8 @@ class DbmService:
             if paginated:
                 # 取 size+1 行探测是否有下一页；不受连接 max_rows 二次截断影响
                 out = self._read(project, connection, cfg, paged_sql, caller, size + 1,
-                                 schema=schema, on_start=on_start, max_cell_chars=eff_cell, mask=False)
+                                 schema=schema, on_start=on_start, max_cell_chars=eff_cell,
+                                 mask=False, database=database)
                 rows = out["rows"]
                 out["has_next"] = len(rows) > size
                 out["rows"] = rows[:size]
@@ -492,7 +495,8 @@ class DbmService:
             # 自带 LIMIT / 非 SELECT：不分页，受系统设置的结果行上限 sql_max_rows 兜底
             eff_max_rows = int(self._setting("sql_max_rows") or cfg.policy.max_rows)
             out = self._read(project, connection, cfg, sql, caller, eff_max_rows,
-                             schema=schema, on_start=on_start, max_cell_chars=eff_cell, mask=False)
+                             schema=schema, on_start=on_start, max_cell_chars=eff_cell,
+                             mask=False, database=database)
             out["paginated"] = False
             return {"kind": "read", **out}
 
@@ -501,7 +505,8 @@ class DbmService:
         if not confirm:
             report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
             report_dict = report.to_dict()
-            plan = self._try_explain(project, connection, cfg, sql, schema=schema)
+            plan = self._try_explain(project, connection, cfg, sql, schema=schema,
+                                     database=database)
             if plan:
                 report_dict["explain"] = plan
             return {"kind": "confirm", "risk": report_dict,
@@ -522,7 +527,8 @@ class DbmService:
             rec.detail = f"schema={schema}"
 
         def _do() -> "engines.QueryResult":
-            engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
+            engine = self.pool.get(project, connection, cfg, role="writer", schema=schema,
+                                   database=database)
             return engines.run_write(engine, sql, on_start=on_start)
 
         try:
@@ -557,52 +563,63 @@ class DbmService:
         return "writer" if cfg.writer is not None else "reader"
 
     def _privilege_read(self, project: str, connection: str, cfg: ConnectionConfig,
-                        sql: str, caller: CallerInfo, max_rows: int = 2000) -> dict:
-        """用管理账号跑一条权限目录查询并落审计（tool=admin_privileges）。"""
+                        sql: str, caller: CallerInfo, max_rows: int = 2000,
+                        database: str | None = None) -> dict:
+        """用管理账号跑一条权限目录查询并落审计（tool=admin_privileges）。
+
+        database：PG 的授权与权限矩阵是**库级**的（ACL 存在各库自己的 pg_class 里），
+        必须跟着查询台当前所在的库走，否则会把另一个库的 ACL 当成这个库的。
+        账号本身是服务器级的（pg_roles 全局），列账号连哪个库都一样。
+        """
         role = self._privilege_role(cfg)
 
         def _do() -> "engines.QueryResult":
-            engine = self.pool.get(project, connection, cfg, role=role)
+            engine = self.pool.get(project, connection, cfg, role=role, database=database)
             return engines.run_query(engine, sql, max_rows)
 
         result = self._audited(project, connection, cfg, "admin_privileges", sql, caller, _do)
         return {"columns": result.columns, "rows": result.rows,
                 "row_count": result.row_count, "duration_ms": result.duration_ms}
 
-    def admin_list_db_users(self, project: str, connection: str, caller: CallerInfo) -> dict:
+    def admin_list_db_users(self, project: str, connection: str, caller: CallerInfo,
+                            database: str | None = None) -> dict:
         """列出目标库里的账号 / 角色。"""
         cfg = self.config.get_connection(project, connection)
         privileges.check_engine(cfg.engine)
         out = self._privilege_read(project, connection, cfg,
-                                   privileges.list_users_sql(cfg.engine), caller)
+                                   privileges.list_users_sql(cfg.engine), caller,
+                                   database=database)
         return {"engine": cfg.engine, "role": self._privilege_role(cfg),
                 "environment": cfg.environment,
                 "privileges": privileges.available_privileges(cfg.engine), **out}
 
     def admin_db_user_grants(self, project: str, connection: str, user: str,
-                             caller: CallerInfo, host: str = "%") -> dict:
+                             caller: CallerInfo, host: str = "%",
+                             database: str | None = None) -> dict:
         """某账号的授权明细。返回按层级分组的多张表（PG 有表/schema/库/属主/角色五组）。"""
         cfg = self.config.get_connection(project, connection)
         privileges.check_engine(cfg.engine)
         groups = []
         for title, sql in privileges.user_grants_sql(cfg.engine, user, host):
-            out = self._privilege_read(project, connection, cfg, sql, caller)
+            out = self._privilege_read(project, connection, cfg, sql, caller, database=database)
             groups.append({"title": title, **out})
         return {"engine": cfg.engine, "user": user, "host": host, "groups": groups}
 
     def admin_privilege_matrix(self, project: str, connection: str, schema: str,
-                               caller: CallerInfo) -> dict:
+                               caller: CallerInfo, database: str | None = None) -> dict:
         """某 schema / 库下「表 × 账号 × 权限」明细，前端透视成矩阵。"""
         cfg = self.config.get_connection(project, connection)
         privileges.check_engine(cfg.engine)
         out = self._privilege_read(project, connection, cfg,
-                                   privileges.privilege_matrix_sql(cfg.engine, schema), caller)
+                                   privileges.privilege_matrix_sql(cfg.engine, schema), caller,
+                                   database=database)
         return {"engine": cfg.engine, "schema": schema, **out}
 
     def admin_run_dcl(self, project: str, connection: str, action: str, params: dict,
                       caller: CallerInfo, confirm: bool = False,
                       confirm_text: str | None = None,
-                      expect_fingerprint: str | None = None) -> dict:
+                      expect_fingerprint: str | None = None,
+                      database: str | None = None) -> dict:
         """执行一次权限变更（CREATE USER / GRANT / REVOKE / …）。后台旁路，不进审批单。
 
         - confirm=False：只把服务端**构造好的**语句和影响回给页面做二次确认，不执行。
@@ -639,7 +656,7 @@ class DbmService:
                 "请先在系统设置的连接管理里补上。")
 
         def _do() -> "engines.QueryResult":
-            engine = self.pool.get(project, connection, cfg, role="writer")
+            engine = self.pool.get(project, connection, cfg, role="writer", database=database)
             return engines.run_write(engine, stmt.sql)
 
         # 审计记录里存脱敏后的语句：CREATE USER / ALTER USER 的原文带明文密码
@@ -652,6 +669,7 @@ class DbmService:
     def admin_import_rows(
         self, project: str, connection: str, table: str, columns: list[str],
         rows: list[list], caller: CallerInfo, schema: str | None = None,
+        database: str | None = None,
     ) -> dict:
         """后台数据导入（CSV/粘贴）：参数化批量 INSERT，writer 单事务执行并审计。
 
@@ -665,7 +683,8 @@ class DbmService:
             raise ValueError(f"单次导入上限 {self.MAX_IMPORT_ROWS} 行，实际 {len(rows)} 行")
         if not columns:
             raise ValueError("缺少列映射")
-        info = self.describe_table(project, connection, table, caller, schema=schema)
+        info = self.describe_table(project, connection, table, caller, schema=schema,
+                                   database=database)
         valid = {c["name"] for c in info["columns"]}
         bad = [c for c in columns if c not in valid]
         if bad:
@@ -675,7 +694,8 @@ class DbmService:
                                 caller)
 
         def _do() -> "engines.QueryResult":
-            engine = self.pool.get(project, connection, cfg, role="writer", schema=schema)
+            engine = self.pool.get(project, connection, cfg, role="writer", schema=schema,
+                                   database=database)
             return engines.insert_rows(engine, table, columns, rows, schema=schema)
 
         try:
@@ -699,7 +719,7 @@ class DbmService:
 
     def admin_export(
         self, project: str, connection: str, sql: str, fmt: str, caller: CallerInfo,
-        schema: str | None = None,
+        schema: str | None = None, database: str | None = None,
     ) -> tuple[bytes, str, str]:
         """导出只读查询结果为文件，返回 (字节, media_type, 扩展名)。仅限只读语句。"""
         from .export import export_result
@@ -709,7 +729,7 @@ class DbmService:
             raise QueryRejected("导出仅支持只读查询（SELECT/SHOW/...）的结果")
         run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
         result = self._read(project, connection, cfg, run_sql, caller,
-                            cfg.policy.max_rows, schema=schema, mask=False)
+                            cfg.policy.max_rows, schema=schema, mask=False, database=database)
         return export_result(result["columns"], result["rows"], fmt)
 
     def export_table(
@@ -1038,7 +1058,7 @@ class DbmService:
 
     def admin_explain(
         self, project: str, connection: str, sql: str, caller: CallerInfo,
-        schema: str | None = None,
+        schema: str | None = None, database: str | None = None,
     ) -> dict:
         """查询台 EXPLAIN：按引擎方言取执行计划（MySQL/PG 为 JSON，SQLite 为行）。
 
@@ -1062,7 +1082,8 @@ class DbmService:
         role = "writer" if (not verdict.readonly and cfg.writer is not None) else "reader"
 
         def _run() -> dict:
-            engine = self.pool.get(project, connection, cfg, role=role, schema=schema)
+            engine = self.pool.get(project, connection, cfg, role=role, schema=schema,
+                                   database=database)
             # JSON 计划可能很长，放开单元格截断
             res = engines.run_query(engine, prefix + stmt, max_rows=500, max_cell_chars=1_000_000)
             return {"format": fmt, "columns": res.columns, "rows": res.rows}
@@ -1541,7 +1562,7 @@ class DbmService:
 
     def _try_explain(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
-        schema: str | None = None,
+        schema: str | None = None, database: str | None = None,
     ) -> dict | None:
         """对写语句取执行计划（不带 ANALYZE，不执行）供审批人参考。
 
@@ -1553,7 +1574,8 @@ class DbmService:
             if role == "writer" and cfg.writer is None:
                 break
             try:
-                engine = self.pool.get(project, connection, cfg, role=role, schema=schema)
+                engine = self.pool.get(project, connection, cfg, role=role, schema=schema,
+                                       database=database)
             except Exception:
                 continue
             plan = engines.explain(engine, sql, cfg.engine)
@@ -1789,30 +1811,49 @@ class DbmService:
 
     # ---------- schema 探索 ----------
 
-    def list_databases(self, project: str, connection: str, caller: CallerInfo) -> list[str]:
-        """列出连接可选的库/schema（MySQL 数据库 / PG schema）。sqlite 无此概念返回 []。"""
+    def list_databases(self, project: str, connection: str, caller: CallerInfo,
+                       database: str | None = None) -> list[str]:
+        """列出连接可选的库/schema（MySQL 数据库 / PG schema）。sqlite 无此概念返回 []。
+
+        database：PG 专用——列**哪个 database 下**的 schema（查询台切库后要看新库的 schema）。
+        """
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine not in ("mysql", "postgres", "clickhouse"):
+            return []
+        engine = self.pool.get(project, connection, cfg, database=database)
+        return self._audited(project, connection, cfg, "list_databases", database or "", caller,
+                             lambda: engines.list_databases(engine))
+
+    def list_server_databases(self, project: str, connection: str,
+                              caller: CallerInfo) -> list[str]:
+        """列出服务器上的 database（PG 查 pg_database；MySQL/CH 等价于 list_databases）。
+
+        PG 的库与 schema 是两层：一条连接只绑一个 database，`get_schema_names()` 只看得到
+        当前库里的 schema。查询台左树的「库」这一层用的就是这里。
+        """
         cfg = self.config.get_connection(project, connection)
         if cfg.engine not in ("mysql", "postgres", "clickhouse"):
             return []
         engine = self.pool.get(project, connection, cfg)
-        return self._audited(project, connection, cfg, "list_databases", "", caller,
-                             lambda: engines.list_databases(engine))
+        return self._audited(project, connection, cfg, "list_databases", "server", caller,
+                             lambda: engines.list_server_databases(engine, cfg.engine))
 
     def list_tables(
-        self, project: str, connection: str, caller: CallerInfo, schema: str | None = None
+        self, project: str, connection: str, caller: CallerInfo, schema: str | None = None,
+        database: str | None = None,
     ) -> list[str]:
         cfg = self.config.get_connection(project, connection)
         # 未绑定默认库时，先让用户选库（库→表→列 三级树）。MySQL/PG 不带 schema 反射会崩
         # （默认 schema 为 None）；ClickHouse 不会崩但会落到 default 库、看不到别的库 → 一并引导
         if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres", "clickhouse"):
             raise ValueError("此连接未绑定默认库，请先选择一个库（schema）再列表")
-        engine = self.pool.get(project, connection, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "list_tables", schema or "", caller,
                              lambda: engines.list_tables(engine, schema))
 
     def describe_table(
         self, project: str, connection: str, table: str, caller: CallerInfo,
-        schema: str | None = None,
+        schema: str | None = None, database: str | None = None,
     ) -> dict:
         cfg = self.config.get_connection(project, connection)
         # 未绑定默认库时的两道防线（否则 SQLAlchemy 反射取默认库为 None → NoneType.replace 崩）：
@@ -1821,39 +1862,41 @@ class DbmService:
             schema, table = table.split(".", 1)
         if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres", "clickhouse"):
             raise ValueError("此连接未绑定默认库，请用「库名.表名」指定表，或先选择一个库（schema）")
-        engine = self.pool.get(project, connection, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
         detail = f"{schema}.{table}" if schema else table
         return self._audited(project, connection, cfg, "describe_table", detail, caller,
                              lambda: engines.describe_table(engine, table, schema))
 
     def admin_search_tables(
         self, project: str, connection: str, q: str, caller: CallerInfo,
+        database: str | None = None,
     ) -> list[dict]:
         """查询台全局表名搜索（⌘P）：跨库 LIKE 匹配，最多 50 条。"""
         q = (q or "").strip()
         if not q:
             return []
         cfg = self.config.get_connection(project, connection)
-        engine = self.pool.get(project, connection, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "search_tables", q, caller,
                              lambda: engines.search_tables(engine, cfg.engine, q))
 
     def admin_table_sizes(
-        self, project: str, connection: str, caller: CallerInfo, schema: str | None = None
+        self, project: str, connection: str, caller: CallerInfo, schema: str | None = None,
+        database: str | None = None,
     ) -> dict[str, int]:
         """查询台树右侧的表容量（字节）。取不到返回空 dict，不阻断列表。"""
         cfg = self.config.get_connection(project, connection)
-        engine = self.pool.get(project, connection, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "table_sizes", schema or "", caller,
                              lambda: engines.table_sizes(engine, cfg.engine, schema))
 
     def get_table_ddl(
         self, project: str, connection: str, table: str, caller: CallerInfo,
-        schema: str | None = None,
+        schema: str | None = None, database: str | None = None,
     ) -> str:
         """取建表语句（查询台「查看 DDL」）。"""
         cfg = self.config.get_connection(project, connection)
-        engine = self.pool.get(project, connection, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
         detail = f"{schema}.{table}" if schema else table
         return self._audited(project, connection, cfg, "table_ddl", detail, caller,
                              lambda: engines.get_table_ddl(engine, cfg.engine, table, schema))

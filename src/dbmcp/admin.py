@@ -2057,12 +2057,26 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     @mcp.custom_route("/admin/sql/databases", methods=["GET"])
     @guard
     async def _sql_databases(req: Request) -> JSONResponse:
+        """列 schema（MySQL 下即库）。PG 带 db= 时列的是该 database 里的 schema。"""
+        db = req.query_params.get("db") or None
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             dbs = await anyio.to_thread.run_sync(
-                service.list_databases, project, connection, _caller(req))
+                service.list_databases, project, connection, _caller(req), db)
         except Exception as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, "databases": dbs})
+
+    @mcp.custom_route("/admin/sql/server_databases", methods=["GET"])
+    @guard
+    async def _sql_server_databases(req: Request) -> JSONResponse:
+        """列服务器上的 database。PG 才有意义（库与 schema 是两层）；其它引擎等价于上面那个。"""
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            dbs = await anyio.to_thread.run_sync(
+                service.list_server_databases, project, connection, _caller(req))
+        except Exception as e:
+            return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, "databases": dbs})
 
     @mcp.custom_route("/admin/sql/tables", methods=["GET"])
@@ -2081,12 +2095,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             tables = await anyio.to_thread.run_sync(
-                service.list_tables, project, connection, _caller(req), schema)
+                service.list_tables, project, connection, _caller(req), schema,
+                req.query_params.get("db") or None)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         try:  # 表容量（树右侧分级展示）：拿不到不阻断表列表
             sizes = await anyio.to_thread.run_sync(
-                service.admin_table_sizes, project, connection, _caller(req), schema)
+                service.admin_table_sizes, project, connection, _caller(req), schema,
+                req.query_params.get("db") or None)
         except Exception:
             sizes = {}
         return JSONResponse({"ok": True, "tables": tables, "sizes": sizes})
@@ -2107,7 +2123,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             table = req.query_params.get("table", "")
             info = await anyio.to_thread.run_sync(
-                service.describe_table, project, connection, table, _caller(req), schema)
+                service.describe_table, project, connection, table, _caller(req), schema,
+                req.query_params.get("db") or None)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, **info})
@@ -2232,7 +2249,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             out = await anyio.to_thread.run_sync(
-                service.admin_list_db_users, project, connection, _caller(req))
+                service.admin_list_db_users, project, connection, _caller(req),
+                req.query_params.get("db") or None)
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **out})
@@ -2245,7 +2263,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             out = await anyio.to_thread.run_sync(
                 service.admin_db_user_grants, project, connection,
                 req.query_params.get("user", ""), _caller(req),
-                req.query_params.get("host", "%"))
+                req.query_params.get("host", "%"), req.query_params.get("db") or None)
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **out})
@@ -2257,7 +2275,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             out = await anyio.to_thread.run_sync(
                 service.admin_privilege_matrix, project, connection,
-                req.query_params.get("schema", ""), _caller(req))
+                req.query_params.get("schema", ""), _caller(req),
+                req.query_params.get("db") or None)
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **out})
@@ -2269,7 +2288,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         try:
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             dbs = await anyio.to_thread.run_sync(
-                service.list_databases, project, connection, _caller(req))
+                service.list_databases, project, connection, _caller(req),
+                req.query_params.get("db") or None)
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, "databases": dbs})
@@ -2290,7 +2310,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                     project, connection, str(body.get("action") or ""),
                     body.get("params") or {}, _caller(req), confirm=confirm,
                     confirm_text=body.get("confirm_text"),
-                    expect_fingerprint=body.get("expect_fingerprint")))
+                    expect_fingerprint=body.get("expect_fingerprint"),
+                    database=body.get("db") or None))
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **out})
@@ -2850,7 +2871,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         project, connection = conn.split("/", 1)
         try:
             out = await anyio.to_thread.run_sync(
-                lambda: service.admin_search_tables(project, connection, q, _caller(req)))
+                lambda: service.admin_search_tables(
+                    project, connection, q, _caller(req),
+                    req.query_params.get("db") or None))
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "results": out})
@@ -2885,7 +2908,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             out = await anyio.to_thread.run_sync(
                 lambda: service.admin_import_rows(
                     project, connection, str(f.get("table") or ""), columns, rows,
-                    _caller(req), schema=str(f.get("schema") or "") or None))
+                    _caller(req), schema=str(f.get("schema") or "") or None,
+                    database=str(f.get("db") or "") or None))
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, **out})
@@ -2932,11 +2956,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         from .service import QueryRejected
         f = await req.form()
         schema = str(f.get("schema") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None   # PG：执行所在的 database
         try:
             project, connection = _resolve_conn(str(f.get("conn") or ""))
             out = await anyio.to_thread.run_sync(
                 service.admin_explain, project, connection, str(f.get("sql") or ""),
-                _caller(req), schema)
+                _caller(req), schema, db)
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception as e:
@@ -2959,7 +2984,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             project, connection = _resolve_conn(req.query_params.get("conn", ""))
             table = req.query_params.get("table", "")
             ddl = await anyio.to_thread.run_sync(
-                service.get_table_ddl, project, connection, table, _caller(req), schema)
+                service.get_table_ddl, project, connection, table, _caller(req), schema,
+                req.query_params.get("db") or None)
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
         return JSONResponse({"ok": True, "ddl": ddl})
@@ -3022,6 +3048,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         except ValueError:
             page = 0
         schema = str(f.get("schema") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None   # PG：执行所在的 database
         caller = _caller(req)
         from .jobs import Busy
         ws = _analysis_ws(str(f.get("conn") or ""))
@@ -3047,7 +3074,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             try:
                 return service.admin_run_sql(project, connection, sql, caller,
                                              confirm, page, None, schema, on_start=register,
-                                             confirm_text=confirm_text, expect_fingerprint=expect_fp)
+                                             confirm_text=confirm_text, expect_fingerprint=expect_fp,
+                                             database=db)
             except Exception as e:  # noqa: BLE001
                 # 统一成已脱敏的文案；连接类错误打上 dbm_error_kind，JobManager 会把它
                 # 透传到 /admin/sql/job 快照里，前端据此在结果区直接显示「重连」按钮。
@@ -3152,6 +3180,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         except ValueError:
             page = 0
         schema = str(f.get("schema") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None   # PG：执行所在的 database
         ws = _analysis_ws(str(f.get("conn") or ""))
         if ws:
             try:
@@ -3169,7 +3198,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             result = await anyio.to_thread.run_sync(
                 lambda: service.admin_run_sql(
                     project, connection, sql, _caller(req), confirm, page, None, schema,
-                    confirm_text=confirm_text, expect_fingerprint=expect_fp))
+                    confirm_text=confirm_text, expect_fingerprint=expect_fp, database=db))
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **result})
@@ -3196,6 +3225,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         sql = str(f.get("sql") or "")
         fmt = str(f.get("format") or "csv")
         schema = str(f.get("schema") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None   # PG：执行所在的 database
         ws = _analysis_ws(str(f.get("conn") or ""))
         try:
             if ws:
@@ -3207,7 +3237,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             else:
                 project, connection = _resolve_conn(str(f.get("conn") or ""))
                 data, media_type, ext = await anyio.to_thread.run_sync(
-                    service.admin_export, project, connection, sql, fmt, _caller(req), schema)
+                    service.admin_export, project, connection, sql, fmt, _caller(req), schema,
+                    str(f.get("db") or "") or None)
         except (QueryRejected, KeyError, ValueError, ExportError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:

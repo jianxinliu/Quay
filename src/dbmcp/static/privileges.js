@@ -64,7 +64,10 @@
 
   window.PrivPanel = {
     name: "priv-panel",
-    props: ["conn"],          // "project/connection"，由查询台把当前连接传进来
+    // conn: "project/connection"；database: PG 当前所在的库（查询台左树选的那个）——
+    // PG 的账号是**服务器级**的（pg_roles 全局），但授权与权限矩阵是**库级**的，
+    // 所以必须跟着当前库走，否则会拿另一个库的 ACL 当成这个库的。
+    props: ["conn", "database"],
     emits: ["close"],
     data: function () {
       return {
@@ -145,6 +148,9 @@
       }
     },
     methods: {
+      dbQs: function () {
+        return this.database ? "&db=" + encodeURIComponent(this.database) : "";
+      },
       flash: function (msg) {
         var self = this;
         this.toast = msg;
@@ -167,7 +173,8 @@
         var self = this;
         if (!this.conn) return;
         this.busy = true; this.err = "";
-        apiGet("/admin/privileges/users?conn=" + encodeURIComponent(this.conn)).then(function (d) {
+        apiGet("/admin/privileges/users?conn=" + encodeURIComponent(this.conn) + this.dbQs())
+          .then(function (d) {
           self.busy = false;
           if (!d.ok) { self.err = d.error; self.users = []; self.meta = null; return; }
           self.meta = { engine: d.engine, role: d.role, environment: d.environment,
@@ -185,7 +192,8 @@
       loadSchemas: function () {
         var self = this;
         if (!this.conn) return;
-        apiGet("/admin/privileges/schemas?conn=" + encodeURIComponent(this.conn)).then(function (d) {
+        apiGet("/admin/privileges/schemas?conn=" + encodeURIComponent(this.conn)
+               + this.dbQs()).then(function (d) {
           if (!d.ok) { self.schemas = []; return; }
           self.schemas = d.databases || [];
           if (!self.schema) {
@@ -207,7 +215,7 @@
         this.grants = null; this.busy = true;
         apiGet("/admin/privileges/grants?conn=" + encodeURIComponent(this.conn) +
                "&user=" + encodeURIComponent(u.name) +
-               "&host=" + encodeURIComponent(u.host || "%")).then(function (d) {
+               "&host=" + encodeURIComponent(u.host || "%") + this.dbQs()).then(function (d) {
           self.busy = false;
           if (!d.ok) { self.err = d.error; return; }
           self.grants = d;
@@ -222,7 +230,7 @@
         if (!this.conn || !this.schema) return;
         this.busy = true; this.err = "";
         apiGet("/admin/privileges/matrix?conn=" + encodeURIComponent(this.conn) +
-               "&schema=" + encodeURIComponent(this.schema)).then(function (d) {
+               "&schema=" + encodeURIComponent(this.schema) + this.dbQs()).then(function (d) {
           self.busy = false;
           if (!d.ok) { self.err = d.error; self.matrix = null; return; }
           self.matrix = d;
@@ -245,7 +253,8 @@
         var self = this;
         this.err = ""; this.busy = true; this.confirm = null;
         apiPost("/admin/privileges/run", {
-          conn: this.conn, action: this.form.action, params: this.paramsForAction()
+          conn: this.conn, action: this.form.action, params: this.paramsForAction(),
+          db: this.database || null
         }).then(function (d) {
           self.busy = false;
           if (!d.ok) { self.err = d.error; return; }
@@ -259,6 +268,7 @@
         this.busy = true; this.err = "";
         apiPost("/admin/privileges/run", {
           conn: this.conn, action: this.form.action, params: this.paramsForAction(),
+          db: this.database || null,
           confirm: "1", confirm_text: this.confirmText,
           expect_fingerprint: this.confirm.fingerprint
         }).then(function (d) {

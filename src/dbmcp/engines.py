@@ -98,8 +98,13 @@ class EnginePool:
         role: Role = "reader",
         schema: str | None = None,
         identities: dict[str, "SshIdentity"] | None = None,
+        database: str | None = None,
     ) -> SAEngine:
-        key = (project, connection, role, schema or "")
+        # database 只对 PostgreSQL 有意义：**一条 PG 连接只能绑一个 database**，
+        # 跨库查询在协议层就不存在（`SELECT … FROM otherdb.public.t` 直接报
+        # cross-database references are not implemented）。所以「换库」= 换一条连接，
+        # 只能靠给每个库建独立引擎来实现，和当初为 schema 上下文做的是同一套机制。
+        key = (project, connection, role, schema or "", database or "")
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None and (entry.tunnel is None or entry.tunnel.is_alive()):
@@ -110,7 +115,7 @@ class EnginePool:
                 entry.dispose()
                 del self._entries[key]
             entry = _build_pooled_engine(cfg, role, schema, identities or self.identities,
-                                         pool_size=self.engine_pool_size)
+                                         pool_size=self.engine_pool_size, database=database)
             self._entries[key] = entry
             return entry.engine
 
@@ -155,6 +160,7 @@ def _build_pooled_engine(
     cfg: ConnectionConfig, role: Role, schema: str | None = None,
     identities: dict[str, "SshIdentity"] | None = None,
     pool_size: int = DEFAULT_ENGINE_POOL_SIZE,
+    database: str | None = None,
 ) -> _PooledEngine:
     tunnel: SSHTunnel | None = None
     host, port = cfg.host, cfg.port
@@ -167,7 +173,8 @@ def _build_pooled_engine(
         host, port = "127.0.0.1", tunnel.local_port
 
     try:
-        engine = _create_readonly_engine(cfg, role, host, port, schema, pool_size=pool_size)
+        engine = _create_readonly_engine(cfg, role, host, port, schema, pool_size=pool_size,
+                                         database=database)
     except Exception:
         if tunnel is not None:
             tunnel.close()
@@ -250,8 +257,14 @@ def _create_readonly_engine(
     port: int | None,
     schema: str | None = None,
     pool_size: int = DEFAULT_ENGINE_POOL_SIZE,
+    database: str | None = None,
 ) -> SAEngine:
-    """schema：查询台执行 schema 上下文。MySQL 覆盖默认库；PG 设 search_path。"""
+    """schema：查询台执行 schema 上下文。MySQL 覆盖默认库；PG 设 search_path。
+
+    database：**仅 PostgreSQL**——选定这条连接要绑的 database（PG 一条连接只能绑一个，
+    换库只能换连接）。缺省沿用配置里的 `database`，没配则回退到 reader 账号名
+    （见 `pg_database_name`）。
+    """
     readonly = role == "reader"
     stmt_timeout_s, op_timeout_s = role_timeouts(cfg.policy, readonly)
     pool_kwargs = _sa_pool_kwargs(pool_size)  # sqlite 不用（本地文件、并发无意义）
@@ -319,8 +332,9 @@ def _create_readonly_engine(
             password=password,
             host=host,
             port=port or 5432,
-            # 未绑库时按 reader 账号名回退，保证 reader/writer 连的是同一个库
-            database=pg_database_name(cfg) or None,
+            # 显式选定的库优先（查询台切库）；否则用配置里的，未绑库时按 reader 账号名
+            # 回退，保证 reader/writer 连的是同一个库
+            database=(database or pg_database_name(cfg)) or None,
         )
         # PG 的 statement_timeout 对所有语句生效（含写）；writer 用写超时，reader 用语句超时
         options = f"-c statement_timeout={op_timeout_s * 1000}"
@@ -682,6 +696,24 @@ def list_databases(engine: SAEngine) -> list[str]:
     """
     names = inspect(engine).get_schema_names()
     return sorted(n for n in names if n and n.lower() not in _SYSTEM_SCHEMAS)
+
+
+def list_server_databases(engine: SAEngine, engine_kind: str) -> list[str]:
+    """列出**服务器上的 database**（不是 schema）。
+
+    PG 的 `inspect().get_schema_names()` 返回的是 schema，看不到同一台服务器上的其它
+    database——因为一条 PG 连接只绑一个库。要浏览别的库必须查 `pg_database` 拿到清单，
+    再对选中的库另建一条连接（`EnginePool.get(database=…)`）。
+    MySQL / ClickHouse 的「schema」本身就是 database，直接复用 list_databases。
+    """
+    if engine_kind != "postgres":
+        return list_databases(engine)
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT datname FROM pg_database "
+            "WHERE datallowconn AND NOT datistemplate ORDER BY datname"
+        )).fetchall()
+    return [r[0] for r in rows]
 
 
 def list_tables(engine: SAEngine, schema: str | None = None) -> list[str]:

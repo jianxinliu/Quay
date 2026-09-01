@@ -482,6 +482,54 @@ class TestSshIdentitiesAndHops:
         assert r.status_code == 400 and "不存在" in r.text
 
 
+class TestPostgresMultiDatabase:
+    """查询台的 db= 参数要一路透传到引擎池。PG 一条连接只绑一个 database，
+    「换库」只能换连接——漏传一处，就会出现「树里选了 shop、SQL 却在 testdb 上跑」。
+    真实多库行为由 scripts 里的真机验证覆盖，这里守的是参数不掉链子。"""
+
+    def test_db_param_reaches_pool(self, client):
+        tc, svc = client
+        seen = []
+        orig = svc.pool.get
+
+        def spy(project, connection, cfg, role="reader", schema=None, database=None, **kw):
+            seen.append(database)
+            return orig(project, connection, cfg, role=role, schema=schema, **kw)
+
+        svc.pool.get = spy
+        try:
+            tc.get("/admin/sql/tables?conn=demo/main&db=shop")
+            tc.get("/admin/sql/table?conn=demo/main&table=users&db=shop")
+            tc.get("/admin/sql/ddl?conn=demo/main&table=users&db=shop")
+            tc.post("/admin/sql/run", data={"conn": "demo/main", "sql": "SELECT 1", "db": "shop"})
+        finally:
+            svc.pool.get = orig
+        assert seen, "没有任何一次 pool.get 被调用"
+        assert all(d == "shop" for d in seen), seen
+
+    def test_no_db_param_keeps_connection_default(self, client):
+        tc, svc = client
+        seen = []
+        orig = svc.pool.get
+
+        def spy(project, connection, cfg, role="reader", schema=None, database=None, **kw):
+            seen.append(database)
+            return orig(project, connection, cfg, role=role, schema=schema, **kw)
+
+        svc.pool.get = spy
+        try:
+            tc.post("/admin/sql/run", data={"conn": "demo/main", "sql": "SELECT 1"})
+        finally:
+            svc.pool.get = orig
+        assert seen and all(d is None for d in seen), seen
+
+    def test_server_databases_route(self, client):
+        tc, _ = client
+        # sqlite 没有库的概念 → 空列表，但路由本身要在
+        d = tc.get("/admin/sql/server_databases?conn=demo/main").json()
+        assert d["ok"] and d["databases"] == []
+
+
 class TestSqlConsole:
     """查询台：页面渲染 + 静态资源 + 元信息 + 读/写执行 + 导出。"""
 
@@ -599,9 +647,9 @@ class TestSqlConsole:
         seen = []
         orig = svc.pool.get
 
-        def spy(project, connection, cfg, role="reader", schema=None):
+        def spy(project, connection, cfg, role="reader", schema=None, **kw):
             seen.append(role)
-            return orig(project, connection, cfg, role=role, schema=schema)
+            return orig(project, connection, cfg, role=role, schema=schema, **kw)
 
         svc.pool.get = spy
         try:

@@ -18,6 +18,16 @@ DataGrip 风格的 SQL IDE，日常"连库—看表—查数—改数—导出"�
 - **Schema 管理**：库多时点树头「Schemas ▾」勾选只显示关心的 schema（可叠加文字筛选）。
 - 下方有**历史**（按连接去重）、**SQL 片段库**（保存常用 SQL，点击载入）。
 
+**PostgreSQL 是「库 → schema → 表」三层。** PG 的一条连接只能绑一个 database，
+跨库查询在协议层就不存在（`SELECT * FROM 别的库.public.t` 会直接报错），所以换库
+= 换连接：点左树里的另一个库，Quay 会用那个库另建一条连接，之后这个连接下所有 tab 的
+SQL 都在新库里跑（右上角 schema 选择器的「默认（…）」也会跟着变）。
+
+同一时刻只展开一个库——同时摊开两个会让人以为能跨库 JOIN，而 PG 做不到。要真跨库
+分析，用分析工作台（把两个库的结果各自快照进 DuckDB 再 JOIN）。
+
+MySQL 没有这一层：它的「schema」就是库，一条连接看得见所有库，树仍是「库 → 表」。
+
 ### 编辑器
 
 - Monaco，⌘/Ctrl+Enter 运行，⌃Space 上下文补全（FROM 后补表、SELECT/WHERE 补列、

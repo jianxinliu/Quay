@@ -321,3 +321,73 @@ class TestPostgresDatabaseFallback:
             eng = _create_readonly_engine(cfg, role, cfg.host, cfg.port)
             assert eng.url.database == "shortdrama"
             eng.dispose()
+
+
+class TestServerDatabases:
+    """PG 的库与 schema 是两层：`get_schema_names()` 只看得到当前库里的 schema，
+    同一台服务器上的其它 database 得查 pg_database 才列得出来。"""
+
+    def test_postgres_queries_pg_database(self, monkeypatch):
+        seen = {}
+
+        class _Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, stmt):
+                seen["sql"] = str(stmt)
+
+                class _R:
+                    @staticmethod
+                    def fetchall():
+                        return [("billing",), ("shop",)]
+
+                return _R()
+
+        class _Eng:
+            @staticmethod
+            def connect():
+                return _Conn()
+
+        assert engines.list_server_databases(_Eng(), "postgres") == ["billing", "shop"]
+        assert "pg_database" in seen["sql"]
+        # 模板库与不允许连接的库不该出现在可选清单里
+        assert "datistemplate" in seen["sql"] and "datallowconn" in seen["sql"]
+
+    def test_other_engines_reuse_schema_listing(self, monkeypatch):
+        monkeypatch.setattr(engines, "list_databases", lambda _e: ["shop", "shop2"])
+        assert engines.list_server_databases(object(), "mysql") == ["shop", "shop2"]
+
+
+class TestPoolDatabaseDimension:
+    """切库 = 换连接：池必须按 database 分开建引擎，否则「换了库还在原库上跑」。"""
+
+    @staticmethod
+    def _cfg():
+        return ConnectionConfig.model_validate({
+            "engine": "postgres", "host": "127.0.0.1", "port": 5432, "database": "app",
+            "user": "ro", "password": "plain://x", "environment": "dev",
+        })
+
+    def test_key_includes_database(self):
+        pool = engines.EnginePool()
+        cfg = self._cfg()
+        pool.get("p", "c", cfg)
+        pool.get("p", "c", cfg, database="other")
+        keys = set(pool._entries)
+        assert ("p", "c", "reader", "", "") in keys
+        assert ("p", "c", "reader", "", "other") in keys
+        dbs = {e.engine.url.database for e in pool._entries.values()}
+        assert dbs == {"app", "other"}
+        pool.dispose()
+
+    def test_same_database_reuses_engine(self):
+        pool = engines.EnginePool()
+        cfg = self._cfg()
+        a = pool.get("p", "c", cfg, database="other")
+        b = pool.get("p", "c", cfg, database="other")
+        assert a is b and len(pool._entries) == 1
+        pool.dispose()
