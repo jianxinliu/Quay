@@ -79,7 +79,10 @@
                 grantee: "", level: "", table: "", database: "", schema: "",
                 obj_type: "TABLES", for_role: "", privileges: [], with_grant: false },
         confirm: null, confirmText: "",
-        busy: false, err: "", toast: ""
+        busy: false, err: "", toast: "",
+        // 打开弹窗不立刻连库：目录查询走的是 writer（管理）账号，prod 上等于「一开面板
+        // 就以管理员身份连了生产库」。先只读配置把要用的账号亮出来，人点了才真去连。
+        loaded: false
       };
     },
     computed: {
@@ -168,6 +171,12 @@
           }
           self.connMeta = hit;
         });
+      },
+      connectAndLoad: function () {
+        if (this.err || !this.connMeta) return;
+        this.loaded = true;
+        this.loadUsers();
+        this.loadSchemas();
       },
       loadUsers: function () {
         var self = this;
@@ -311,12 +320,9 @@
       onKey: function (e) { if (e.key === "Escape" && !this.confirm) this.$emit("close"); }
     },
     mounted: function () {
-      var self = this;
-      this.loadConnMeta().then(function () {
-        if (self.err) return;
-        self.loadUsers();
-        self.loadSchemas();
-      });
+      // loadConnMeta 只读服务端配置（引擎/环境/有没有 writer），不触达数据库，
+      // 所以可以直接拉——真正会连库的 loadUsers/loadSchemas 要等人点「连接并加载」。
+      this.loadConnMeta();
       document.addEventListener("keydown", this.onKey);
     },
     unmounted: function () { document.removeEventListener("keydown", this.onKey); },
@@ -326,15 +332,16 @@
   <header class="pv-top">
     <div class="pv-title">用户与权限</div>
     <div class="pv-conn">{{ conn }}</div>
-    <div v-if="meta" class="pv-meta">
-      <span class="tag">{{ meta.engine }}</span>
-      <span class="tag" :class="{warn: !connMeta || !connMeta.has_writer}">
-        连接账号 {{ (connMeta && connMeta.admin_user) || "?" }}（{{ meta.role === "writer" ? "writer" : "reader" }}）
+    <div v-if="connMeta" class="pv-meta">
+      <span class="tag">{{ connMeta.engine }}</span>
+      <span v-if="database" class="tag">库 {{ database }}</span>
+      <span class="tag" :class="{warn: !connMeta.has_writer}">
+        {{ loaded ? "连接账号" : "将使用" }} {{ connMeta.admin_user || "?" }}（{{ connMeta.has_writer ? "writer" : "reader" }}）
       </span>
       <span v-if="isProd" class="tag prod">生产环境</span>
     </div>
     <div class="pv-sp"></div>
-    <button class="dg-btn" :disabled="busy" @click="loadUsers()">↻ 刷新</button>
+    <button v-if="loaded" class="dg-btn" :disabled="busy" @click="loadUsers()">↻ 刷新</button>
     <button class="pv-x" title="关闭（Esc）" @click="$emit('close')">✕</button>
   </header>
 
@@ -343,7 +350,27 @@
   </div>
   <div v-if="err" class="pv-err">⚠ {{ err }}</div>
 
-  <div class="pv-body" v-if="conn">
+  <!-- 未连接：先把「要用哪个账号连哪个库」摆明，人点了才真去连。
+       目录查询走 writer（管理）账号，一开面板就自动连 = 在 prod 上以管理员身份连了生产库。 -->
+  <div v-if="!loaded && !err" class="pv-gate">
+    <div class="hd">尚未连接数据库</div>
+    <p>
+      查看账号与授权需要读取
+      <code>{{ connMeta && connMeta.engine === "postgres" ? "pg_roles / pg_class.relacl" : "mysql.user / SHOW GRANTS" }}</code>，
+      会用 <b>{{ (connMeta && connMeta.admin_user) || "…" }}</b>（{{ connMeta && connMeta.has_writer ? "writer 管理账号" : "reader 只读账号" }}）
+      连接 <b>{{ conn }}</b><span v-if="database"> 的 <b>{{ database }}</b> 库</span>。
+    </p>
+    <p v-if="isProd" class="warn">
+      这是<b>生产环境</b>。点击后会真的建立一条到线上库的连接（只做只读的目录查询，不改任何东西）。
+    </p>
+    <p v-if="connMeta && !connMeta.has_writer" class="warn">
+      该连接没配 writer（管理）账号：只读账号通常看不全 {{ connMeta.engine === "postgres" ? "pg_class.relacl" : "mysql.user" }}，
+      也无权执行 GRANT/REVOKE——本页只能看、不能改。
+    </p>
+    <button class="dg-btn" :disabled="!connMeta" @click="connectAndLoad()">连接并加载</button>
+  </div>
+
+  <div class="pv-body" v-if="conn && loaded">
     <aside class="pv-users">
       <div class="pv-sec">账号 <span class="n">{{ users.length }}</span></div>
       <input class="pv-search" v-model="userQ" placeholder="过滤账号…">

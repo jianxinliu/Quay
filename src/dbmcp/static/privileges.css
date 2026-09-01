@@ -67,6 +67,25 @@
 .theme-light .pv-err { color: #b91c1c; background: #fef2f2; border-color: #fca5a5; }
 
 .pv-empty { padding: 22px 14px; color: var(--dg-faint); font-size: 12.5px; }
+
+/* 未连接时的就绪页：把「要用哪个账号连哪个库」摆明，人点了才真去连 */
+.pv-gate {
+  flex: 1; min-height: 0; overflow: auto;
+  padding: 40px 32px; max-width: 620px; margin: 0 auto;
+}
+.pv-gate .hd { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+.pv-gate p { margin: 0 0 10px; line-height: 1.75; color: var(--dg-muted); font-size: 12.5px; }
+.pv-gate b { color: var(--dg-text); font-weight: 600; }
+.pv-gate code {
+  font-family: var(--dg-mono); font-size: 11.5px; padding: 1px 5px; border-radius: 4px;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); color: var(--dg-text);
+}
+.pv-gate p.warn {
+  padding: 8px 11px; border-radius: 7px; color: var(--dg-amber);
+  background: color-mix(in srgb, var(--dg-amber) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dg-amber) 35%, transparent);
+}
+.pv-gate .dg-btn { margin-top: 8px; }
 .pv-none { padding: 4px 0 10px; color: var(--dg-faint); font-size: 12px; }
 
 /* ---------------- 三栏 ---------------- */
