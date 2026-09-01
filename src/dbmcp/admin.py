@@ -144,7 +144,7 @@ def error_payload(e: BaseException) -> dict:
     消息一律过 `sanitize_db_message`：管理后台虽已认证，也不该把 DSN 里的密码、
     绑定参数原样打到页面上。
     """
-    from .errors import sanitize_db_message
+    from .errors import error_label, translate_db_error
     from .health import ConnectionUnavailable, is_connection_error
     from .service import QueryRejected
 
@@ -152,7 +152,13 @@ def error_payload(e: BaseException) -> dict:
         return {"ok": False, "error": str(e), "error_kind": f"connection_{e.state}"}
     if isinstance(e, (QueryRejected, KeyError, ValueError)):
         return {"ok": False, "error": str(e)}
-    msg = sanitize_db_message(f"{type(e).__name__}: {e}")
+    # 走与 agent 侧同一套分类/脱敏（errors.py），只把标签换成中文——原来直接拼
+    # `type(e).__name__` 再脱敏，PG 上会渲染成
+    # 「ProgrammingError: (psycopg.errors.InsufficientPrivilege) permission denied for …」，
+    # 驱动类名对使用者是纯噪音（用户实测反馈）。
+    info = translate_db_error(e)
+    label = error_label(info.kind)
+    msg = f"{label}：{info.message}" if label else info.message
     if is_connection_error(e):
         return {"ok": False, "error": msg, "error_kind": "connection_error"}
     return {"ok": False, "error": msg}
@@ -212,6 +218,7 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
    <a href="/admin/workflows"><span class="nico nico-flow"></span><span class="nlabel">流程</span></a>
    <a href="/admin/exports"><span class="nico nico-export"></span><span class="nlabel">临时导出</span></a>
    <a href="/admin/approvals"><span class="nico nico-approve"></span><span class="nlabel">审批中心</span>{nav_badge}</a>
+   <a href="/admin/privileges"><span class="nico nico-priv"></span><span class="nlabel">用户权限</span></a>
    <a href="/admin/audit"><span class="nico nico-audit"></span><span class="nlabel">操作审计</span></a>
    <a href="/admin/settings"><span class="nico nico-settings"></span><span class="nlabel">系统设置</span></a>
   </nav>
@@ -763,6 +770,18 @@ def _redis_body() -> str:
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         '<script src="/admin/static/dg-select.js"></script>'
         '<script src="/admin/static/redis.js"></script>'
+    )
+
+
+def _privileges_body() -> str:
+    """用户与权限管理页：复用 console.css 外壳 + --dg-* 变量，逻辑在 privileges.js。"""
+    return (
+        '<link rel="stylesheet" href="/admin/static/console.css">'
+        '<link rel="stylesheet" href="/admin/static/privileges.css">'
+        '<div id="dbm-priv"></div>'
+        '<script src="/admin/static/vue.global.prod.js"></script>'
+        '<script src="/admin/static/dg-select.js"></script>'
+        '<script src="/admin/static/privileges.js"></script>'
     )
 
 
@@ -2189,6 +2208,104 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     @guard
     async def _redis_console(_req: Request) -> HTMLResponse:
         return _shell("Redis", _redis_body(), doc=False)
+
+    # ---------- 用户与权限管理 ----------
+    #
+    # 只挂在 @guard 后面（已认证的人），**不暴露为 MCP 工具**——红线 5 说连接与密钥
+    # 管理 agent 碰不到，账号权限管理同理。写路径由服务端按动作名构造语句
+    # （privileges.build），页面永远传不进任意 SQL。
+
+    @mcp.custom_route("/admin/privileges", methods=["GET"])
+    @guard
+    async def _privileges_page(_req: Request) -> HTMLResponse:
+        return _shell("用户与权限", _privileges_body(), doc=False)
+
+    @mcp.custom_route("/admin/privileges/connections", methods=["GET"])
+    @guard
+    async def _priv_connections(_req: Request) -> JSONResponse:
+        """只列支持权限管理的连接（PG / MySQL），并标出有没有 writer（管理）账号。"""
+        from .privileges import SUPPORTED_ENGINES
+        conns = []
+        for pname, proj in sorted(service.config.projects.items()):
+            for cname, c in sorted(proj.connections.items()):
+                if c.engine not in SUPPORTED_ENGINES:
+                    continue
+                conns.append({
+                    "value": f"{pname}/{cname}", "project": pname, "connection": cname,
+                    "engine": c.engine, "environment": c.environment or "",
+                    "database": c.database or "", "has_writer": c.writer is not None,
+                    "admin_user": (c.writer.user if c.writer else c.user),
+                })
+        return JSONResponse({"ok": True, "connections": conns})
+
+    @mcp.custom_route("/admin/privileges/users", methods=["GET"])
+    @guard
+    async def _priv_users(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.admin_list_db_users, project, connection, _caller(req))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/privileges/grants", methods=["GET"])
+    @guard
+    async def _priv_grants(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.admin_db_user_grants, project, connection,
+                req.query_params.get("user", ""), _caller(req),
+                req.query_params.get("host", "%"))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/privileges/matrix", methods=["GET"])
+    @guard
+    async def _priv_matrix(req: Request) -> JSONResponse:
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            out = await anyio.to_thread.run_sync(
+                service.admin_privilege_matrix, project, connection,
+                req.query_params.get("schema", ""), _caller(req))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, **out})
+
+    @mcp.custom_route("/admin/privileges/schemas", methods=["GET"])
+    @guard
+    async def _priv_schemas(req: Request) -> JSONResponse:
+        """权限矩阵的 schema / 库下拉。复用查询台那套列库逻辑。"""
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+            dbs = await anyio.to_thread.run_sync(
+                service.list_databases, project, connection, _caller(req))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, "databases": dbs})
+
+    @mcp.custom_route("/admin/privileges/run", methods=["POST"])
+    @guard
+    async def _priv_run(req: Request) -> JSONResponse:
+        """权限变更。第一次调用只回确认卡片，带 confirm=1 才真执行。"""
+        try:
+            body = await req.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "请求体不是合法 JSON"})
+        try:
+            project, connection = _resolve_conn(str(body.get("conn") or ""))
+            confirm = str(body.get("confirm") or "") in ("1", "on", "true", "True")
+            out = await anyio.to_thread.run_sync(
+                lambda: service.admin_run_dcl(
+                    project, connection, str(body.get("action") or ""),
+                    body.get("params") or {}, _caller(req), confirm=confirm,
+                    confirm_text=body.get("confirm_text"),
+                    expect_fingerprint=body.get("expect_fingerprint")))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, **out})
 
     # ---------- 系统设置 ----------
 

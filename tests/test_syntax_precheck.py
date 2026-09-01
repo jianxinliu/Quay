@@ -15,7 +15,12 @@ from sqlalchemy import create_engine
 from dbmcp.approvals import ApprovalStore
 from dbmcp.audit.log import AuditStore
 from dbmcp.config import AppConfig
-from dbmcp.engines import SyntaxCheck, dry_run_syntax_check, first_sql_keyword
+from dbmcp.engines import (
+    SyntaxCheck,
+    _syntax_check_supported,
+    dry_run_syntax_check,
+    first_sql_keyword,
+)
 from dbmcp.service import CallerInfo, DbmService, QueryRejected, SqlSyntaxError
 
 CALLER = CallerInfo(agent="pytest/1.0", session_id="sess-syntax")
@@ -174,3 +179,36 @@ class TestExecutePrecheck:
         """能被解析的正常写操作完全不走预检，行为不变。"""
         out = service.execute("demo", "main", "UPDATE users SET name='bob' WHERE id=1", CALLER)
         assert out["status"] == "approval_required"
+
+
+class TestPostgresSupportGate:
+    """PG 的预检门禁：DML 与「打错的首关键字」都要送 DB 复核，只跳过 PREPARE 不支持的合法语句。
+
+    修复前门禁是「首词 ∈ 可 PREPARE 白名单」，于是**最常见的错误——首关键字打错
+    （SELCT / UPDTE）——恰好永远落在白名单外被整条跳过**，PG 上预检形同虚设
+    （真机 `SELCT * FROM crawl_job` 实测 supported=False）。现在的规则是：
+    首词不是任何合法 PG 语句关键字 → 不存在以它开头的合法语句 → 交给 PREPARE 报真实语法错
+    （仍由 DB 判死，不自己下结论）。
+    """
+
+    def test_dml_heads_supported(self):
+        for sql in ("SELECT 1", "INSERT INTO t VALUES (1)", "UPDATE t SET a=1",
+                    "DELETE FROM t", "WITH x AS (SELECT 1) SELECT * FROM x",
+                    "VALUES (1)", "TABLE t"):
+            assert _syntax_check_supported("postgres", sql), sql
+
+    def test_typo_head_is_checked_not_skipped(self):
+        for sql in ("SELCT * FROM t", "UPDTE t SET a=1", "FROM t SELECT 1", "xyzzy 1"):
+            assert _syntax_check_supported("postgres", sql), sql
+
+    def test_valid_but_unpreparable_statements_are_skipped(self):
+        # PG 的 PREPARE 只吃 DML，这些合法语句喂进去会被误报语法错 → 必须跳过
+        for sql in ("CREATE TABLE t(id int)", "ALTER TABLE t ADD c int", "DROP TABLE t",
+                    "VACUUM t", "GRANT SELECT ON t TO ro", "REVOKE SELECT ON t FROM ro",
+                    "CREATE ROLE ro LOGIN", "REINDEX TABLE t", "SET search_path=public",
+                    "EXPLAIN SELECT 1", "TRUNCATE t", "COPY t FROM STDIN", "ANALYZE t"):
+            assert not _syntax_check_supported("postgres", sql), sql
+
+    def test_leading_comment_does_not_break_gate(self):
+        assert _syntax_check_supported("postgres", "-- c\nSELECT 1")
+        assert not _syntax_check_supported("postgres", "/* c */ CREATE TABLE t(id int)")

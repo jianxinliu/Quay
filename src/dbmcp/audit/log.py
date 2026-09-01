@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS agent_session (
 # 需人工审批 / 后台旁路写入的工具（其余工具均为只读，不需审批）。
 # 审计页「读/写（需审批）」过滤按此集合下推到 SQL。
 # execute = agent 写（走审批单）；admin_execute/admin_import/redis_command = 后台旁路写入。
-_WRITE_TOOLS = ("execute", "admin_execute", "admin_import", "redis_command")
+_WRITE_TOOLS = ("execute", "admin_execute", "admin_import", "admin_dcl", "redis_command")
 
 
 @dataclass
