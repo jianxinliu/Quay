@@ -48,14 +48,14 @@ audit/      classify.py 只读判定 + 指纹 · risk.py 风险评估 · log.py 
 ## 代码规范（lint / 类型）
 
 ```bash
-uv run ruff check src/ tests/     # 代码风格与常见错误（CI 阻塞，须为 0）
+uv run ruff check src/ tests/     # 代码风格与常见错误（提交前须为 0）
 uv run ruff check --fix src/ tests/   # 自动修可修的
-uv run mypy                       # 类型检查（当前是基线，CI 非阻塞）
+uv run mypy                       # 类型检查（当前是基线，不卡提交）
 ```
 
-- **ruff**：CI 会拦，PR 里 ruff 必须干净。项目豁免了 `E702`（单行分号紧凑语句是本项目
+- **ruff**：PR 里 ruff 必须干净。项目豁免了 `E702`（单行分号紧凑语句是本项目
   胶水代码的惯用风格）。
-- **mypy**：目前作为**基线、非阻塞**运行——存量报错多是有意的「guarded Optional」模式
+- **mypy**：目前作为**基线**运行、不卡提交——存量报错多是有意的「guarded Optional」模式
   （store 声明为 `X | None`、方法内 `if None: raise` 兜底，mypy 跟不进运行时守卫）。
   新代码尽量不引入新的类型错误；欢迎 PR 逐步收紧存量。
 
@@ -80,7 +80,8 @@ uv run mypy                       # 类型检查（当前是基线，CI 非阻�
 - 分支开发，别直接推 `main`。
 - **提交信息说明「为什么改」**，而不只是「改了什么」。
 - PR 统一 **squash & merge**。
-- CI（若已配）与本地全量测试都要绿。
+- **本项目没有 CI**：全量测试、ruff 由提交者在本地把关，`uv run pytest` 与
+  `uv run ruff check src/ tests/` 都要绿了再提 PR。
 
 有拿不准的设计取舍（新增依赖、改公共 API/schema、大规模重构、安全相关改动），先开 issue
 讨论再动手。

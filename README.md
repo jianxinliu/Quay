@@ -6,7 +6,6 @@
 
 **人和 AI agent 共用的本地数据库工作台，agent 的写操作必须经人审批**
 
-[![CI](https://github.com/jianxinliu/Quay/actions/workflows/ci.yml/badge.svg)](https://github.com/jianxinliu/Quay/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](pyproject.toml)
 

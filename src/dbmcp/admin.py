@@ -3237,8 +3237,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             else:
                 project, connection = _resolve_conn(str(f.get("conn") or ""))
                 data, media_type, ext = await anyio.to_thread.run_sync(
-                    service.admin_export, project, connection, sql, fmt, _caller(req), schema,
-                    str(f.get("db") or "") or None)
+                    service.admin_export, project, connection, sql, fmt, _caller(req), schema, db)
         except (QueryRejected, KeyError, ValueError, ExportError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:
