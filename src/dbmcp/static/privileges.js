@@ -31,8 +31,6 @@
     }).then(parseApi);
   }
 
-  var STORE_KEY = "dbm-priv-v1";
-
   // 每个动作要显示哪些字段。集中在这里，模板只按需渲染，省掉一堆 v-if 组合。
   var ACTIONS = [
     { value: "create_user", label: "新建账号", fields: ["name", "host", "password", "can_login"],
@@ -64,10 +62,13 @@
   var LEVEL_SCOPE = { all_tables: "table", table: "table", schema: "schema",
                       database: "database", global: "global" };
 
-  var app = Vue.createApp({
+  window.PrivPanel = {
+    name: "priv-panel",
+    props: ["conn"],          // "project/connection"，由查询台把当前连接传进来
+    emits: ["close"],
     data: function () {
       return {
-        conns: [], conn: "", meta: null,
+        connMeta: null, meta: null,
         users: [], userQ: "", sel: null, grants: null,
         tab: "grants",
         schemas: [], schema: "", matrix: null,
@@ -75,20 +76,10 @@
                 grantee: "", level: "", table: "", database: "", schema: "",
                 obj_type: "TABLES", for_role: "", privileges: [], with_grant: false },
         confirm: null, confirmText: "",
-        busy: false, err: "", toast: "", theme: "dark"
+        busy: false, err: "", toast: ""
       };
     },
     computed: {
-      connOptions: function () {
-        return this.conns.map(function (c) {
-          return { value: c.value, label: c.value + "（" + c.engine + "）",
-                   env: c.environment || "" };
-        });
-      },
-      connMeta: function () {
-        var v = this.conn;
-        return this.conns.filter(function (c) { return c.value === v; })[0] || null;
-      },
       isProd: function () { return !!(this.connMeta && this.connMeta.environment === "prod"); },
       isPg: function () { return !!(this.meta && this.meta.engine === "postgres"); },
       actionOptions: function () {
@@ -159,34 +150,18 @@
         this.toast = msg;
         setTimeout(function () { if (self.toast === msg) self.toast = ""; }, 2600);
       },
-      persist: function () {
-        try {
-          localStorage.setItem(STORE_KEY, JSON.stringify({ conn: this.conn, tab: this.tab }));
-        } catch (e) { /* 隐私模式等写不进去，不影响功能 */ }
-      },
-      restore: function () {
-        try { return JSON.parse(localStorage.getItem(STORE_KEY) || "{}") || {}; }
-        catch (e) { return {}; }
-      },
-      loadConns: function () {
-        var self = this, saved = this.restore();
+      // 连接由查询台传进来，这里只补一次它的元信息（引擎/环境/有没有 writer）
+      loadConnMeta: function () {
+        var self = this;
         return apiGet("/admin/privileges/connections").then(function (d) {
           if (!d.ok) { self.err = d.error; return; }
-          self.conns = d.connections || [];
-          var want = saved.conn && self.conns.some(function (c) { return c.value === saved.conn; })
-            ? saved.conn : (self.conns[0] || {}).value || "";
-          if (saved.tab) self.tab = saved.tab;
-          if (want) self.selectConn(want);
+          var hit = (d.connections || []).filter(function (c) { return c.value === self.conn; })[0];
+          if (!hit) {
+            self.err = "连接 " + self.conn + " 不支持权限管理（目前只支持 PostgreSQL 与 MySQL）。";
+            return;
+          }
+          self.connMeta = hit;
         });
-      },
-      selectConn: function (v) {
-        this.conn = v;
-        this.sel = null; this.grants = null; this.matrix = null;
-        this.schema = ""; this.confirm = null; this.confirmText = ""; this.err = "";
-        this.form.level = this.isPg ? "all_tables" : "database";
-        this.persist();
-        this.loadUsers();
-        this.loadSchemas();
       },
       loadUsers: function () {
         var self = this;
@@ -219,7 +194,7 @@
         });
       },
       pickUser: function (u) {
-        this.sel = u; this.tab = "grants"; this.persist();
+        this.sel = u; this.tab = "grants";
         this.form.grantee = u.name;
         this.form.name = u.name;
         if (u.host) this.form.host = u.host;
@@ -239,7 +214,7 @@
         });
       },
       showMatrix: function () {
-        this.tab = "matrix"; this.persist();
+        this.tab = "matrix";
         if (!this.matrix) this.loadMatrix();
       },
       loadMatrix: function () {
@@ -322,21 +297,25 @@
                       REFERENCES: "R", TRIGGER: "g" };
         return privs.map(function (p) { return SHORT[p] || p[0]; }).join("");
       },
-      cellTitle: function (privs) { return privs.join(", "); }
+      cellTitle: function (privs) { return privs.join(", "); },
+      onKey: function (e) { if (e.key === "Escape" && !this.confirm) this.$emit("close"); }
     },
     mounted: function () {
       var self = this;
-      apiGet("/admin/settings/get").then(function (d) {
-        if (d && d.ok && d.settings) self.theme = d.settings.theme || "dark";
+      this.loadConnMeta().then(function () {
+        if (self.err) return;
+        self.loadUsers();
+        self.loadSchemas();
       });
-      this.loadConns();
+      document.addEventListener("keydown", this.onKey);
     },
+    unmounted: function () { document.removeEventListener("keydown", this.onKey); },
     template: `
-<div class="pv-root dg-root" :class="{'theme-light': theme === 'light'}">
+<div class="pv-modal" @click.self="$emit('close')">
+ <div class="pv-root">
   <header class="pv-top">
     <div class="pv-title">用户与权限</div>
-    <dg-select :model-value="conn" :options="connOptions" placeholder="选择连接"
-               @update:modelValue="selectConn"></dg-select>
+    <div class="pv-conn">{{ conn }}</div>
     <div v-if="meta" class="pv-meta">
       <span class="tag">{{ meta.engine }}</span>
       <span class="tag" :class="{warn: !connMeta || !connMeta.has_writer}">
@@ -346,13 +325,11 @@
     </div>
     <div class="pv-sp"></div>
     <button class="dg-btn" :disabled="busy" @click="loadUsers()">↻ 刷新</button>
+    <button class="pv-x" title="关闭（Esc）" @click="$emit('close')">✕</button>
   </header>
 
   <div v-if="isProd" class="pv-prodbar">
     ⚠ 生产环境：权限变更会立刻影响线上访问（REVOKE / DROP USER 会当场掐断连接），执行前需输入连接名确认。
-  </div>
-  <div v-if="!conns.length" class="pv-empty">
-    没有支持权限管理的连接。当前只支持 PostgreSQL 与 MySQL，且需要配置 writer（管理）账号才能执行变更。
   </div>
   <div v-if="err" class="pv-err">⚠ {{ err }}</div>
 
@@ -375,7 +352,7 @@
 
     <section class="pv-main">
       <div class="pv-tabs">
-        <button :class="{on: tab === 'grants'}" @click="tab = 'grants'; persist()">账号授权</button>
+        <button :class="{on: tab === 'grants'}" @click="tab = 'grants'">账号授权</button>
         <button :class="{on: tab === 'matrix'}" @click="showMatrix()">权限矩阵</button>
       </div>
 
@@ -535,9 +512,7 @@
   </div>
 
   <div v-if="toast" class="pv-toast">{{ toast }}</div>
+ </div>
 </div>`
-  });
-
-  if (window.DgSelect) app.component("dg-select", window.DgSelect);
-  app.mount("#dbm-priv");
+  };
 })();

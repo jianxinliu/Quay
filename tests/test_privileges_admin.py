@@ -61,22 +61,28 @@ def _run(tc, **body):
     return tc.post("/admin/privileges/run", json=body).json()
 
 
-class TestPage:
-    def test_page_renders_assets(self, client):
+class TestPlacement:
+    """权限管理是**查询台里的弹窗**，不是独立页面——账号与授权是某个库自己的功能，
+    跟着当前连接走；挂成一级导航的话人得换页面再重新选一遍连接，上下文就丢了。"""
+
+    def test_console_loads_the_panel_component(self, client):
         tc, _ = client
-        html = tc.get("/admin/privileges").text
+        html = tc.get("/admin/sql").text
         assert "/admin/static/privileges.js" in html
         assert "/admin/static/privileges.css" in html
-        assert 'id="dbm-priv"' in html
 
-    def test_nav_links_to_page(self, client):
+    def test_no_standalone_page(self, client):
         tc, _ = client
-        assert 'href="/admin/privileges"' in tc.get("/admin/audit").text
+        assert tc.get("/admin/privileges").status_code == 404
 
-    def test_requires_auth(self, client):
+    def test_no_top_level_nav_entry(self, client):
+        tc, _ = client
+        assert 'href="/admin/privileges"' not in tc.get("/admin/audit").text
+
+    def test_data_routes_require_auth(self, client):
         tc, _ = client
         tc.get("/admin/logout")
-        r = tc.get("/admin/privileges", follow_redirects=False)
+        r = tc.get("/admin/privileges/users?conn=pg/dev1", follow_redirects=False)
         assert r.status_code in (302, 303, 307)
 
 

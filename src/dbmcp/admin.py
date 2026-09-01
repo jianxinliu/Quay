@@ -218,7 +218,6 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
    <a href="/admin/workflows"><span class="nico nico-flow"></span><span class="nlabel">流程</span></a>
    <a href="/admin/exports"><span class="nico nico-export"></span><span class="nlabel">临时导出</span></a>
    <a href="/admin/approvals"><span class="nico nico-approve"></span><span class="nlabel">审批中心</span>{nav_badge}</a>
-   <a href="/admin/privileges"><span class="nico nico-priv"></span><span class="nlabel">用户权限</span></a>
    <a href="/admin/audit"><span class="nico nico-audit"></span><span class="nlabel">操作审计</span></a>
    <a href="/admin/settings"><span class="nico nico-settings"></span><span class="nlabel">系统设置</span></a>
   </nav>
@@ -756,6 +755,9 @@ def _console_body() -> str:
         '<script src="/admin/static/sqlfuncs.js"></script>'
         # 共享自绘下拉（console/redis/workflows 三页共用），须先于 console.js
         '<script src="/admin/static/dg-select.js"></script>'
+        # 「用户与权限」弹窗组件（左树右键菜单打开），同样须先于 console.js
+        '<link rel="stylesheet" href="/admin/static/privileges.css">'
+        '<script src="/admin/static/privileges.js"></script>'
         '<script src="/admin/static/console.js"></script>'
     )
 
@@ -770,18 +772,6 @@ def _redis_body() -> str:
         '<script src="/admin/static/monaco/vs/loader.js"></script>'
         '<script src="/admin/static/dg-select.js"></script>'
         '<script src="/admin/static/redis.js"></script>'
-    )
-
-
-def _privileges_body() -> str:
-    """用户与权限管理页：复用 console.css 外壳 + --dg-* 变量，逻辑在 privileges.js。"""
-    return (
-        '<link rel="stylesheet" href="/admin/static/console.css">'
-        '<link rel="stylesheet" href="/admin/static/privileges.css">'
-        '<div id="dbm-priv"></div>'
-        '<script src="/admin/static/vue.global.prod.js"></script>'
-        '<script src="/admin/static/dg-select.js"></script>'
-        '<script src="/admin/static/privileges.js"></script>'
     )
 
 
@@ -2209,16 +2199,14 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     async def _redis_console(_req: Request) -> HTMLResponse:
         return _shell("Redis", _redis_body(), doc=False)
 
-    # ---------- 用户与权限管理 ----------
+    # ---------- 用户与权限管理（查询台弹窗的数据接口）----------
     #
+    # 没有独立页面：入口是查询台左树「库/连接」节点的右键菜单，账号与授权跟着你正在看的
+    # 那个连接走。这里只提供 JSON 接口，UI 在 static/privileges.js（注册到 console.js 的
+    # priv-panel 组件）。
     # 只挂在 @guard 后面（已认证的人），**不暴露为 MCP 工具**——红线 5 说连接与密钥
     # 管理 agent 碰不到，账号权限管理同理。写路径由服务端按动作名构造语句
     # （privileges.build），页面永远传不进任意 SQL。
-
-    @mcp.custom_route("/admin/privileges", methods=["GET"])
-    @guard
-    async def _privileges_page(_req: Request) -> HTMLResponse:
-        return _shell("用户与权限", _privileges_body(), doc=False)
 
     @mcp.custom_route("/admin/privileges/connections", methods=["GET"])
     @guard

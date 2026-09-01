@@ -371,7 +371,8 @@
         dragGroup: null,        // 拖动的组（连接 key），用于整体调整组顺序
         ctx: { show: false, x: 0, y: 0, table: "", schema: "", multi: false },
         tabCtx: { show: false, x: 0, y: 0, id: null },  // 编辑区 tab 右键菜单
-        dbCtx: { show: false, x: 0, y: 0, conn: "" },   // 左树「库/连接」节点右键菜单（重连）
+        dbCtx: { show: false, x: 0, y: 0, conn: "" },   // 左树「库/连接」节点右键菜单（重连 / 用户权限）
+        privConn: "",                                  // 非空即打开「用户与权限」弹窗（priv-panel 组件）
         reconnecting: false,                            // 正在重连（禁用重复点击）
         // 连接健康位快照 {"项目/连接": {state, fail_count, retry_in_s, probing, last_error}}。
         // 只含**不健康**的连接（服务端不返回健康的），查不到即视为正常。
@@ -1837,6 +1838,12 @@
         this.dbCtx = { show: true, x: e.clientX, y: e.clientY, conn: conn };
       },
       closeDbCtx: function () { this.dbCtx.show = false; },
+      // 「用户与权限」弹窗：账号与授权是这个库自己的事，跟着当前连接走（组件在 privileges.js）
+      openPrivileges: function (conn) {
+        conn = conn || (this.activeTab && this.activeTab.conn);
+        this.closeDbCtx();
+        if (conn) this.privConn = conn;
+      },
       // 人工重连该连接：绕过健康位强制重建，成功后清错误提示、刷新左树恢复元数据。
       // 连接被判 unavailable/exhausted 后，普通查询/刷新都会被健康位挡下，只有这里能自愈。
       reconnect: function (conn) {
@@ -4051,8 +4058,10 @@
     <div class="dg-ctx dg-dbmenu" :style="{left: dbCtx.x+'px', top: dbCtx.y+'px'}" @click.stop>
       <div class="hd">{{ dbCtx.conn }}</div>
       <button :disabled="reconnecting" @click="reconnect(dbCtx.conn)">{{ reconnecting ? "重连中…" : "↻ 重连数据库" }}</button>
+      <button @click="openPrivileges(dbCtx.conn)">用户与权限…</button>
     </div>
   </template>
+  <priv-panel v-if="privConn" :conn="privConn" @close="privConn = ''"></priv-panel>
   <!-- 列显示类型菜单（数值列右键；仅展示不改值） -->
   <template v-if="colMenu.show">
     <div class="dg-ctx-backdrop" @click="closeColMenu" @contextmenu.prevent="closeColMenu"></div>
@@ -4089,5 +4098,7 @@
   app.component("tbl-node", TblNode);
   app.component("plan-node", PlanNode);
   app.component("dg-select", DgSelect);
+  // 「用户与权限」弹窗（privileges.js，与 dg-select 同样是外部注册的共享组件）
+  if (window.PrivPanel) app.component("priv-panel", window.PrivPanel);
   app.mount("#dbm-console");
 })();

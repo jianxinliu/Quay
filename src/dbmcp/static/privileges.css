@@ -1,23 +1,45 @@
-/* 用户与权限管理页。复用 console.css 的 --dg-* 调色板与 .dg-btn / dg-select 原语，
-   这里只写本页布局：顶栏 + 三栏（账号 / 明细 / 变更）。
+/* 用户与权限：查询台里的弹窗（不是独立页面——账号与授权是某个库自己的功能，
+   跟着当前连接走）。复用 console.css 的 --dg-* 调色板与 .dg-btn / dg-select 原语，
+   这里只写弹窗外壳 + 三栏（账号 / 明细 / 变更）。
    细滚动条只用标准属性 scrollbar-width:thin——一旦用 ::-webkit-scrollbar 自定义尺寸，
    Chrome 会把细长的 overlay 滚动条强制变回带凹槽的经典滚动条（见 CLAUDE.md 同名教训）。*/
 
 .pv-root, .pv-root * { scrollbar-width: thin; }
 
+/* 遮罩层级要压过查询台里所有浮层：右键菜单 backdrop 是 190、列菜单 191、
+   全站铃铛 .dbm-bell 是固定定位的 9999——模态期间连铃铛一起盖住才不会被戳穿。 */
+.pv-modal {
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(0, 0, 0, .55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 3vh 3vw;
+}
+.theme-light .pv-modal { background: rgba(30, 36, 48, .38); }
+
 .pv-root {
-  height: 100vh;               /* 不用 position:absolute;inset:0——那会盖住左侧导航栏 */
+  width: 100%; height: 100%; max-width: 1400px;
   display: flex; flex-direction: column;
   background: var(--dg-bg); color: var(--dg-text);
+  border: 1px solid var(--dg-border); border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .5);
   font-size: 13px; overflow: hidden;
 }
+
+.pv-conn {
+  font-family: var(--dg-mono); font-size: 12px; color: var(--dg-text);
+  background: var(--dg-bg); border: 1px solid var(--dg-border);
+  padding: 3px 9px; border-radius: 6px;
+}
+.pv-x {
+  background: none; border: none; color: var(--dg-muted); cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 4px 6px; border-radius: 6px;
+}
+.pv-x:hover { color: var(--dg-text); background: var(--dg-hover); }
 
 /* ---------------- 顶栏 ---------------- */
 .pv-top {
   display: flex; align-items: center; gap: 12px;
-  /* 右侧留 64px 给固定定位的全站铃铛（.dbm-bell，z-index 9999），
-     否则「刷新」按钮会被它压住（查询台告警条踩过同一个坑）。*/
-  padding: 10px 64px 10px 14px; border-bottom: 1px solid var(--dg-border);
+  padding: 10px 12px 10px 14px; border-bottom: 1px solid var(--dg-border);
   background: var(--dg-panel); flex: none;
 }
 .pv-title { font-weight: 600; font-size: 14px; }
@@ -50,7 +72,7 @@
 /* ---------------- 三栏 ---------------- */
 .pv-body {
   flex: 1; min-height: 0;
-  display: grid; grid-template-columns: 240px minmax(0, 1fr) 300px;
+  display: grid; grid-template-columns: 220px minmax(0, 1fr) 290px;
 }
 .pv-users, .pv-act {
   border-right: 1px solid var(--dg-border);
