@@ -22,7 +22,7 @@ from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
 from .masking import apply_mask, resolve_default_patterns
 from .metadata import MetadataCache
 from .notify import NoopNotifier, Notifier
-from . import engines, redis_engine
+from . import engines, privileges, redis_engine
 
 if TYPE_CHECKING:
     from .snippets import SnippetStore
@@ -544,6 +544,108 @@ class DbmService:
         self.store.record(rec)
         return {"kind": "write", "affected_rows": result.row_count,
                 "duration_ms": result.duration_ms}
+
+    # ------------------------------------------------------------ 用户与权限管理
+    #
+    # 目录查询与 DCL 都用 **writer 账号**：权限管理本身就是管理员动作，reader 往往
+    # 既看不全 pg_class.relacl / mysql.user，也无权 GRANT。红线「日常查询走只读账号」
+    # 约束的是数据查询路径，不是这里；页面上会明示用的是哪个账号。
+    # 整组方法只挂在已认证的后台路由上，**不暴露为 MCP 工具**（红线 5：连接与密钥管理
+    # agent 碰不到，账号权限管理同理）。
+
+    def _privilege_role(self, cfg: ConnectionConfig) -> str:
+        return "writer" if cfg.writer is not None else "reader"
+
+    def _privilege_read(self, project: str, connection: str, cfg: ConnectionConfig,
+                        sql: str, caller: CallerInfo, max_rows: int = 2000) -> dict:
+        """用管理账号跑一条权限目录查询并落审计（tool=admin_privileges）。"""
+        role = self._privilege_role(cfg)
+
+        def _do() -> "engines.QueryResult":
+            engine = self.pool.get(project, connection, cfg, role=role)
+            return engines.run_query(engine, sql, max_rows)
+
+        result = self._audited(project, connection, cfg, "admin_privileges", sql, caller, _do)
+        return {"columns": result.columns, "rows": result.rows,
+                "row_count": result.row_count, "duration_ms": result.duration_ms}
+
+    def admin_list_db_users(self, project: str, connection: str, caller: CallerInfo) -> dict:
+        """列出目标库里的账号 / 角色。"""
+        cfg = self.config.get_connection(project, connection)
+        privileges.check_engine(cfg.engine)
+        out = self._privilege_read(project, connection, cfg,
+                                   privileges.list_users_sql(cfg.engine), caller)
+        return {"engine": cfg.engine, "role": self._privilege_role(cfg),
+                "environment": cfg.environment,
+                "privileges": privileges.available_privileges(cfg.engine), **out}
+
+    def admin_db_user_grants(self, project: str, connection: str, user: str,
+                             caller: CallerInfo, host: str = "%") -> dict:
+        """某账号的授权明细。返回按层级分组的多张表（PG 有表/schema/库/属主/角色五组）。"""
+        cfg = self.config.get_connection(project, connection)
+        privileges.check_engine(cfg.engine)
+        groups = []
+        for title, sql in privileges.user_grants_sql(cfg.engine, user, host):
+            out = self._privilege_read(project, connection, cfg, sql, caller)
+            groups.append({"title": title, **out})
+        return {"engine": cfg.engine, "user": user, "host": host, "groups": groups}
+
+    def admin_privilege_matrix(self, project: str, connection: str, schema: str,
+                               caller: CallerInfo) -> dict:
+        """某 schema / 库下「表 × 账号 × 权限」明细，前端透视成矩阵。"""
+        cfg = self.config.get_connection(project, connection)
+        privileges.check_engine(cfg.engine)
+        out = self._privilege_read(project, connection, cfg,
+                                   privileges.privilege_matrix_sql(cfg.engine, schema), caller)
+        return {"engine": cfg.engine, "schema": schema, **out}
+
+    def admin_run_dcl(self, project: str, connection: str, action: str, params: dict,
+                      caller: CallerInfo, confirm: bool = False,
+                      confirm_text: str | None = None,
+                      expect_fingerprint: str | None = None) -> dict:
+        """执行一次权限变更（CREATE USER / GRANT / REVOKE / …）。后台旁路，不进审批单。
+
+        - confirm=False：只把服务端**构造好的**语句和影响回给页面做二次确认，不执行。
+        - confirm=True：用 writer 执行并落审计（tool=admin_dcl）。
+
+        三重闸门：
+        - 语句由服务端按动作名 + 参数构造（`privileges.build`），页面传不进任意 SQL；
+        - prod 环境须额外输入连接名（confirm_text）匹配才放行——DCL 在生产上不可逆
+          （DROP USER / REVOKE 会当场掐断线上服务的访问），比普通写更需要一道人为减速带；
+        - H1 指纹绑定：确认时带回的指纹须与当前参数构造出的语句一致，防「看 A 批 B」。
+
+        审计落的是 `audit_sql`（密码已换成 ***）——红线 2：密码永不出现在审计记录里。
+        """
+        cfg = self.config.get_connection(project, connection)
+        privileges.check_engine(cfg.engine)
+        stmt = privileges.build(cfg.engine, action, params)
+        is_prod = (cfg.environment or "").lower() == "prod"
+        fp = fingerprint(stmt.audit_sql, cfg.engine)
+
+        if not confirm:
+            return {"kind": "confirm", "action": action, "sql": stmt.audit_sql,
+                    "summary": stmt.summary, "has_secret": stmt.has_secret,
+                    "prod": is_prod, "fingerprint": fp,
+                    "expect_text": connection if is_prod else None}
+
+        if is_prod and (confirm_text or "") != connection:
+            raise QueryRejected(
+                f"生产环境的权限变更需要输入连接名「{connection}」确认后才能执行。")
+        if expect_fingerprint is not None and not hmac.compare_digest(expect_fingerprint, fp):
+            raise QueryRejected("权限操作在确认前后发生了变化（指纹不一致），已拒绝执行，请重新确认。")
+        if cfg.writer is None:
+            raise QueryRejected(
+                f"连接 {project}/{connection} 未配置 writer（管理）账号，无法执行权限变更。"
+                "请先在系统设置的连接管理里补上。")
+
+        def _do() -> "engines.QueryResult":
+            engine = self.pool.get(project, connection, cfg, role="writer")
+            return engines.run_write(engine, stmt.sql)
+
+        # 审计记录里存脱敏后的语句：CREATE USER / ALTER USER 的原文带明文密码
+        result = self._audited(project, connection, cfg, "admin_dcl", stmt.audit_sql, caller, _do)
+        return {"kind": "done", "action": action, "sql": stmt.audit_sql,
+                "summary": stmt.summary, "duration_ms": result.duration_ms}
 
     MAX_IMPORT_ROWS = 50_000
 

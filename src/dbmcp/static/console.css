@@ -43,9 +43,9 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   --dg-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 
-/* 浅色主题：把 --dg-* 覆盖为浅色一套（作用于查询台 .dg-root 与 Redis .rd-root）。
+/* 浅色主题：把 --dg-* 覆盖为浅色一套（作用于查询台 .dg-root / Redis .rd-root / 权限页 .pv-root）。
    系统设置里选择，服务端持久化，两个 IDE 页共用。侧栏保持深色（如 VS Code 浅色主题的活动栏）。 */
-.dg-root.theme-light, .rd-root.theme-light {
+.dg-root.theme-light, .rd-root.theme-light, .pv-root.theme-light {
   --dg-bg: #ffffff; --dg-panel: #f2f4f7; --dg-panel-2: #e9ecf1; --dg-border: #d4d8df;
   --dg-text: #1f2530; --dg-muted: #5b6270; --dg-faint: #838a97;
   --dg-accent: #2563eb; --dg-accent-soft: #d6e2fb; --dg-hover: #eef1f6;
@@ -57,6 +57,11 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
    变浅蓝，浅字就看不见了 → 选中态文字改用深色文本，靠浅蓝底表达选中。 */
 .dg-root.theme-light .dg-item.sel .nm,
 .dg-root.theme-light .dg-res-meta .vswitch button.on { color: var(--dg-text); }
+/* dg-select 的当前项同病：`.dg-sel-item.cur` 的 color 写死成近白色 #d7e3ff，配深色的
+   accent-soft 才成立；浅色主题下 accent-soft 是浅蓝，白字直接消失——下拉里当前选中的
+   那一项看上去是**空白行**。dg-select 是全站共用组件（查询台/Redis/流程/用户权限），
+   所以这条不挂在某个页面的根类上，按 .theme-light 全局纠正。 */
+.theme-light .dg-sel-item.cur { color: var(--dg-text); }
 
 #dbm-console { height: 100vh; }
 .dg-root {
