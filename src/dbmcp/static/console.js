@@ -532,6 +532,26 @@
         var t = this.activeTab; return !!t && (t.conn || "").indexOf("analysis/") === 0;
       },
       // AI 面板的库选择器也走 dg-select（页面里最后一处原生 <select>，观感与别处不统一）
+      // 左树的行序：PG 下把 schema **插在选中的那个库后面**，而不是把库列表和 schema
+      // 列表当成两段各自渲染——后者会让 schema 视觉上挂到最后一个库下面（真实反馈
+      // 「树结构错位」），而且切库时整块 schema 会在列表底部跳来跳去。
+      // 非 PG（MySQL/CH 没有库这一层）就只有 schema 行，与原来完全一致。
+      treeRows: function () {
+        var rows = [], self = this;
+        if (!this.serverDbs.length) {
+          this.filteredDatabases.forEach(function (n) { rows.push({ kind: "schema", name: n }); });
+          return rows;
+        }
+        this.serverDbs.forEach(function (sdb) {
+          rows.push({ kind: "db", name: sdb });
+          if (sdb !== self.pgDb) return;
+          if (!self.databases.length) rows.push({ kind: "loading", name: sdb });
+          else self.filteredDatabases.forEach(function (n) {
+            rows.push({ kind: "schema", name: n });
+          });
+        });
+        return rows;
+      },
       dbPickOptions: function () {
         return this.databases.map(function (d) { return { value: d, label: d }; });
       },
@@ -3505,7 +3525,9 @@
       <div v-show="acc.tree" class="acc-body grow">
       <div v-if="!activeTab || !activeTab.conn" class="dg-empty">先选择连接</div>
       <template v-else-if="needsDb">
-        <div class="dg-schema-tools" v-if="databases.length">
+        <!-- 切库时 databases 会先清空再重填；这条工具条若跟着消失又出现，整棵树会上下
+             弹一次（真实反馈「点击的时候会跳动」）。PG 只要还有库就一直挂着。 -->
+        <div class="dg-schema-tools" v-if="serverDbs.length || databases.length">
           <button class="dg-btn" @click.stop="schemaPickOpen = !schemaPickOpen"
                   title="选择要在树里显示的 schema">Schemas ▾</button>
           <input v-if="databases.length > 6" v-model="schemaFilter" placeholder="筛选库…">
@@ -3516,22 +3538,23 @@
             </label>
           </div>
         </div>
-        <!-- PG：库这一层。同一时刻只展开一个——一条 PG 连接只绑一个 database，
-             跨库查询在协议层就不存在，同时摊开两个会误导。 -->
-        <template v-if="serverDbs.length">
-          <template v-for="sdb in serverDbs" :key="'sdb-'+sdb">
-            <div class="dg-item" @click="selectPgDb(sdb)"
-                 @contextmenu="openDbCtx($event, activeTab.conn)">
-              <span class="tw" :class="{open: pgDb === sdb}">{{ pgDb === sdb ? "▾" : "▸" }}</span>
-              <span class="ic ic-db"></span><span class="nm">{{ sdb }}</span>
-              <span v-if="pgDb === sdb" class="cnt">当前</span>
-            </div>
-            <div v-if="pgDb === sdb && !databases.length" class="dg-empty" style="padding-left:24px">加载中…</div>
-          </template>
-        </template>
         <div v-if="!databases.length && !serverDbs.length" class="dg-empty">（加载中或无可用库）</div>
-        <div v-else-if="!filteredDatabases.length" class="dg-empty">（无匹配库）</div>
-        <template v-for="db in filteredDatabases" :key="db">
+        <div v-else-if="!treeRows.length" class="dg-empty">（无匹配库）</div>
+        <!-- 一个有序列表铺出整棵树：PG 下 schema 行紧跟在选中的库行后面（见 treeRows）。
+             库这一层同一时刻只展开一个——一条 PG 连接只绑一个 database，跨库查询在协议层
+             就不存在，同时摊开两个会让人以为能跨库 JOIN。 -->
+        <template v-for="row in treeRows" :key="row.kind + ':' + row.name">
+        <!-- 库行（仅 PG） -->
+        <div v-if="row.kind === 'db'" class="dg-item" @click="selectPgDb(row.name)"
+             @contextmenu="openDbCtx($event, activeTab.conn)">
+          <span class="tw" :class="{open: pgDb === row.name}">{{ pgDb === row.name ? "▾" : "▸" }}</span>
+          <span class="ic ic-db"></span><span class="nm">{{ row.name }}</span>
+          <span v-if="pgDb === row.name" class="cnt">当前</span>
+        </div>
+        <div v-else-if="row.kind === 'loading'" class="dg-empty" style="padding-left:24px">加载中…</div>
+        <!-- schema 行及其子树。用单元素 v-for 把 row.name 别名成 db，好让下面这段
+             与 MySQL 共用同一份 markup（否则要么复制一遍，要么把十几处 db 全改掉）。 -->
+        <template v-else v-for="db in [row.name]" :key="'s-'+db">
           <div class="dg-item" :style="serverDbs.length ? 'padding-left:18px' : ''"
                @click="toggleDb(db)" @contextmenu="openDbCtx($event, activeTab.conn)">
             <span class="tw" :class="{open: openDb[db]}">{{ openDb[db] ? "▾" : "▸" }}</span><span class="ic" :class="serverDbs.length ? 'ic-folder' : 'ic-db'"></span><span class="nm">{{ db }}</span>
@@ -3552,6 +3575,7 @@
                 @ctxmenu="e=>openCtx(e,t,db)"/>
             </template>
           </template>
+        </template>
         </template>
       </template>
       <template v-else>
