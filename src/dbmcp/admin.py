@@ -144,7 +144,7 @@ def error_payload(e: BaseException) -> dict:
     消息一律过 `sanitize_db_message`：管理后台虽已认证，也不该把 DSN 里的密码、
     绑定参数原样打到页面上。
     """
-    from .errors import sanitize_db_message
+    from .errors import error_label, translate_db_error
     from .health import ConnectionUnavailable, is_connection_error
     from .service import QueryRejected
 
@@ -152,7 +152,13 @@ def error_payload(e: BaseException) -> dict:
         return {"ok": False, "error": str(e), "error_kind": f"connection_{e.state}"}
     if isinstance(e, (QueryRejected, KeyError, ValueError)):
         return {"ok": False, "error": str(e)}
-    msg = sanitize_db_message(f"{type(e).__name__}: {e}")
+    # 走与 agent 侧同一套分类/脱敏（errors.py），只把标签换成中文——原来直接拼
+    # `type(e).__name__` 再脱敏，PG 上会渲染成
+    # 「ProgrammingError: (psycopg.errors.InsufficientPrivilege) permission denied for …」，
+    # 驱动类名对使用者是纯噪音（用户实测反馈）。
+    info = translate_db_error(e)
+    label = error_label(info.kind)
+    msg = f"{label}：{info.message}" if label else info.message
     if is_connection_error(e):
         return {"ok": False, "error": msg, "error_kind": "connection_error"}
     return {"ok": False, "error": msg}

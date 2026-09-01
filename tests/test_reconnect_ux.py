@@ -91,6 +91,26 @@ class TestErrorPayload:
         p = error_payload(RuntimeError("boom mysql+pymysql://root:s3cret@db:3306/app"))
         assert "s3cret" not in p["error"]
 
+    def test_pg_error_shows_chinese_label_not_driver_class(self):
+        """查询台不该出现驱动内部类名——用户实测反馈的原文是
+        「⚠ ProgrammingError: (psycopg.errors.InsufficientPrivilege) permission denied …」。
+        现在与 agent 侧共用 errors.py 的分类，只把标签换成中文。"""
+
+        class ProgrammingError(Exception):
+            def __init__(self, msg):
+                super().__init__(msg)
+                self.sqlstate = "42501"
+
+        p = error_payload(ProgrammingError(
+            "(psycopg.errors.InsufficientPrivilege) permission denied for table crawl_job"))
+        assert p["error"] == "权限不足：permission denied for table crawl_job"
+        assert "psycopg" not in p["error"] and "ProgrammingError" not in p["error"]
+        assert "error_kind" not in p  # 权限错不是连接错，不该长出重连按钮
+
+    def test_unclassified_error_keeps_plain_message(self):
+        p = error_payload(RuntimeError("something odd happened"))
+        assert p["error"] == "something odd happened"
+
 
 class TestJobErrorKind:
     """连接类错误要能穿过后台任务队列到达前端（查询台走的是 run_async + 轮询）。"""

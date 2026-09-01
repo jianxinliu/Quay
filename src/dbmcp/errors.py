@@ -26,8 +26,17 @@ _SQLALCHEMY_BACKGROUND_RE = re.compile(r"\s*\(Background on this error at:[^)]*\
 _SQL_ECHO_RE = re.compile(r"\s*\[(?:SQL|parameters|cached since)[:\s][\s\S]*$", re.I)
 # DSN 里的账号密码：scheme://user:password@host → scheme://***@host
 _DSN_CRED_RE = re.compile(r"([a-z0-9+.\-]+://)[^\s/@:]+(?::[^\s/@]*)?@", re.I)
-# 驱动异常类名前缀，如 "(pymysql.err.OperationalError) "
-_DRIVER_PREFIX_RE = re.compile(r"^\((?:[\w.]+\.)?\w*(?:Error|Exception)\)\s*")
+# 驱动异常类名前缀，如 "(pymysql.err.OperationalError) " / "(psycopg.errors.UndefinedTable) "。
+# psycopg3 的异常类名**多数不以 Error 结尾**（UndefinedTable / InsufficientPrivilege /
+# AdminShutdown…），只按 `Error|Exception` 结尾匹配会让 PG 的错误一律带着驱动类名外发。
+# 故分两支：带模块路径的点分类名一律剥；无路径的裸类名仍要求以 Error/Exception 结尾
+# （避免误伤 `(SELECT …)` 这类真的以括号开头的内容）。
+_DRIVER_PREFIX_RE = re.compile(
+    r"^\((?:[A-Za-z_]\w*\.)+[A-Z]\w*\)\s*"
+    r"|^\(\w*(?:Error|Exception)\)\s*"
+)
+# PG 把出错位置画成单独一行的插入符（`      ^`）。换行折叠后这个符号失去对位意义、纯噪音。
+_CARET_LINE_RE = re.compile(r"^[ \t]*\^[ \t]*$", re.M)
 # 形如 `(1064, "...")` / `(3024, '...')` 的错误码元组
 _CODE_TUPLE_RE = re.compile(r"^\((\d{3,5}),\s*[\"'](.*)[\"']\)\s*$", re.S)
 
@@ -103,6 +112,13 @@ _RULES: tuple[tuple[str, frozenset[int], tuple[str, ...], str], ...] = (
         "查询超时。请用 WHERE 收窄范围、加索引命中的过滤条件，或改用聚合/分析工作台下推计算。",
     ),
     (
+        "query_canceled",
+        frozenset(),
+        ("canceling statement due to user request",   # PG：pg_cancel_backend（查询台取消/管理员中断）
+         "query was cancelled"),
+        "查询被取消（人工取消或管理员中断），不是 SQL 本身的问题；需要结果可重发。",
+    ),
+    (
         "deadlock",
         frozenset({1213, 1614}),
         ("deadlock",),
@@ -142,6 +158,69 @@ _RULES: tuple[tuple[str, frozenset[int], tuple[str, ...], str], ...] = (
 )
 
 
+# PostgreSQL 的 SQLSTATE → 分类。**比消息片段可靠得多**，故排在所有规则之前：
+# PG 的「列不存在」与「表不存在」消息高度雷同——`column "x" does not exist` /
+# `relation "x" does not exist`——只按 "does not exist" 片段判会把列错误误判成表错误
+# （真机实测过）。psycopg 的异常对象带 .sqlstate，直接取。
+# 只列能稳定映射到既有分类的；未列出的仍走错误码 / 消息片段兜底。
+_PG_SQLSTATES: dict[str, str] = {
+    "42601": "sql_syntax_error",      # syntax_error
+    "42P01": "table_not_found",       # undefined_table
+    "42703": "column_not_found",      # undefined_column
+    "42501": "permission_denied",     # insufficient_privilege
+    "28000": "permission_denied",     # invalid_authorization_specification
+    "28P01": "permission_denied",     # invalid_password
+    "25006": "readonly_violation",    # read_only_sql_transaction
+    "40P01": "deadlock",              # deadlock_detected
+    "55P03": "lock_not_available",    # lock_not_available
+    "23505": "duplicate_key",         # unique_violation
+    "23502": "constraint_violation",  # not_null_violation
+    "23503": "constraint_violation",  # foreign_key_violation
+    "23514": "constraint_violation",  # check_violation
+    "22001": "data_too_long",         # string_data_right_truncation
+    "22003": "data_too_long",         # numeric_value_out_of_range
+    "3D000": "unknown_database",      # invalid_catalog_name
+    "3F000": "unknown_database",      # invalid_schema_name
+    "53200": "result_too_large",      # out_of_memory
+    "53400": "result_too_large",      # configuration_limit_exceeded
+}
+# 57014 (query_canceled) 有意不入表：语句超时与人工取消共用这个 SQLSTATE，
+# 要靠消息文案区分（"statement timeout" vs "user request"），交给下面的消息规则。
+
+
+# 分类 → 给人看的中文标签（管理后台查询台用；agent 侧仍用机器可读的 kind）
+_KIND_LABELS: dict[str, str] = {
+    "sql_syntax_error": "SQL 语法错误",
+    "table_not_found": "表不存在",
+    "column_not_found": "列不存在",
+    "unknown_database": "库/schema 不存在",
+    "permission_denied": "权限不足",
+    "readonly_violation": "只读连接禁止写入",
+    "query_timeout": "查询超时",
+    "query_canceled": "查询已取消",
+    "deadlock": "死锁",
+    "lock_timeout": "等锁超时",
+    "duplicate_key": "唯一键冲突",
+    "constraint_violation": "违反约束",
+    "data_too_long": "值超出列范围",
+    "result_too_large": "结果集/内存超限",
+}
+
+
+def error_label(kind: str) -> str:
+    """分类标签的中文名；未知分类返回空串（调用方据此决定不加前缀）。"""
+    return _KIND_LABELS.get(kind, "")
+
+
+def pg_sqlstate(exc: BaseException) -> str:
+    """沿异常链取 psycopg 的 SQLSTATE（5 位字符串）；取不到返回空串。"""
+    for cur in _causes(exc):
+        state = getattr(cur, "sqlstate", None)
+        if isinstance(state, str) and state:
+            return state
+    return ""
+
+
 def sanitize_db_message(raw: str) -> str:
     """剥掉驱动异常消息里的敏感与噪音片段，返回可安全外发的一行摘要。
 
@@ -151,6 +230,7 @@ def sanitize_db_message(raw: str) -> str:
     text = (raw or "").strip()
     text = _SQL_ECHO_RE.sub("", text)
     text = _SQLALCHEMY_BACKGROUND_RE.sub("", text)
+    text = _CARET_LINE_RE.sub("", text)
     text = _DRIVER_PREFIX_RE.sub("", text.strip())
     m = _CODE_TUPLE_RE.match(text.strip())
     if m:
@@ -191,6 +271,9 @@ def _causes(exc: BaseException, limit: int = 8):
 
 def classify_db_error(exc: BaseException) -> str:
     """只返回分类标签（不组装文案），供审计/统计使用。"""
+    state = pg_sqlstate(exc)
+    if state in _PG_SQLSTATES:
+        return _PG_SQLSTATES[state]
     code = _error_code(exc)
     low = " ".join(str(c) for c in _causes(exc)).lower()
     for kind, codes, parts, _hint in _RULES:

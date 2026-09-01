@@ -871,6 +871,21 @@ def _col_categories(ncols: int, rows: list) -> list[str]:
 
 # PG 的 PREPARE 只接受这些开头的语句；其余（DDL 等）交给它会报**语法错**，是假阳性来源
 _PG_PREPARABLE_HEADS = ("select", "insert", "update", "delete", "values", "with", "table")
+# PG 的全部语句起始关键字（PostgreSQL SQL Commands 目录）。用途只有一个：判断
+# 「这个词到底是不是一条合法语句的开头」。
+# 背景：PG 的 PREPARE 只吃 DML，DDL 会被报成语法错，所以原来只对 _PG_PREPARABLE_HEADS
+# 做复核。但这样一来**最常见的错误——把首关键字打错（SELCT）——恰好永远落在白名单外、
+# 被整条跳过**，预检对 PG 等于形同虚设（真机 `SELCT * FROM crawl_job` 实测 supported=False）。
+# 修法：首词若压根不是任何 PG 语句关键字，说明不存在以它开头的合法语句，交给 PREPARE 去报
+# 真实语法错（仍由 DB 判死，不自己下结论——见 CLAUDE.md「静态解析器和目标 DB 是两套语法」）。
+_PG_STATEMENT_HEADS = frozenset({
+    "abort", "alter", "analyze", "analyse", "begin", "call", "checkpoint", "close", "cluster",
+    "comment", "commit", "copy", "create", "deallocate", "declare", "delete", "discard", "do",
+    "drop", "end", "execute", "explain", "fetch", "grant", "import", "insert", "listen", "load",
+    "lock", "merge", "move", "notify", "prepare", "reassign", "refresh", "reindex", "release",
+    "reset", "revoke", "rollback", "savepoint", "security", "select", "set", "show", "start",
+    "table", "truncate", "unlisten", "update", "vacuum", "values", "with",
+})
 _CH_EXPLAINABLE_HEADS = ("select", "with")
 
 _SYNTAX_CHECK_STMT_NAME = "dbm_syntax_chk"
@@ -920,7 +935,9 @@ def _syntax_check_supported(engine_kind: str, stmt: str) -> bool:
     if engine_kind == "sqlite":
         return True
     if engine_kind == "postgres":
-        return head in _PG_PREPARABLE_HEADS
+        # 可 PREPARE 的 DML 照旧复核；非语句关键字（多半是打错的首词）也送去复核，
+        # 只有「合法但 PREPARE 不支持」的 DDL/工具类语句才跳过。
+        return head in _PG_PREPARABLE_HEADS or head not in _PG_STATEMENT_HEADS
     if engine_kind == "clickhouse":
         return head in _CH_EXPLAINABLE_HEADS
     return False
@@ -947,7 +964,11 @@ def _check_one_statement(conn, stmt: str, engine_kind: str) -> SyntaxCheck:  # n
             return SyntaxCheck(supported=False, ok=True)
     except Exception as e:  # noqa: BLE001
         if classify_db_error(e) == "sql_syntax_error":
-            return SyntaxCheck(supported=True, ok=False, error=sanitize_db_message(str(e)))
+            msg = sanitize_db_message(str(e))
+            # PG 把出错行原样回显（`LINE 1: PREPARE dbm_syntax_chk AS SELCT …`），
+            # 这个 PREPARE 包装是我们加的、用户没写过，回显里要抹掉免得误导。
+            msg = msg.replace(f"PREPARE {_SYNTAX_CHECK_STMT_NAME} AS ", "")
+            return SyntaxCheck(supported=True, ok=False, error=msg)
         # 权限不足 / 表不存在 / 其它——语法本身 DB 是认的，不该按语法错拒
         return SyntaxCheck(supported=True, ok=True)
     finally:

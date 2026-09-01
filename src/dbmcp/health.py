@@ -320,7 +320,22 @@ _CONNECTION_LEVEL_MSG_PARTS = (
     "隧道就绪超时",                   # 我们自己的 SSH 隧道错误
     "隧道启动失败",
     "ssh: connect",
+    # PostgreSQL / psycopg：服务端主动断开或不可连的原文（真机 pg_terminate_backend
+    # 与 docker restart 实测得到的就是下面第一条），原来一条都没覆盖 → PG 断连
+    # 不被判为连接级 → 健康位不打标、后台不重连、agent 收到的是无法行动的 db_error。
+    "terminating connection due to",            # 57P01 管理员中断 / 服务端关闭
+    "server closed the connection unexpectedly",
+    "connection to server",                     # psycopg 连接失败原文
+    "the database system is starting up",       # 57P03
+    "the database system is shutting down",
+    "connection is bad",
+    "consuming input failed",
+    "ssl connection has been closed unexpectedly",
 )
+
+# PostgreSQL SQLSTATE 里明确属于连接级的：08xxx 是 connection_exception 全族，
+# 57P01/02/03 分别是管理员中断、服务端崩溃、正在启动。比消息片段稳，优先判。
+_PG_CONNECTION_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
 
 
 def is_connection_error(exc: BaseException) -> bool:
@@ -339,6 +354,12 @@ def is_connection_error(exc: BaseException) -> bool:
         if errno in (61, 104, 110, 111, 113):  # macOS/Linux 常见连接错误码
             return True
         return any(p in msg for p in _CONNECTION_LEVEL_MSG_PARTS)
+
+    # PG：SQLSTATE 最可靠，先判。psycopg 的异常对象带 .sqlstate。
+    from .errors import pg_sqlstate
+    state = pg_sqlstate(exc)
+    if state.startswith("08") or state in _PG_CONNECTION_SQLSTATES:
+        return True
 
     # 遍历异常继承链：
     # - 严格连接级类名 → True

@@ -230,3 +230,60 @@ class TestCircuitBreakerHalfOpen:
         # 之后 check 放行
         m.check("p", "c")
         m.stop()
+
+
+class _PgExc(Exception):
+    """psycopg 异常形态：类名不带 Error 后缀、带 .sqlstate。"""
+
+    def __init__(self, msg: str, sqlstate: str = "") -> None:
+        super().__init__(msg)
+        self.sqlstate = sqlstate
+
+
+class TestPostgresDisconnect:
+    """PG 服务端主动断开必须判为连接级——否则健康位不打标、后台不重连、无法自愈。
+
+    真机（PostgreSQL 17 + psycopg3）实测：pg_terminate_backend 与服务重启，
+    抛的都是 `OperationalError: (psycopg.errors.AdminShutdown) terminating
+    connection due to administrator command`（SQLSTATE 57P01）。修复前
+    is_connection_error 对它返回 False——名字重叠类 OperationalError 需要叠加
+    消息片段，而片段表里一条 PG 的都没有。
+    """
+
+    def test_admin_shutdown_by_sqlstate(self):
+        assert is_connection_error(_PgExc("terminating connection", "57P01"))
+
+    def test_crash_shutdown_and_starting_up(self):
+        assert is_connection_error(_PgExc("terminating connection", "57P02"))
+        assert is_connection_error(_PgExc("the database system is starting up", "57P03"))
+
+    def test_connection_exception_class_08(self):
+        # 08xxx 是 SQLSTATE 的 connection_exception 全族
+        assert is_connection_error(_PgExc("connection failure", "08006"))
+        assert is_connection_error(_PgExc("sqlclient unable to establish", "08001"))
+
+    def test_admin_shutdown_by_message_when_sqlstate_missing(self):
+        class OperationalError(Exception):
+            pass
+
+        assert is_connection_error(
+            OperationalError("terminating connection due to administrator command"))
+
+    def test_server_closed_connection_unexpectedly(self):
+        class OperationalError(Exception):
+            pass
+
+        assert is_connection_error(
+            OperationalError("server closed the connection unexpectedly"))
+
+    def test_connect_failure_message(self):
+        class OperationalError(Exception):
+            pass
+
+        assert is_connection_error(OperationalError(
+            'connection failed: connection to server at "10.0.0.9", port 5432 failed'))
+
+    def test_pg_business_error_is_not_conn_error(self):
+        # 权限/语法这类 PG 业务错不能触发重连
+        assert not is_connection_error(_PgExc("permission denied for table t", "42501"))
+        assert not is_connection_error(_PgExc('syntax error at or near "SELCT"', "42601"))
