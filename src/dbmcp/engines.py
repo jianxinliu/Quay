@@ -201,6 +201,21 @@ def role_timeouts(policy, readonly: bool) -> tuple[int, int]:  # noqa: ANN001
 _READ_SOCKET_GRACE_S = 15
 
 
+def pg_database_name(cfg) -> str:  # noqa: ANN001
+    """PG 连接实际要连的库名。未在配置里绑定 database 时**显式回退到 reader 账号名**。
+
+    为什么不能就这么留空交给驱动：libpq 在 dbname 缺省时会用**连接账号自己的名字**当库名。
+    于是同一个连接的 reader 与 writer 会落到**两个不同的库**——reader 连 `drama`、
+    writer 连 `root`（真机 drama-u 就是这样，报 `FATAL: database "root" does not exist`）。
+    库不存在时是直接连不上（吵，但至少看得见）；真正危险的是**库恰好存在**的情况：
+    审批通过的写会安静地打进另一个库。
+
+    所以这里把那个隐式默认变成显式的、且**对所有角色一致**的选择：跟 reader 走。
+    配置里绑了 database 就用绑定的，不受影响。
+    """
+    return cfg.database or cfg.user or ""
+
+
 def mysql_read_timeout(stmt_timeout_s: int, op_timeout_s: int, readonly: bool) -> int:
     """MySQL 连接的 socket read_timeout（秒）。
 
@@ -304,7 +319,8 @@ def _create_readonly_engine(
             password=password,
             host=host,
             port=port or 5432,
-            database=cfg.database,
+            # 未绑库时按 reader 账号名回退，保证 reader/writer 连的是同一个库
+            database=pg_database_name(cfg) or None,
         )
         # PG 的 statement_timeout 对所有语句生效（含写）；writer 用写超时，reader 用语句超时
         options = f"-c statement_timeout={op_timeout_s * 1000}"

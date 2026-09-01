@@ -279,3 +279,45 @@ def test_make_canceller_missing_id_is_noop():
     cancel = make_canceller(engine, _sa_conn_with(raw))
     cancel()  # 不应抛
     assert sink == []
+
+
+class TestPostgresDatabaseFallback:
+    """PG 未绑 database 时，reader 与 writer 必须落到**同一个库**。
+
+    真机 drama-u 暴露：libpq 在 dbname 缺省时用**连接账号自己的名字**当库名，于是
+    reader 连 `drama`、writer 连 `root` —— 页面报
+    `FATAL: database "root" does not exist`。库不存在只是吵；真正危险的是库恰好存在，
+    审批通过的写会安静地打进另一个库。
+    """
+
+    @staticmethod
+    def _cfg(database=None):
+        return ConnectionConfig.model_validate({
+            "engine": "postgres", "host": "127.0.0.1", "port": 5432, "database": database,
+            "user": "drama", "password": "plain://x", "environment": "dev",
+            "writer": {"user": "root", "password": "plain://y"},
+        })
+
+    def test_falls_back_to_reader_account_name(self):
+        assert engines.pg_database_name(self._cfg()) == "drama"
+
+    def test_bound_database_wins(self):
+        assert engines.pg_database_name(self._cfg("shortdrama")) == "shortdrama"
+
+    def test_reader_and_writer_agree_when_unbound(self):
+        cfg = self._cfg()
+        urls = {}
+        for role in ("reader", "writer"):
+            eng = _create_readonly_engine(cfg, role, cfg.host, cfg.port)
+            urls[role] = (eng.url.username, eng.url.database)
+            eng.dispose()
+        assert urls["reader"] == ("drama", "drama")
+        # 修复前这里是 ("root", "root")——写会跑到另一个库去
+        assert urls["writer"] == ("root", "drama")
+
+    def test_reader_and_writer_agree_when_bound(self):
+        cfg = self._cfg("shortdrama")
+        for role in ("reader", "writer"):
+            eng = _create_readonly_engine(cfg, role, cfg.host, cfg.port)
+            assert eng.url.database == "shortdrama"
+            eng.dispose()

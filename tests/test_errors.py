@@ -186,6 +186,19 @@ class TestPostgres:
         exc = _PgExc('column "x" does not exist', "42703")
         assert translate_db_error(exc).kind == "column_not_found"
 
+    def test_missing_database_is_not_reported_as_missing_table(self):
+        """PG 的「库不存在」与「表不存在」消息都以 does not exist 结尾，规则表里
+        table_not_found 排在前面 → 真机 drama-u 上把
+        `FATAL: database "root" does not exist` 报成了「表不存在」。
+        建连阶段的异常常常连 sqlstate 都没有，只能按消息认。"""
+        exc = _PgExc('connection failed: connection to server at "10.11.165.221", port 5432 '
+                     'failed: FATAL:  database "root" does not exist')
+        assert classify_db_error(exc) == "unknown_database"
+
+    def test_missing_table_still_wins_for_relations(self):
+        exc = _PgExc('relation "nope" does not exist', "42P01")
+        assert classify_db_error(exc) == "table_not_found"
+
     def test_translated_message_has_no_driver_internals(self):
         exc = _PgExc("(psycopg.errors.UndefinedTable) relation \"nope\" does not exist\n"
                      "LINE 1: SELECT * FROM nope\n                      ^\n"

@@ -276,6 +276,11 @@ def classify_db_error(exc: BaseException) -> str:
         return _PG_SQLSTATES[state]
     code = _error_code(exc)
     low = " ".join(str(c) for c in _causes(exc)).lower()
+    # PG 的「库不存在」与「表不存在」消息都以 does not exist 结尾，而 table_not_found
+    # 在规则表里排在前面 → 会把 `FATAL: database "root" does not exist` 报成「表不存在」
+    # （真机 drama-u 撞到）。建连阶段失败的异常往往连 sqlstate 都没有，只能按消息认。
+    if 'database "' in low and "does not exist" in low:
+        return "unknown_database"
     for kind, codes, parts, _hint in _RULES:
         if code is not None and code in codes:
             return kind
