@@ -629,12 +629,39 @@ def search_tables(engine: SAEngine, engine_kind: str, q: str, limit: int = 50) -
     return [{"db": r[0] or "", "table": r[1]} for r in rows]
 
 
+def fetch_rows_for_copy(
+    engine: SAEngine, sql: str, max_rows: int
+) -> tuple[list[str], list[list], bool]:
+    """取数用于**跨库复制**：返回原生 Python 值，不做 JSON 化、不截断、不脱敏。
+
+    与 run_query 的区别正在于此——run_query 是给人和 agent「看」的，会把 Decimal 转字符串、
+    bytes 包成 base64 dict、超长单元格截断；这些对展示无害，但作为写入目标库的值就是**数据
+    损坏**。复制路径必须拿驱动返回的原值，再原样绑参写回目标表（datetime/Decimal/bytes
+    都由目标驱动自己适配）。
+
+    返回 (列名, 行, 是否被 max_rows 截断)。调用方已在 SQL 里注入 LIMIT，这里的 +1 只用于
+    判断「源侧其实还有更多」，好在结果里如实告知。
+    """
+    with engine.connect() as conn:
+        result = conn.execute(text(sql))
+        if not result.returns_rows:
+            return [], [], False
+        columns = list(result.keys())
+        fetched = result.fetchmany(max_rows + 1)
+    truncated = len(fetched) > max_rows
+    return columns, [list(r) for r in fetched[:max_rows]], truncated
+
+
 def insert_rows(engine: SAEngine, table: str, columns: list[str],
-                rows: list[list], schema: str | None = None) -> QueryResult:
+                rows: list[list], schema: str | None = None,
+                delete_first: bool = False) -> QueryResult:
     """参数化批量 INSERT（单事务，全部成功或整体回滚）。
 
     表名/列名由调用方经表结构校验后传入；此处用 SQLAlchemy 构造以正确按方言加引号，
     值全部走绑定参数——导入数据永不拼接 SQL。
+
+    delete_first：先清空目标表再写（表同步的 data=replace）。用 DELETE 而不是 TRUNCATE，
+    因为 TRUNCATE 在 MySQL 是 DDL、会隐式提交，那样「清空成功但写入失败」就回滚不了。
     """
     import sqlalchemy as sa
 
@@ -642,7 +669,10 @@ def insert_rows(engine: SAEngine, table: str, columns: list[str],
     t = sa.table(table, *[sa.column(c) for c in columns], schema=schema or None)
     params = [dict(zip(columns, r, strict=False)) for r in rows]
     with engine.begin() as conn:
-        conn.execute(sa.insert(t), params)
+        if delete_first:
+            conn.execute(sa.delete(t))
+        if params:
+            conn.execute(sa.insert(t), params)
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
     return QueryResult(columns=[], rows=[], row_count=len(rows), truncated=False,
                        duration_ms=duration_ms)

@@ -239,6 +239,7 @@ Whichever of the three channels is used, the change request keeps a complete rec
 | `export_table(...)` | Export a table as CSV / JSON / Markdown / xlsx; returns a short-lived download URL (file body stays out of context) |
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | Writes: creates a change request, waits for approval, then runs |
 | `wait_for_change(change_id)` / `get_change_status(change_id)` | Keep waiting after a timeout / inspect the change request immediately |
+| `sync_table(...)` | Copy a table from one database to another (typically production → local): structure plus a bounded slice of rows; same approval flow as `execute`; the target cannot be prod |
 | `list_tables` / `describe_table` / `sample_rows` | Explore schema |
 | `test_connection` | Connectivity check |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB cross-source analysis (fetches audited and row-capped, computation free in the sandbox) |

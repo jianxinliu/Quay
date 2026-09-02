@@ -5,7 +5,23 @@
 
 ## [Unreleased]
 
+### Fixed
+- 查询台：双击表名（以及右键「打开表数据」/「查看 DDL」、⌘P 表名搜索、⌘+点击表名）时，
+  同一连接下的同一张表已经开着就切过去，不再重复开 tab；切换时若目标 tab 所在的连接分组是
+  折叠的会自动展开，避免「切过去了但看不见」。
+
 ### Added
+- **MCP 工具 `sync_table`：跨连接表同步（典型场景 线上库 → 本地库）**。可同步表结构
+  （同引擎用源库建表语句原文；跨引擎用 sqlglot 转写成近似 DDL，被剥掉的二级索引/自增/字符集
+  在返回值 `warnings` 里列明）与数据（按 `where` / `order_by` / `limit` 取一小撮，参数化批量写入）。
+  `ddl` = skip / create_if_missing / recreate，`data` = none / append / replace 正交组合，
+  `dry_run=True` 可只看计划。**数据量有硬上限**（默认 1000 行，系统设置 `sync_max_rows` 默认 10000）
+  ——它是拉样本数据用的，不是全量迁移工具。
+  写入走审批流：新增 `kind=sync` 的审批单（审批页展示人可读的同步计划），批准后按计划**重新取数**
+  执行；服务端等待 / elicitation / `wait_for_change` / 后台「批准并立即执行」与 `execute` 完全一致。
+  守卫：目标不能是 prod 连接、目标须配 writer 账号、ClickHouse 只能做源、Redis 不参与。
+  审计 tool 为 `sync_read`（源库，reader）与 `sync_write`（目标库，writer）。
+- 系统设置 DB tab 新增「表同步单次行数上限」（`sync_max_rows`）。
 - README / README.en 补多客户端 MCP 接入指南（Claude Code、Codex、Cursor、DeepSeek Harness，
   以及 Claude Desktop / VS Code Copilot / Gemini CLI / Windsurf / 通用 stdio），并同步近期能力
   （ClickHouse、审批等待、begin_session / wait_for_change / export_table、通知渠道）。

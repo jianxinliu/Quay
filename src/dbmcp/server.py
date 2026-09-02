@@ -21,6 +21,7 @@ from .approvals import STATUS_APPROVED, STATUS_CONSUMED, STATUS_PENDING, Approva
 from .errors import translate_db_error
 from .health import ConnectionUnavailable
 from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
+from .sync import SyncSpec
 
 # 等待人工审批：每 1s 复查一次审批单状态。用轮询而非进程内条件变量，是因为决策也可能
 # 来自别的进程（`dbm approve` CLI），条件变量覆盖不到；1s 延迟对「人点批准」无感。
@@ -220,6 +221,11 @@ def build_mcp(service: DbmService) -> FastMCP:
             "用户一批准本次调用就自动执行并返回 status=executed，不必让用户回来说「已批准」。"
             "若等待超时返回 status=approval_required，提醒用户后调 wait_for_change(change_id) "
             "继续等（别自己循环调 get_change_status 轮询）。"
+            "把一张表从一个库同步到另一个库（典型：线上库 → 本地库）用 sync_table："
+            "可同步表结构（按源表建表，跨引擎会转写成近似 DDL）和数据"
+            "（按 where/order_by/limit 取一小撮，默认 1000 行、有服务端硬上限——它是拉样本"
+            "数据用的，不是全量迁移工具）；目标不能是 prod 连接。审批流程与 execute 相同，"
+            "先用 dry_run=True 可以只看计划不占审批单。"
             "跨源 JOIN、大结果集聚合、多步分析请用分析工作台（DuckDB 本地沙箱）："
             "analysis_import 把各源查询结果快照为工作区数据集（reader 拉取、带行数上限），"
             "analysis_sql 在工作区自由 JOIN/聚合/建 VIEW（不需审批），只把小结果带回上下文。"
@@ -370,6 +376,114 @@ def build_mcp(service: DbmService) -> FastMCP:
             if change_id is None:
                 result = await _maybe_elicit_approval(
                     service, ctx, project, connection, sql, caller, result,
+                    resubmit=lambda cid: run(change_id=cid),
+                )
+                wait_s = service.approval_wait_seconds() if wait_seconds is None else wait_seconds
+                if result.get("status") == "approval_required" and wait_s > 0:
+                    result = await _wait_then_execute(
+                        service, result, wait_s, ctx, resubmit=lambda cid: run(change_id=cid),
+                    )
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+        return result
+
+    @mcp.tool
+    async def sync_table(
+        source_project: str,
+        source_connection: str,
+        source_table: Annotated[str, Field(description="源表名")],
+        target_project: str,
+        target_connection: Annotated[
+            str, Field(description="目标连接（写入方）；不能是 prod 环境的连接")
+        ],
+        target_table: Annotated[
+            str | None, Field(description="目标表名，默认与源表同名")
+        ] = None,
+        source_database: Annotated[
+            str | None, Field(description="源库/schema；不传时用连接默认库")
+        ] = None,
+        target_database: Annotated[
+            str | None, Field(description="目标库/schema；不传时用连接默认库")
+        ] = None,
+        ddl: Annotated[
+            Literal["skip", "create_if_missing", "recreate"],
+            Field(description="结构同步：skip=不建表（目标表须已存在）；"
+                              "create_if_missing=目标表不存在才按源表结构建；"
+                              "recreate=先 DROP 目标表再重建（破坏性）"),
+        ] = "create_if_missing",
+        data: Annotated[
+            Literal["none", "append", "replace"],
+            Field(description="数据同步：none=只同步结构；append=追加写入；"
+                              "replace=先清空目标表再写入（破坏性）"),
+        ] = "append",
+        where: Annotated[
+            str, Field(description="源表取数的 WHERE 条件（不含 WHERE 关键字），如 "
+                                   "`created_at >= '2026-01-01'`；强烈建议带上以收窄数据量")
+        ] = "",
+        order_by: Annotated[
+            str, Field(description="源表取数的 ORDER BY（不含关键字），如 `id DESC`；"
+                                   "配合 limit 可取「最新 N 条」")
+        ] = "",
+        limit: Annotated[
+            int, Field(ge=1, description="最多同步多少行（默认 1000），会被夹到系统设置 "
+                                         "sync_max_rows 上限内")
+        ] = 1000,
+        reason: Annotated[str, Field(description="同步原因，供审批人参考")] = "",
+        dry_run: Annotated[
+            bool, Field(description="只返回同步计划（建表语句/列/行数上限/告警），不生成审批单")
+        ] = False,
+        change_id: Annotated[
+            int | None, Field(description="已获批的同步审批单号；批准后带上它、并保持其余参数"
+                                          "与提交时完全一致即可执行")
+        ] = None,
+        wait_seconds: Annotated[
+            int | None, Field(description="生成审批单后服务端等待人工决策的秒数；"
+                                          "0=不等待，省略=用系统设置默认值"),
+        ] = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """把一张表从一个连接同步到另一个连接（典型场景：线上库 → 本地库），需人工授权。
+
+        能同步**结构**（按源表建表；同引擎用源库建表语句原文，跨引擎用 sqlglot 转写成近似
+        DDL 并列出被剥掉的东西）和**数据**（按 where/order_by/limit 取一小撮，参数化批量写入）。
+        **数据量有硬上限**（默认 1000 行，上限见系统设置 sync_max_rows）——它用于拉一份能在
+        本地跑起来的样本数据，不是全量迁移工具；要大批量请走导出/导入。
+
+        流程同 execute：首次提交生成审批单并在服务端等人决策，把返回的 approval_url 贴给用户
+        点开批准，批准后本次调用自动执行并返回 status=executed。等待超时返回
+        status=approval_required，用 wait_for_change(change_id) 续等，或带 change_id 重提
+        （重提时其余参数必须与提交时逐字一致，否则指纹校验会拒）。
+        先用 dry_run=True 可以只看计划、让用户确认要同步什么，不占用审批单。
+
+        限制：目标连接不能是 prod 环境（拒绝往生产灌数）；目标必须配了 writer 账号；
+        ClickHouse 只能做源、Redis 不参与。同步的是**真实值**（不脱敏），
+        所以从生产同步时请注意目标库会持有一份生产数据副本。
+        """
+        caller = _caller_from_ctx(ctx)
+        spec = SyncSpec(
+            source_project=source_project,
+            source_connection=source_connection,
+            source_table=source_table,
+            target_project=target_project,
+            target_connection=target_connection,
+            target_table=target_table or source_table,
+            ddl=ddl,
+            data=data,
+            where=where,
+            order_by=order_by,
+            limit=limit,
+            source_database=source_database,
+            target_database=target_database,
+        )
+        run = partial(service.sync_table, spec, caller, reason=reason)
+        try:
+            result = await anyio.to_thread.run_sync(
+                partial(run, dry_run=dry_run, change_id=change_id)
+            )
+            if change_id is None and not dry_run:
+                result = await _maybe_elicit_approval(
+                    service, ctx, target_project, target_connection,
+                    result.get("plan", ""), caller, result,
                     resubmit=lambda cid: run(change_id=cid),
                 )
                 wait_s = service.approval_wait_seconds() if wait_seconds is None else wait_seconds

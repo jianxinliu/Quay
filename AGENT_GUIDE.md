@@ -28,6 +28,7 @@ DeepSeek Harness 会把工具注册成 `mcp__<serverName>__<原名>`（例如 `m
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
 | 数据导出 | `export_table(project, connection, table, fields?, limit?, format?, database?)` | 按库、表、字段和行数导出 CSV/JSON/Markdown/XLSX 文件 |
 | 数据变更 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` + `wait_for_change(change_id)` / `get_change_status(change_id)` | 提交后就地等人批准、批准即自动执行，见下 |
+| 表同步 | `sync_table(source_project, source_connection, source_table, target_project, target_connection, ...)` | 把一张表从一个库同步到另一个库（线上 → 本地），结构 + 少量数据，同 execute 走审批，见下 |
 | 连通性 | `test_connection(project, connection)` | SELECT 1 |
 | 跨源分析 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 本地沙箱，见下 |
 | 流程沉淀 | `save_workflow(name, workspace, script)` | 把验证过的分析脚本存为可重跑 workflow |
@@ -87,6 +88,31 @@ execute(sql) → 生成审批单，服务端就地等待人工决策（默认 12
 - 手动重提时必须是**同一条 SQL**（指纹校验，不一致直接拒）；真正执行的永远是审批单里存的 SQL。
 - 审批单 60 分钟过期、一次性核销。prod 环境强制走审批，没有捷径。
 - 客户端支持 elicitation 时（local/dev 环境），批准动作可能直接弹到会话里。
+
+### 2.5 把线上表同步到本地（`sync_table`）
+
+想在本地复现线上的问题、或让本地库有一份真实结构与样本数据时用它，别自己拼
+`CREATE TABLE` + 一长串 `INSERT` 再走 execute。
+
+```
+sync_table(source_project=..., source_connection="prod-mysql", source_table="orders",
+           target_project=..., target_connection="local-mysql",
+           where="created_at >= '2026-01-01'", order_by="id DESC", limit=500)
+```
+
+- **同步什么**：`ddl` 控制结构（`skip` 不建表 / `create_if_missing` 默认 / `recreate` 先删再建），
+  `data` 控制数据（`none` 只要结构 / `append` 默认 / `replace` 先清空目标表）。
+- **数据量有硬上限**：默认 1000 行，服务端还有 `sync_max_rows` 上限。它是拉**样本**用的，
+  不是全量迁移工具——想搬全库请让用户走导出/导入。**务必带上 `where` 收窄**。
+- **先看计划**：`dry_run=True` 只返回计划（建表语句、要复制的列、告警），不占审批单，
+  适合先给用户确认「要同步的是这些」。
+- **审批同 execute**：首次提交生成审批单 + `approval_url`，批准后自动执行；超时用
+  `wait_for_change`。重提时其余参数必须与提交时逐字一致（计划指纹校验）。
+- **跨引擎**（如 MySQL → PostgreSQL）会用 sqlglot 把建表语句转写成**近似 DDL**，
+  返回值 `warnings` 里列出被剥掉的东西（二级索引、自增、字符集等）——转述给用户。
+- **限制**：目标连接不能是 prod（拒绝往生产灌数）；目标要配了 writer 账号；
+  ClickHouse 只能做源，Redis 不参与。同步的是**真实值不脱敏**，从生产同步时提醒用户
+  本地会留下一份生产数据副本。
 
 ### 3. 跨源分析（分析工作台）
 

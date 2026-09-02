@@ -27,6 +27,10 @@ STATUS_REJECTED = "rejected"
 STATUS_CONSUMED = "consumed"
 STATUS_EXPIRED = "expired"
 
+# 审批单种类：sql = 一条/一批 SQL 原文；sync = 跨连接表同步计划（执行的是计划而非 SQL 文本）
+KIND_SQL = "sql"
+KIND_SYNC = "sync"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS change_request (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +42,8 @@ CREATE TABLE IF NOT EXISTS change_request (
     engine       TEXT,
     sql          TEXT NOT NULL,       -- 审批与执行的唯一真实来源
     fingerprint  TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'sql',  -- sql（单/多语句）| sync（表同步计划）
+    payload      TEXT,                -- JSON：kind=sync 时存 SyncSpec + 建表语句
     reason       TEXT,
     risk_level   TEXT,
     risk_report  TEXT,                -- JSON
@@ -70,6 +76,8 @@ class ChangeRequest:
     agent: str
     session_id: str
     status: str
+    kind: str = KIND_SQL
+    payload: dict | None = None  # kind=sync 的结构化计划（SyncSpec + ddl_sql + columns）
     decided_by: str = ""
     decided_at: str = ""
     decision_note: str = ""
@@ -100,10 +108,16 @@ class ApprovalStore:
         self._ttl = timedelta(minutes=ttl_minutes)
         with self._lock:
             self._conn.executescript(_SCHEMA)
-            # 老库迁移：exec_result 是后加的列（执行结果回填给等待中的 agent 与后台详情页）
+            # 老库迁移：exec_result（执行结果回填给等待中的 agent 与后台详情页）、
+            # kind/payload（表同步计划型审批单）都是后加的列
             cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(change_request)")}
             if "exec_result" not in cols:
                 self._conn.execute("ALTER TABLE change_request ADD COLUMN exec_result TEXT")
+            if "kind" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE change_request ADD COLUMN kind TEXT NOT NULL DEFAULT '{KIND_SQL}'")
+            if "payload" not in cols:
+                self._conn.execute("ALTER TABLE change_request ADD COLUMN payload TEXT")
             self._conn.commit()
 
     def create(
@@ -120,6 +134,8 @@ class ApprovalStore:
         risk_report: dict,
         agent: str,
         session_id: str,
+        kind: str = KIND_SQL,
+        payload: dict | None = None,
     ) -> ChangeRequest:
         now = datetime.now(UTC)
         expires = now + self._ttl
@@ -127,8 +143,9 @@ class ApprovalStore:
             cur = self._conn.execute(
                 """INSERT INTO change_request
                    (created_at, expires_at, project, connection, environment, engine,
-                    sql, fingerprint, reason, risk_level, risk_report, agent, session_id, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    sql, fingerprint, reason, risk_level, risk_report, agent, session_id, status,
+                    kind, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     now.isoformat(timespec="seconds"),
                     expires.isoformat(timespec="seconds"),
@@ -144,6 +161,8 @@ class ApprovalStore:
                     agent,
                     session_id,
                     STATUS_PENDING,
+                    kind,
+                    json.dumps(payload, ensure_ascii=False) if payload else None,
                 ),
             )
             self._conn.commit()
@@ -215,9 +234,10 @@ class ApprovalStore:
                 f"审批单 #{change_id} 属于连接 {change.project}/{change.connection}，与本次提交不符"
             )
         if change.fingerprint != resubmit_fingerprint:
+            what = "同步计划" if change.kind == KIND_SYNC else "SQL"
             raise ApprovalError(
-                f"重提的 SQL 与审批单 #{change_id} 已批准的 SQL 不一致，拒绝执行。"
-                "请提交与审批时完全相同的 SQL，或重新发起审批。"
+                f"重提的{what}与审批单 #{change_id} 已批准的{what}不一致，拒绝执行。"
+                f"请提交与审批时完全相同的{what}，或重新发起审批。"
             )
         # 原子核销（compare-and-swap）：只有 status 仍为 approved 的那一次 UPDATE 生效，
         # rowcount!=1 说明被并发抢先核销——防止两个线程都通过上面的检查后重复执行（双花）。
@@ -281,6 +301,8 @@ class ApprovalStore:
             agent=row["agent"] or "",
             session_id=row["session_id"] or "",
             status=row["status"],
+            kind=row["kind"] or KIND_SQL,
+            payload=json.loads(row["payload"]) if row["payload"] else None,
             decided_by=row["decided_by"] or "",
             decided_at=row["decided_at"] or "",
             decision_note=row["decision_note"] or "",

@@ -9,10 +9,11 @@ from __future__ import annotations
 import hmac
 import logging
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from .approvals import ApprovalError, ApprovalStore
+from .approvals import KIND_SYNC, ApprovalError, ApprovalStore
 from .audit.classify import classify, fingerprint
 from .audit.log import AuditRecord, AuditStore
 from .audit.redis_rules import classify_command, command_fingerprint, parse_command
@@ -22,7 +23,7 @@ from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
 from .masking import apply_mask, resolve_default_patterns
 from .metadata import MetadataCache
 from .notify import NoopNotifier, Notifier
-from . import engines, privileges, redis_engine
+from . import engines, privileges, redis_engine, sync
 
 if TYPE_CHECKING:
     from .snippets import SnippetStore
@@ -34,6 +35,7 @@ DEFAULT_RETENTION_DAYS = 30
 ADMIN_PAGE_SIZE = 100  # 查询台每页行数（上限受连接 max_rows 约束）
 DEFAULT_AGENT_MAX_RESULT_CHARS = 40000  # agent 结果字符预算的最终兜底（settings 未启用时）
 DEFAULT_APPROVAL_WAIT_S = 120  # execute 等待人工审批的默认秒数（settings 未启用时）
+DEFAULT_SYNC_MAX_ROWS = 10_000  # 表同步单次行数上限的兜底（settings 未启用时）
 
 
 class QueryRejected(Exception):
@@ -1497,6 +1499,11 @@ class DbmService:
         caller: CallerInfo,
     ) -> dict:
         rec = self._base_record(project, connection, cfg, "execute", sql, caller)
+        # 同步型审批单存的是计划而非可执行 SQL，走这条路会把计划文本当 SQL 发给 DB
+        if self.approvals.get(change_id).kind == KIND_SYNC:
+            return {"status": "rejected", "change_id": change_id,
+                    "reason": f"审批单 #{change_id} 是表同步计划，"
+                              f"请用 sync_table(change_id={change_id}, ...) 执行"}
         try:
             change = self.approvals.consume(
                 change_id, fingerprint(sql, cfg.engine), (project, connection)
@@ -1556,9 +1563,349 @@ class DbmService:
         change = self.approvals.approve(change_id, decided_by, note)
         cfg = self.config.get_connection(change.project, change.connection)
         caller = CallerInfo(agent="admin-ui", session_id=f"approve:{decided_by}")
+        if change.kind == KIND_SYNC:
+            return self._execute_sync_approved(
+                change_id, change.fingerprint, (change.project, change.connection), caller)
         return self._execute_approved(
             change.project, change.connection, cfg, change.sql, change_id, caller
         )
+
+    # ---------- 跨连接表同步（线上库 → 本地库）----------
+
+    def sync_max_rows(self) -> int:
+        """同步单次行数硬上限：系统设置优先，最终受 sync.MAX_SYNC_ROWS 封顶。"""
+        value = self._setting("sync_max_rows")
+        try:
+            return min(int(value), sync.MAX_SYNC_ROWS)
+        except (TypeError, ValueError):
+            return min(DEFAULT_SYNC_MAX_ROWS, sync.MAX_SYNC_ROWS)
+
+    def _sync_endpoints(self, spec: "sync.SyncSpec") -> tuple[ConnectionConfig, ConnectionConfig]:
+        """取源/目标连接配置并做「这条同步允不允许发生」的守卫。
+
+        目标 prod 一律拒绝：本工具是批量灌数，与「一条被逐字审阅的 SQL」不是一个风险量级，
+        真要往生产写请走 execute（同样审批，但人看到的是确切语句）。
+        """
+        src = self.config.get_connection(spec.source_project, spec.source_connection)
+        dst = self.config.get_connection(spec.target_project, spec.target_connection)
+        if src.engine not in sync.SOURCE_ENGINES:
+            raise QueryRejected(f"引擎 {src.engine} 不支持作为同步源（支持 "
+                                f"{'/'.join(sync.SOURCE_ENGINES)}）")
+        if dst.engine not in sync.TARGET_ENGINES:
+            raise QueryRejected(f"引擎 {dst.engine} 不支持作为同步目标（支持 "
+                                f"{'/'.join(sync.TARGET_ENGINES)}；ClickHouse 本项目只读、"
+                                f"Redis 不参与表同步）")
+        if dst.environment == "prod":
+            raise QueryRejected(
+                f"拒绝向生产环境连接 {spec.target_project}/{spec.target_connection} 同步数据。"
+                "本工具用于把数据同步到本地/开发库；确需写生产请用 execute 提交具体 SQL。"
+            )
+        if dst.engine != "sqlite" and dst.writer is None:
+            raise QueryRejected(
+                f"目标连接 {spec.target_project}/{spec.target_connection} 未配置 writer 账号，"
+                "无法写入。请先在管理后台为它补上 writer 账号。"
+            )
+        return src, dst
+
+    def _build_sync_plan(self, spec: "sync.SyncSpec", caller: CallerInfo) -> dict:
+        """构造同步计划：查源表结构/建表语句、查目标表是否存在、算出要复制的列。
+
+        只做只读探查，不写任何东西。返回的 dict 既是 dry_run 的结果，也是审批单的 payload。
+        """
+        sync.validate_spec(spec)
+        src, dst = self._sync_endpoints(spec)
+
+        src_info = self.describe_table(spec.source_project, spec.source_connection,
+                                       spec.source_table, caller, schema=spec.source_database)
+        src_columns = [c["name"] for c in src_info["columns"]]
+
+        target_tables = self.list_tables(spec.target_project, spec.target_connection, caller,
+                                         schema=spec.target_database)
+        target_exists = spec.target_table in target_tables
+        if spec.ddl == sync.DDL_SKIP and not target_exists:
+            raise QueryRejected(
+                f"目标表 {spec.target_table} 不存在，而 ddl=skip 不建表。"
+                "改用 ddl=create_if_missing 让本工具按源表结构建表，或先手工建好。"
+            )
+
+        warnings: list[str] = []
+        ddl_sql = ""
+        # recreate 一定要重建；create_if_missing 只在目标表不存在时才需要建表语句
+        if spec.ddl == sync.DDL_RECREATE or (
+            spec.ddl == sync.DDL_CREATE_IF_MISSING and not target_exists
+        ):
+            source_ddl = self.get_table_ddl(spec.source_project, spec.source_connection,
+                                            spec.source_table, caller,
+                                            schema=spec.source_database)
+            ddl_sql, warnings = sync.rewrite_ddl(source_ddl, src.engine, dst.engine,
+                                                 spec.source_table, spec.target_table)
+
+        # 要复制的列：目标表重建时以源表为准；否则取源/目标列的交集
+        columns = src_columns
+        if spec.data != sync.DATA_NONE and target_exists and spec.ddl != sync.DDL_RECREATE:
+            dst_info = self.describe_table(spec.target_project, spec.target_connection,
+                                           spec.target_table, caller,
+                                           schema=spec.target_database)
+            dst_columns = {c["name"] for c in dst_info["columns"]}
+            columns = [c for c in src_columns if c in dst_columns]
+            missing = [c for c in src_columns if c not in dst_columns]
+            if missing:
+                warnings.append(f"目标表没有这些源列，将不同步：{', '.join(missing)}")
+            if not columns:
+                raise QueryRejected(
+                    f"源表 {spec.source_table} 与目标表 {spec.target_table} 没有同名列，无法同步数据。"
+                    f"源列: {', '.join(src_columns)}"
+                )
+        if spec.data == sync.DATA_NONE:
+            columns = []
+
+        # 行数量级只用于让审批人有个"全表多大 / 我取多少"的概念，取不到就不显示
+        meta = self._meta_provider(spec.source_project, spec.source_connection,
+                                   src)(spec.source_table)
+        row_estimate = getattr(meta, "row_estimate", None) if meta is not None else None
+        plan_text = sync.render_plan(
+            spec, src.environment, src.engine, dst.environment, dst.engine,
+            columns, ddl_sql, warnings, target_exists, row_estimate,
+        )
+        return {
+            "spec": spec.to_dict(),
+            "ddl_sql": ddl_sql,
+            "columns": columns,
+            "warnings": warnings,
+            "target_exists": target_exists,
+            "source_engine": src.engine,
+            "target_engine": dst.engine,
+            "plan_text": plan_text,
+            "risk": sync.assess_plan(spec, dst.environment, src.environment),
+        }
+
+    def sync_table(
+        self, spec: "sync.SyncSpec", caller: CallerInfo, reason: str = "",
+        dry_run: bool = False, change_id: int | None = None,
+    ) -> dict:
+        """表同步统一入口，形状对齐 execute：计划 → 审批单 → 带 change_id 核销执行。
+
+        - dry_run：只回计划，不生成审批单（agent 想先给用户看看要同步什么）；
+        - 无 change_id：构造计划、生成审批单并返回 approval_url；
+        - 有 change_id：核销审批单并执行**审批单里存的那份计划**（重提的 spec 只作指纹校验）。
+        """
+        if self.approvals is None:
+            raise QueryRejected("审批子系统未启用，无法执行表同步")
+        # 行数上限由服务端定，且首提与重提用同一套夹取规则 → 指纹一致
+        spec = replace(spec, limit=max(1, min(spec.limit, self.sync_max_rows())))
+        if change_id is not None:
+            return self._execute_sync_approved(
+                change_id, sync.spec_fingerprint(spec),
+                (spec.target_project, spec.target_connection), caller)
+        plan = self._build_sync_plan(spec, caller)
+        if dry_run:
+            return {"status": "planned", "plan": plan["plan_text"],
+                    "columns": plan["columns"], "warnings": plan["warnings"],
+                    "target_exists": plan["target_exists"], "risk": plan["risk"]}
+        return self._request_sync_approval(spec, plan, reason, caller)
+
+    def _request_sync_approval(
+        self, spec: "sync.SyncSpec", plan: dict, reason: str, caller: CallerInfo,
+    ) -> dict:
+        """为同步计划生成审批单。与 _request_approval 同构，只是审批的是计划而非 SQL。
+
+        审批单挂在**目标连接**下（写发生在那里），sql 字段存人可读的计划文本、payload 存
+        结构化计划——核销时执行 payload，与「执行的永远是审批单里存储的内容」一致。
+        """
+        dst = self.config.get_connection(spec.target_project, spec.target_connection)
+        change = self.approvals.create(
+            project=spec.target_project,
+            connection=spec.target_connection,
+            environment=dst.environment,
+            engine=dst.engine,
+            sql=plan["plan_text"],
+            fingerprint=sync.spec_fingerprint(spec),
+            reason=reason,
+            risk_level=plan["risk"]["level"],
+            risk_report=plan["risk"],
+            agent=caller.agent,
+            session_id=caller.session_id,
+            kind=KIND_SYNC,
+            payload=plan,
+        )
+        rec = self._base_record(spec.target_project, spec.target_connection, dst,
+                                "sync_write", plan["plan_text"], caller)
+        rec.status = "rejected"
+        rec.detail = f"需人工授权，已生成同步审批单 #{change.id}（风险 {plan['risk']['level']}）"
+        self.store.record(rec)
+
+        from .notify import approval_deeplink  # noqa: PLC0415
+        base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
+        approval_url = approval_deeplink(base_url, change.id)
+        try:
+            self.notifier.send(
+                title=f"新同步审批单 #{change.id} · → {spec.target_project}/{spec.target_connection}",
+                body=(f"{spec.source_project}/{spec.source_connection}.{spec.source_table} → "
+                      f"{spec.target_table}\n最多 {spec.limit} 行 · 结构 {spec.ddl} · 数据 {spec.data}"),
+                meta={"kind": "approval_created", "change_id": change.id,
+                      "project": spec.target_project, "connection": spec.target_connection,
+                      "risk_level": plan["risk"]["level"], "deeplink": approval_url},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("notify sync approval_created failed")
+        return {
+            "status": "approval_required",
+            "change_id": change.id,
+            "approval_url": approval_url,
+            "plan": plan["plan_text"],
+            "warnings": plan["warnings"],
+            "risk": plan["risk"],
+            "message": (
+                f"表同步需人工授权（风险等级 {plan['risk']['level']}）。已生成审批单 "
+                f"#{change.id}，请把审批链接 {approval_url} 给用户；批准后会自动按计划执行。"
+                f"审批单 60 分钟内有效。"
+            ),
+        }
+
+    def _execute_sync_approved(
+        self, change_id: int, resubmit_fingerprint: str,
+        connection_key: tuple[str, str], caller: CallerInfo,
+    ) -> dict:
+        """核销同步审批单并执行：建表（可选）→ 从源库取数 → 写入目标表。
+
+        执行的是审批单 payload 里存的计划，**不是**重提参数——重提只用于指纹校验。
+        数据在这里才从源库取，所以拿到的是批准时刻的最新数据，而不是提交时的快照。
+        """
+        change = self.approvals.get(change_id)
+        if change.kind != KIND_SYNC:
+            raise QueryRejected(
+                f"审批单 #{change_id} 不是表同步计划，请用 execute(change_id={change_id}) 执行")
+        try:
+            change = self.approvals.consume(change_id, resubmit_fingerprint, connection_key)
+        except ApprovalError as e:
+            # 未批准 / 已核销 / 过期 / 计划被改过：和 SQL 审批流一样，回成可读的 rejected
+            cfg = self.config.get_connection(change.project, change.connection)
+            rec = self._base_record(change.project, change.connection, cfg,
+                                    "sync_write", change.sql, caller)
+            rec.status = "rejected"
+            rec.detail = str(e)
+            self.store.record(rec)
+            return {"status": "rejected", "change_id": change_id, "reason": str(e)}
+        return self._run_sync_change(change, caller)
+
+    def _run_sync_change(self, change, caller: CallerInfo) -> dict:  # noqa: ANN001
+        plan = change.payload or {}
+        spec = sync.SyncSpec.from_dict(plan.get("spec") or {})
+        src_cfg = self.config.get_connection(spec.source_project, spec.source_connection)
+        dst_cfg = self.config.get_connection(spec.target_project, spec.target_connection)
+        columns: list[str] = plan.get("columns") or []
+        ddl_sql: str = plan.get("ddl_sql") or ""
+
+        rec = self._base_record(spec.target_project, spec.target_connection, dst_cfg,
+                                "sync_write", change.sql, caller)
+        steps: list[dict] = []
+        started = time.monotonic()
+        try:
+            if spec.ddl == sync.DDL_RECREATE:
+                drop_sql = sync.build_drop_sql(dst_cfg.engine, spec.target_table)
+                self._sync_write_ddl(spec, dst_cfg, drop_sql, caller)
+                steps.append({"step": "drop", "sql": drop_sql})
+            if ddl_sql:
+                self._sync_write_ddl(spec, dst_cfg, ddl_sql, caller)
+                steps.append({"step": "create", "sql": ddl_sql})
+
+            copied = 0
+            source_truncated = False
+            if spec.data != sync.DATA_NONE:
+                # 多取一行用于判断"源侧其实还有更多"（同分页那套 +1 探测），取回后再截掉
+                select_sql = sync.build_select_sql(
+                    src_cfg.engine, spec.source_table, columns, spec.limit + 1,
+                    spec.where, spec.order_by, spec.source_database,
+                )
+                # 纵深防御：WHERE/ORDER BY 是自由文本，拼出来的整条 SQL 必须仍是单条只读语句
+                verdict = classify(select_sql, src_cfg.engine)
+                if not verdict.readonly:
+                    raise QueryRejected(
+                        f"生成的取数语句被判定为非只读（{verdict.reason}），"
+                        "请检查 where / order_by 里是否夹带了分号或写操作。"
+                    )
+                rows, source_truncated = self._sync_fetch(spec, src_cfg, select_sql,
+                                                          columns, caller)
+                copied = self._sync_write_rows(spec, dst_cfg, columns, rows, caller)
+                steps.append({"step": "copy", "rows": copied,
+                              "select": select_sql, "truncated": source_truncated})
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"同步失败（审批单 #{change.id}）: {type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        rec.status = "ok"
+        rec.row_count = copied
+        rec.duration_ms = duration_ms
+        rec.detail = f"同步审批单 #{change.id} 已核销（审批人 {change.decided_by}）"
+        self.store.record(rec)
+        payload = {
+            "status": "executed",
+            "change_id": change.id,
+            "affected_rows": copied,
+            "duration_ms": duration_ms,
+            "executed_by": caller.agent,
+            "steps": steps,
+            "source_truncated": source_truncated,
+        }
+        if source_truncated:
+            payload["note"] = (
+                f"源表符合条件的数据超过 {spec.limit} 行，只同步了前 {copied} 行。"
+                "如需更多请收窄 where 或调大 limit（受系统设置 sync_max_rows 约束）后重新发起。"
+            )
+        self.approvals.record_execution(change.id, payload)
+        return payload
+
+    def _sync_write_ddl(self, spec: "sync.SyncSpec", dst_cfg: ConnectionConfig,
+                        ddl: str, caller: CallerInfo) -> None:
+        def _do() -> "engines.QueryResult":
+            engine = self.pool.get(spec.target_project, spec.target_connection, dst_cfg,
+                                   role="writer", schema=spec.target_database)
+            return engines.run_write(engine, ddl)
+
+        self._audited(spec.target_project, spec.target_connection, dst_cfg,
+                      "sync_write", ddl, caller, _do)
+
+    def _sync_fetch(self, spec: "sync.SyncSpec", src_cfg: ConnectionConfig, select_sql: str,
+                    columns: list[str], caller: CallerInfo) -> tuple[list[list], bool]:
+        """从源库读要复制的行（reader 账号 + 审计）。
+
+        用 fetch_rows_for_copy 而不是 _read：复制要的是驱动原值，`_read` 的 JSON 化/单元格
+        截断/脱敏都会让写进目标库的数据与源库不一致（见该函数 docstring）。
+        """
+        result: dict = {}
+
+        def _do() -> "engines.QueryResult":
+            engine = self.pool.get(spec.source_project, spec.source_connection, src_cfg,
+                                   schema=spec.source_database)
+            cols, rows, truncated = engines.fetch_rows_for_copy(engine, select_sql, spec.limit)
+            result["rows"] = rows
+            result["truncated"] = truncated
+            result["columns"] = cols
+            return engines.QueryResult(columns=[], rows=[], row_count=len(rows),
+                                       truncated=truncated, duration_ms=0)
+
+        self._audited(spec.source_project, spec.source_connection, src_cfg,
+                      "sync_read", select_sql, caller, _do)
+        return result.get("rows", []), bool(result.get("truncated"))
+
+    def _sync_write_rows(self, spec: "sync.SyncSpec", dst_cfg: ConnectionConfig,
+                         columns: list[str], rows: list[list], caller: CallerInfo) -> int:
+        detail = (f"SYNC INSERT INTO {spec.target_table} ({', '.join(columns)}) — "
+                  f"{len(rows)} 行" + ("（先清空）" if spec.data == sync.DATA_REPLACE else ""))
+
+        def _do() -> "engines.QueryResult":
+            engine = self.pool.get(spec.target_project, spec.target_connection, dst_cfg,
+                                   role="writer", schema=spec.target_database)
+            return engines.insert_rows(engine, spec.target_table, columns, rows,
+                                       schema=spec.target_database,
+                                       delete_first=spec.data == sync.DATA_REPLACE)
+
+        result = self._audited(spec.target_project, spec.target_connection, dst_cfg,
+                               "sync_write", detail, caller, _do)
+        return result.row_count
 
     def _try_explain(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,

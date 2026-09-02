@@ -239,6 +239,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 | `export_table(...)` | 按表导出 CSV / JSON / Markdown / xlsx，返回短期下载链接（正文不进上下文） |
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 写操作：生成审批单并等待批准，批准即自动执行 |
 | `wait_for_change(change_id)` / `get_change_status(change_id)` | 超时后续等 / 立即查审批单状态 |
+| `sync_table(...)` | 把表从一个库同步到另一个库（典型：线上 → 本地）：结构 + 按条件取的少量数据，同 execute 走审批；目标不能是 prod |
 | `list_tables` / `describe_table` / `sample_rows` | 探索 schema |
 | `test_connection` | 连通性检查 |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 跨源分析（取数受审计和行数上限约束，沙箱内自由计算） |

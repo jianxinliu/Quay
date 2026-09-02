@@ -861,6 +861,9 @@ def _settings_db_body(s: dict) -> str:
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
                        "连接级 Policy 可单独覆盖。")
+        + _num_setting("表同步单次行数上限", "sync_max_rows", s, 10000,
+                       "agent 用 sync_table 把线上表同步到本地库时，单次最多同步多少行。"
+                       "agent 传的 limit 会被夹到这个上限内——它是拉样本数据用的，不是全量迁移工具。")
         + _num_setting("审批等待时长（秒）", "approval_wait_seconds", s, 120,
                        "agent 提交写操作后，服务端等你审批的秒数：你在审批页点批准，"
                        "agent 那边即刻自动执行、无需你回会话里说一声。0 = 不等待（只返回审批单号）；"
@@ -1549,7 +1552,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
   <br><br><button class='btn' type='submit'>仅批准（由 agent 重提执行）</button>
   <button class='btn btn-approve' type='submit' name='exec' value='1'
           style='margin-left:8px'>批准并立即执行</button>
-  <div class="muted" style="margin-top:8px">「批准并立即执行」当场用 writer 账号执行审批单里的 SQL；
+  <div class="muted" style="margin-top:8px">「批准并立即执行」当场用 writer 账号执行审批单里的{"计划（重新从源库取数）" if c.kind == "sync" else "SQL"}；
    等待中的 agent 会收到执行结果，不必再重提。</div>
  </form>
  <form method='post' action='/admin/approvals/{c.id}/reject' style='margin-top:16px'>
@@ -1580,7 +1583,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
   <dt>提交时间</dt><dd>{_esc(_fmt_ts(c.created_at))} · 有效期至 {_esc(_fmt_ts(c.expires_at))}</dd>
   <dt>变更原因</dt><dd>{_esc(c.reason) or '—'}</dd>
  </dl>
- <div class="sec-title">SQL</div><pre>{_esc(c.sql)}</pre>
+ <div class="sec-title">{"同步计划" if c.kind == "sync" else "SQL"}</div><pre>{_esc(c.sql)}</pre>
 </div>
 <div class='card'><h3>风险报告 {_badge(c.risk_level, _LEVEL_COLOR)}</h3>
  <div class="sec-title">影响范围</div>

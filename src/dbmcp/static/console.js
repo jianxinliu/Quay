@@ -848,6 +848,9 @@
         }
         this.activeId = id;
         var t = this.activeTab;
+        // 目标 tab 所在的组是折叠的话先展开：否则「切过去了」但 tab 条上根本看不见它，
+        // 从左树/⌘P 跳过来会像是点了没反应
+        if (t && this.tabGroupCollapsed[t.conn]) this.toggleTabGroup(t.conn);
         var m = models.get(id);
         if (editor && m) {
           editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" });
@@ -905,15 +908,32 @@
         var flat = []; order.forEach(function (k) { flat = flat.concat(map[k]); });
         this.tabs = flat;
       },
+      // 表对象类 tab（data / ddl）是「同一张表只该有一个」的：同连接 + 同库 + 同表已经开着时，
+      // 再次双击/右键应当切过去而不是又开一个（DataGrip 行为）。newTab 不传 conn 时用活动 tab 的
+      // 连接，这里按同样的规则算出目标连接，否则会在另一条连接上误判成重复。
+      findObjectTab: function (type, table, db) {
+        var conn = this.activeTab ? this.activeTab.conn
+                 : (this.connections[0] ? this.connections[0].value : "");
+        var schema = db || "";
+        return this.tabs.find(function (t) {
+          return t.type === type && t.table === table && (t.schema || "") === schema
+                 && t.conn === conn;
+        });
+      },
       // 双击表 / 右键「打开表数据」：data 型 tab，主区直接是数据网格
       openTableTab: function (t, db) {
+        var exist = this.findObjectTab("data", t, db);
+        // 已开着就只切过去：不重查，保留它上面已有的 WHERE / 排序 / 分页位置
+        if (exist) { this.switchTab(exist.id); return; }
         var q = this.qtable({ schema: db || "", table: t });
         this.newTab({ type: "data", title: t, table: t, schema: db || "", sql: "SELECT * FROM " + q });
         var self = this; this.$nextTick(function () { self.run(false); });
       },
-      // 右键「查看 DDL」：ddl 型 tab，编辑区只读展示建表语句
+      // 右键「查看 DDL」/ ⌘+点击表名：ddl 型 tab，编辑区只读展示建表语句
       openDdlTab: function (t, db) {
         var self = this;
+        var exist = this.findObjectTab("ddl", t, db);
+        if (exist) { this.switchTab(exist.id); return; }
         var tab = this.newTab({ type: "ddl", title: "DDL · " + t, table: t, schema: db || "" });
         apiGet("/admin/sql/ddl?conn=" + encodeURIComponent(tab.conn) + "&table=" + encodeURIComponent(t)
                + (db ? "&schema=" + encodeURIComponent(db) : "")).then(function (d) {

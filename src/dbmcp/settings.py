@@ -46,6 +46,8 @@ DEFAULTS: dict[str, object] = {
     # 等待期间人在后台点批准/拒绝，agent 无需人回 CLI 说一句即可继续。
     # 若 MCP 客户端的单次工具调用超时更短，把这里调小，agent 会分多次续等。
     "approval_wait_seconds": 120,
+    # ——表同步（sync_table）：单次最多同步多少行（agent 传的 limit 会被夹到这个上限内）
+    "sync_max_rows": 10000,
     # ——Agent 输出
     "agent_max_result_chars": 40000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
     # ——AI 辅助写 SQL（查询台「✨ AI」按钮；产物只回填编辑器/画布、不执行）
@@ -84,6 +86,7 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
     "redis_min_dbs": (1, 256),
     "agent_max_result_chars": (2000, 500_000),
     "approval_wait_seconds": (0, 3600),
+    "sync_max_rows": (1, 200_000),
     "mcp_max_concurrency": (10, 500),
     "engine_pool_size": (5, 100),
     "ai_timeout_s": (10, 600),
