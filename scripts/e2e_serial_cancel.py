@@ -21,7 +21,7 @@ import time
 from sqlalchemy.exc import OperationalError
 
 from dbmcp.config import ConnectionConfig, Policy, WriterAccount
-from dbmcp.engines import _create_readonly_engine, make_canceller, run_query, run_write
+from dbmcp.engines import _create_readonly_engine, run_query, run_write
 
 HOST = os.environ.get("DBM_E2E_MYSQL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DBM_E2E_MYSQL_PORT", "13306"))
