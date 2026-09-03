@@ -687,7 +687,8 @@
                     rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null,
                     curRow: -1,   // 当前行（点任意单元格/行号即高亮整行，便于横向读长行）
                     // 暂存式编辑：改动先攒着，工具栏「提交」才写库
-                    edits: {}, dels: {}, adds: [], submit: null, submitting: false, refreshWarn: false,
+                    edits: {}, dels: {}, adds: [], pendSig: null,
+                    submit: null, submitting: false, refreshWarn: false,
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
                     // 异步任务态：开跑时刻（客户端秒表用）+ 被执行语句的字形状态标记 + 上次结果状态
                     jobRunAt: 0, execMarks: [], execIdx: 0,   // execMarks: [{line,state}]，多语句时每条一个
@@ -1823,7 +1824,7 @@
         }
         this.setExecGlyph(t, "run");
         // 重查后行号会变，行/单元格选择、当前行、搜索一并作废
-        t.rowSel = {}; t.lastSelRi = -1; t.resQ = null; t.cellSel = null; t.curRow = -1;
+        t.resQ = null; this.clearSelState(t);
         if (page === 0) t.result = null;
         // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询。
         // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
@@ -2030,6 +2031,7 @@
         var t = this.activeTab, entry = t && t.results[i]; if (!entry) return;
         entry.used = ++useSeq;  // 查看即刷新 LRU 使用序，避免常看的页被淘汰
         t.resultIdx = i; t.readSql = entry.sql; t.ok = null;
+        this.clearSelState(t);   // 换了结果集，按行号存的选择全部作废
         if (entry.err) { t.err = entry.err; t.errKind = entry.errKind || ""; t.result = null; this.persist(); return; }
         t.err = null; t.errKind = "";
         if (entry.result) {
@@ -2052,6 +2054,7 @@
         var entry = t.results[ni];
         entry.used = ++useSeq;
         t.resultIdx = ni; t.readSql = entry.sql; t.ok = null;
+        this.clearSelState(t);   // 同上：换页即作废行号相关的选择
         t.err = entry.err || null; t.errKind = entry.errKind || "";
         t.result = entry.err ? null : (entry.result || null);  // 被释放的历史结果显示占位，可点该页手动重跑
         this.persist();
@@ -2215,6 +2218,7 @@
         else newRaw = t.edit.val;
         t.edit = null;
         // 暂存：不立即执行，等工具栏「提交」。改回原值则撤销暂存。
+        this.stampPend(t);
         if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
         else t.edits[key] = newRaw;
         this.persist();
@@ -2361,7 +2365,20 @@
         var t = this.activeTab; if (!t) return 0;
         return Object.keys(t.edits || {}).length + Object.keys(t.dels || {}).length + (t.adds || []).length;
       },
-      clearPending: function (t) { t.edits = {}; t.dels = {}; t.adds = []; },
+      clearPending: function (t) { t.edits = {}; t.dels = {}; t.adds = []; t.pendSig = null; },
+      // 暂存的改动按「行号」定位（edits/dels 的 key 是 ri），而行号只在当前这一屏结果里有意义：
+      // 换了 WHERE/ORDER BY/页码之后同一个行号已是另一行，直接提交就会改错行、删错行。
+      // 故暂存第一处行改动时记下结果集签名，提交前比对，不一致即拒绝。
+      // （adds 是整行 INSERT、与行号无关，不受此限）
+      rowsetSig: function (t) {
+        return [t.conn, t.schema || "", t.db || "", t.table || "",
+                (t.where || "").trim(), (t.orderBy || "").trim(),
+                t.result ? (t.result.page || 0) : 0].join("\u0001");
+      },
+      hasRowPending: function (t) {
+        return !!((t.edits && Object.keys(t.edits).length) || (t.dels && Object.keys(t.dels).length));
+      },
+      stampPend: function (t) { if (!this.hasRowPending(t)) t.pendSig = this.rowsetSig(t); },
       addRow: function (cloneRi) {
         var t = this.activeTab; if (!t || t.type !== "data" || !t.result) return;
         var k = this.mk(t.table, t.schema); if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
@@ -2381,6 +2398,7 @@
         var t = this.activeTab; if (!t) return;
         var ris = this.selRis();
         if (!ris.length) { this.flash("先点行号选中要删除的行"); return; }
+        this.stampPend(t);
         ris.forEach(function (ri) { if (t.dels[ri]) delete t.dels[ri]; else t.dels[ri] = true; });
         this.clearRowSel(); this.persist();
       },
@@ -2400,6 +2418,9 @@
       },
       // 汇总所有暂存改动为 SQL 语句数组（INSERT/UPDATE/DELETE）
       buildPendingStatements: function (t) {
+        if (this.hasRowPending(t) && t.pendSig && t.pendSig !== this.rowsetSig(t)) {
+          return { err: "结果集已变化（筛选/排序/翻页），暂存的行改动无法定位到原来那一行；请点 ↻ 放弃并刷新后重新编辑" };
+        }
         var q = this.qtable(t), cols = t.result.columns, self = this;
         var stmts = [];
         (t.adds || []).forEach(function (add) {
@@ -2889,21 +2910,34 @@
           if (!this.tableMeta[k]) this.fetchMeta(t.table, t.schema);
         }
       },
-      vpDirty: function () {
+      // 结果集换了（重查/切结果页/关结果页）→ 按行号存的选择状态一律作废。
+      // 漏清 vsel 会让 Value Editor 指向已不存在的行，取值即 TypeError、整页白屏
+      // （真实反馈：数据 tab 加 WHERE + 排序后行数变少，页面直接空白）。
+      clearSelState: function (t) {
+        t.rowSel = {}; t.lastSelRi = -1; t.cellSel = null; t.curRow = -1; t.vsel = null;
+      },
+      // 当前选中单元格所在行；选择已失效（行号越界/结果为空）返回 null，调用方据此降级而不是崩
+      vpRow: function () {
         var t = this.activeTab;
-        if (!t || !t.vsel || !t.result) return false;
-        var v = t.result.rows[t.vsel.ri][t.vsel.ci];
+        if (!t || !t.vsel || !t.result || !t.result.rows) return null;
+        return t.result.rows[t.vsel.ri] || null;
+      },
+      vpDirty: function () {
+        var row = this.vpRow();
+        if (!row) return false;
+        var v = row[this.activeTab.vsel.ci];
         if (this.vpNull) return v != null;
         return this.vpVal !== (v == null ? "" : this.cellText(v));
       },
       vpSave: function () {
-        var t = this.activeTab;
-        if (!t || !t.vsel) return;
+        var t = this.activeTab, row = this.vpRow();
+        if (!t || !row) return;
         if (!this.vpDirty()) { this.flash("值未变化"); return; }
         var key = t.vsel.ri + ":" + t.vsel.ci;
         var newRaw = this.vpNull ? "NULL" : this.vpVal;
-        var oldV = t.result.rows[t.vsel.ri][t.vsel.ci];
+        var oldV = row[t.vsel.ci];
         // 暂存到 edits，等工具栏「提交」统一写库（铁律：展示态不写库）
+        this.stampPend(t);
         if (newRaw === (oldV == null ? "NULL" : this.cellText(oldV))) delete t.edits[key];
         else t.edits[key] = newRaw;
         this.persist();
@@ -2917,9 +2951,8 @@
         } catch (e) { this.flash("当前值不是合法 JSON"); }
       },
       vpRecord: function () {
-        var t = this.activeTab;
-        if (!t || !t.vsel || !t.result) return [];
-        var row = t.result.rows[t.vsel.ri], self = this;
+        var t = this.activeTab, row = this.vpRow(), self = this;
+        if (!row) return [];
         return t.result.columns.map(function (c, i) {
           var val = row[i] == null ? null : self.cellText(row[i]);
           var pretty = val, isJson = false;
@@ -3101,6 +3134,7 @@
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
+                     pendSig: t.pendSig || null,
                      colDisplay: t.colDisplay || {},
                      // 编辑器光标/滚动位置持久化（用户习惯，刷新后回到原处）；Map 由光标/滚动事件实时刷新，这里直接取
                      viewState: viewStates.get(t.id) || null,
@@ -3172,6 +3206,7 @@
                      view: t.view || "table", chart: t.chart || null,
                      rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null, curRow: -1,
                      edits: t.edits || {}, dels: t.dels || {}, adds: t.adds || [],
+                     pendSig: t.pendSig || null,
                      submit: null, submitting: false, refreshWarn: false,
                      colDisplay: t.colDisplay || {},
                      execMarks: [], execIdx: 0, seq: null,
@@ -4092,7 +4127,7 @@
               </td>
             </tr></tbody>
           </table></div>
-          <div v-if="vpOpen && (activeTab.type==='data' || activeTab.type==='query') && activeTab.vsel" class="dg-vp">
+          <div v-if="vpOpen && (activeTab.type==='data' || activeTab.type==='query') && vpRow()" class="dg-vp">
             <div class="vp-hd">
               <span class="vt" :class="{on: vpTab==='value'}" @click="vpTab='value'">Value</span>
               <span class="vt" :class="{on: vpTab==='record'}" @click="vpTab='record'">Record</span>
