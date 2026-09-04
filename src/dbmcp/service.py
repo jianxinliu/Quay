@@ -1702,18 +1702,18 @@ class DbmService:
             return {"status": "planned", "plan": plan["plan_text"],
                     "columns": plan["columns"], "warnings": plan["warnings"],
                     "target_exists": plan["target_exists"], "risk": plan["risk"]}
+        dst = self.config.get_connection(spec.target_project, spec.target_connection)
+        if not dst.sync_requires_approval:
+            # 目标是本地/开发库：动的不是线上数据，直接执行（仍建审批单留痕 + 审计）
+            return self._run_sync_without_approval(spec, plan, reason, caller)
         return self._request_sync_approval(spec, plan, reason, caller)
 
-    def _request_sync_approval(
+    def _create_sync_change(
         self, spec: "sync.SyncSpec", plan: dict, reason: str, caller: CallerInfo,
-    ) -> dict:
-        """为同步计划生成审批单。与 _request_approval 同构，只是审批的是计划而非 SQL。
-
-        审批单挂在**目标连接**下（写发生在那里），sql 字段存人可读的计划文本、payload 存
-        结构化计划——核销时执行 payload，与「执行的永远是审批单里存储的内容」一致。
-        """
+    ):  # noqa: ANN201 - ChangeRequest，避免为类型再引一次 approvals
+        """把同步计划落成审批单记录（审批与免审批两条路都用它，保证留痕一致）。"""
         dst = self.config.get_connection(spec.target_project, spec.target_connection)
-        change = self.approvals.create(
+        return self.approvals.create(
             project=spec.target_project,
             connection=spec.target_connection,
             environment=dst.environment,
@@ -1728,6 +1728,35 @@ class DbmService:
             kind=KIND_SYNC,
             payload=plan,
         )
+
+    def _run_sync_without_approval(
+        self, spec: "sync.SyncSpec", plan: dict, reason: str, caller: CallerInfo,
+    ) -> dict:
+        """本地/开发目标的同步：不打扰人，直接批准并执行。
+
+        仍走审批单对象（自动批准 + 原子核销），这样执行的依然是「记录在案的那份计划」，
+        审计、执行结果回填、后台可回溯都与人工审批路径完全一致，只是省掉了等人这一步。
+        """
+        change = self._create_sync_change(spec, plan, reason, caller)
+        self.approvals.approve(change.id, decided_by="auto", note="目标为本地/开发库，免审批")
+        change = self.approvals.consume(
+            change.id, sync.spec_fingerprint(spec),
+            (spec.target_project, spec.target_connection))
+        result = self._run_sync_change(change, caller)
+        result["warnings"] = plan["warnings"]
+        result["auto_approved"] = True
+        return result
+
+    def _request_sync_approval(
+        self, spec: "sync.SyncSpec", plan: dict, reason: str, caller: CallerInfo,
+    ) -> dict:
+        """为同步计划生成审批单。与 _request_approval 同构，只是审批的是计划而非 SQL。
+
+        审批单挂在**目标连接**下（写发生在那里），sql 字段存人可读的计划文本、payload 存
+        结构化计划——核销时执行 payload，与「执行的永远是审批单里存储的内容」一致。
+        """
+        dst = self.config.get_connection(spec.target_project, spec.target_connection)
+        change = self._create_sync_change(spec, plan, reason, caller)
         rec = self._base_record(spec.target_project, spec.target_connection, dst,
                                 "sync_write", plan["plan_text"], caller)
         rec.status = "rejected"

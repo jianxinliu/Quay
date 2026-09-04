@@ -106,8 +106,9 @@ sync_table(source_project=..., source_connection="prod-mysql", source_table="ord
   不是全量迁移工具——想搬全库请让用户走导出/导入。**务必带上 `where` 收窄**。
 - **先看计划**：`dry_run=True` 只返回计划（建表语句、要复制的列、告警），不占审批单，
   适合先给用户确认「要同步的是这些」。
-- **审批同 execute**：首次提交生成审批单 + `approval_url`，批准后自动执行；超时用
-  `wait_for_change`。重提时其余参数必须与提交时逐字一致（计划指纹校验）。
+- **目标是 local/dev 连接时不需要审批**：直接执行并返回 `status=executed`（动的不是线上
+  数据；执行照常审计留痕）。目标是 staging 才走审批：首次提交生成审批单 + `approval_url`，
+  批准后自动执行；超时用 `wait_for_change`，重提时其余参数必须与提交时逐字一致（指纹校验）。
 - **跨引擎**（如 MySQL → PostgreSQL）会用 sqlglot 把建表语句转写成**近似 DDL**，
   返回值 `warnings` 里列出被剥掉的东西（二级索引、自增、字符集等）——转述给用户。
 - **限制**：目标连接不能是 prod（拒绝往生产灌数）；目标要配了 writer 账号；

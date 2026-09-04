@@ -197,6 +197,9 @@ def service(tmp_path):
         "projects": {"demo": {"connections": {
             "prod": {"engine": "sqlite", "database": str(src_file), "environment": "prod"},
             "local": {"engine": "sqlite", "database": str(dst_file), "environment": "local"},
+            # 同一个目标文件再挂一条 staging 连接：local 目标免审批，审批闭环用它来测
+            "staging": {"engine": "sqlite", "database": str(dst_file),
+                        "environment": "staging"},
         }}}
     })
     svc = DbmService(cfg, AuditStore(tmp_path / "audit.sqlite3"),
@@ -214,6 +217,12 @@ def _dst_rows(service, table="users"):
         return conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
     finally:
         conn.close()
+
+
+def _staging_spec(**over) -> SyncSpec:
+    """目标指向 staging 连接：非 local/dev，走完整审批闭环。"""
+    over.setdefault("target_connection", "staging")
+    return _spec(**over)
 
 
 def _approve_and_run(service, submitted, spec):
@@ -234,51 +243,43 @@ class TestSyncHappyPath:
         assert service.list_changes() == []   # 没占审批单
 
     def test_creates_table_and_copies_rows(self, service):
-        spec = _spec()
-        submitted = service.sync_table(spec, CALLER, reason="本地复现 bug")
-        assert submitted["status"] == "approval_required"
-        assert "approval_url" in submitted
-
-        result = _approve_and_run(service, submitted, spec)
+        # 目标是 local 连接 → 不需要审批，一次调用就落地
+        result = service.sync_table(_spec(), CALLER, reason="本地复现 bug")
         assert result["status"] == "executed"
+        assert result["auto_approved"] is True
         assert result["affected_rows"] == 3
         assert _dst_rows(service) == [(1, "alice", 30), (2, "bob", 25), (3, "carol", None)]
         assert [s["step"] for s in result["steps"]] == ["create", "copy"]
 
     def test_where_and_limit_narrow_the_copy(self, service):
         spec = _spec(where="age >= 25", order_by="id DESC", limit=1)
-        result = _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        result = service.sync_table(spec, CALLER)
         assert result["affected_rows"] == 1
         assert _dst_rows(service) == [(2, "bob", 25)]
         assert result["source_truncated"] is True     # 符合条件的还有更多
         assert "note" in result
 
     def test_target_table_can_be_renamed(self, service):
-        spec = _spec(target_table="users_snapshot")
-        result = _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        result = service.sync_table(_spec(target_table="users_snapshot"), CALLER)
         assert result["affected_rows"] == 3
         assert len(_dst_rows(service, "users_snapshot")) == 3
 
     def test_ddl_only_creates_empty_table(self, service):
-        spec = _spec(data=DATA_NONE)
-        result = _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        result = service.sync_table(_spec(data=DATA_NONE), CALLER)
         assert result["affected_rows"] == 0
         assert _dst_rows(service) == []
 
     def test_replace_clears_target_before_writing(self, service):
-        spec = _spec()
-        _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        service.sync_table(_spec(), CALLER)
         # 目标表已有 3 行；再同步一次 append 会变 6 行（主键冲突这里不涉及，先删掉一行制造差异）
-        replace_spec = _spec(ddl=DDL_SKIP, data=DATA_REPLACE, where="id = 1")
-        result = _approve_and_run(service, service.sync_table(replace_spec, CALLER), replace_spec)
+        result = service.sync_table(
+            _spec(ddl=DDL_SKIP, data=DATA_REPLACE, where="id = 1"), CALLER)
         assert result["affected_rows"] == 1
         assert _dst_rows(service) == [(1, "alice", 30)]   # 其余两行被清掉
 
     def test_recreate_drops_and_rebuilds(self, service):
-        spec = _spec()
-        _approve_and_run(service, service.sync_table(spec, CALLER), spec)
-        again = _spec(ddl=DDL_RECREATE, where="id = 3")
-        result = _approve_and_run(service, service.sync_table(again, CALLER), again)
+        service.sync_table(_spec(), CALLER)
+        result = service.sync_table(_spec(ddl=DDL_RECREATE, where="id = 3"), CALLER)
         assert [s["step"] for s in result["steps"]] == ["drop", "create", "copy"]
         assert _dst_rows(service) == [(3, "carol", None)]
 
@@ -300,16 +301,13 @@ class TestSyncGuards:
 
     def test_where_cannot_smuggle_a_write(self, service):
         """WHERE 是自由文本：拼出来的整条 SQL 必须仍被 classify 判为只读。"""
-        spec = _spec(where="1=1; DROP TABLE users")
-        submitted = service.sync_table(spec, CALLER)
         with pytest.raises(QueryRejected, match="非只读"):
-            _approve_and_run(service, submitted, spec)
+            service.sync_table(_spec(where="1=1; DROP TABLE users"), CALLER)
         assert _dst_rows(service) == []   # 目标表已建但没被写坏
 
     def test_limit_clamped_to_setting(self, service):
         service.save_settings({"sync_max_rows": "2"})
-        spec = _spec(limit=1000)
-        result = _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        result = service.sync_table(_spec(limit=1000), CALLER)
         assert result["affected_rows"] == 2
 
     def test_missing_columns_on_target_are_reported(self, service):
@@ -332,32 +330,56 @@ class TestSyncGuards:
             service.sync_table(_spec(ddl=DDL_SKIP), CALLER, dry_run=True)
 
 
+class TestApprovalScope:
+    """审批只拦「改线上数据」：local/dev 目标直接执行，staging 及以上仍要人批。"""
+
+    def test_local_target_skips_approval(self, service):
+        out = service.sync_table(_spec(), CALLER)
+        assert out["status"] == "executed"
+        assert out["auto_approved"] is True
+        # 免审批不等于免留痕：审批单照建，自动批准后原子核销
+        change = service.get_change(out["change_id"])
+        assert change.status == "consumed"
+        assert change.decided_by == "auto"
+        assert change.kind == KIND_SYNC
+
+    def test_dev_target_skips_approval(self, service):
+        service.config.get_connection("demo", "staging").environment = "dev"
+        assert service.sync_table(_staging_spec(), CALLER)["status"] == "executed"
+
+    def test_staging_target_still_requires_approval(self, service):
+        out = service.sync_table(_staging_spec(), CALLER)
+        assert out["status"] == "approval_required"
+        assert "approval_url" in out
+        assert service.list_tables("demo", "staging", CALLER) == []  # 没批准就一步不动
+
+
 class TestSyncApprovalContract:
     def test_change_is_marked_as_sync_kind(self, service):
-        submitted = service.sync_table(_spec(), CALLER)
+        submitted = service.sync_table(_staging_spec(), CALLER)
         change = service.get_change(submitted["change_id"])
         assert change.kind == KIND_SYNC
         assert change.payload["spec"]["source_table"] == "users"
-        assert change.project == "demo" and change.connection == "local"  # 挂在目标连接下
+        assert change.project == "demo" and change.connection == "staging"  # 挂在目标连接下
 
     def test_unapproved_change_id_is_rejected(self, service):
-        spec = _spec()
+        spec = _staging_spec()
         submitted = service.sync_table(spec, CALLER)
         out = service.sync_table(spec, CALLER, change_id=submitted["change_id"])
         assert out["status"] == "rejected"
 
     def test_changed_params_fail_fingerprint(self, service):
-        spec = _spec()
-        submitted = service.sync_table(spec, CALLER)
+        submitted = service.sync_table(_staging_spec(), CALLER)
         service.approve_change(submitted["change_id"], decided_by="tester")
-        out = service.sync_table(_spec(limit=5), CALLER, change_id=submitted["change_id"])
+        out = service.sync_table(_staging_spec(limit=5), CALLER,
+                                 change_id=submitted["change_id"])
         assert out["status"] == "rejected"
         assert "不一致" in out["reason"]
         # 指纹不符时一步都不执行：目标表连建都没建
-        assert service.list_tables("demo", "local", CALLER) == []
+        assert service.list_tables("demo", "staging", CALLER) == []
 
     def test_change_is_single_use(self, service):
-        spec = _spec()
+        spec = _staging_spec()
         submitted = service.sync_table(spec, CALLER)
         _approve_and_run(service, submitted, spec)
         out = service.sync_table(spec, CALLER, change_id=submitted["change_id"])
@@ -366,7 +388,7 @@ class TestSyncApprovalContract:
 
     def test_executes_plan_stored_in_the_change(self, service):
         """审批后源表又多了一行：执行的是「计划」，所以会带上新数据（而不是提交时的快照）。"""
-        spec = _spec()
+        spec = _staging_spec()
         submitted = service.sync_table(spec, CALLER)
         src = service.config.get_connection("demo", "prod")
         conn = sqlite3.connect(src.database)
@@ -378,16 +400,16 @@ class TestSyncApprovalContract:
 
     def test_sync_change_cannot_be_run_through_execute(self, service):
         """同步审批单存的是计划文本，被 execute 当 SQL 发给 DB 就成了语法错甚至误执行。"""
-        submitted = service.sync_table(_spec(), CALLER)
+        submitted = service.sync_table(_staging_spec(), CALLER)
         service.approve_change(submitted["change_id"], decided_by="tester")
-        out = service.execute("demo", "local", "SELECT 1", CALLER,
+        out = service.execute("demo", "staging", "SELECT 1", CALLER,
                               change_id=submitted["change_id"])
         assert out["status"] == "rejected"
         assert "表同步计划" in out["reason"]
 
     def test_admin_approve_and_execute_runs_the_sync(self, service):
         """后台「批准并立即执行」对同步单同样走计划执行路径。"""
-        submitted = service.sync_table(_spec(), CALLER)
+        submitted = service.sync_table(_staging_spec(), CALLER)
         out = service.approve_and_execute_change(submitted["change_id"], decided_by="admin")
         assert out["status"] == "executed"
         assert out["affected_rows"] == 3
@@ -396,15 +418,13 @@ class TestSyncApprovalContract:
 
 class TestSyncAudit:
     def test_read_and_write_are_both_audited(self, service):
-        spec = _spec()
-        _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        service.sync_table(_spec(), CALLER)
         tools = [r["tool"] for r in service.store.recent(limit=50)]
         assert "sync_read" in tools
         assert "sync_write" in tools
 
     def test_sync_write_counts_as_a_write_in_audit_filter(self, service):
-        spec = _spec()
-        _approve_and_run(service, service.sync_table(spec, CALLER), spec)
+        service.sync_table(_spec(), CALLER)
         writes = service.store.recent(limit=50, filters={"rw": "write"})
         assert {r["tool"] for r in writes} == {"sync_write"}
 
@@ -432,7 +452,8 @@ class TestSyncAdminPage:
 
         cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {
             "prod": {"engine": "sqlite", "database": str(src_file), "environment": "prod"},
-            "local": {"engine": "sqlite", "database": str(dst_file), "environment": "local"},
+            "staging": {"engine": "sqlite", "database": str(dst_file),
+                        "environment": "staging"},
         }}}})
         svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"),
                          ApprovalStore(tmp_path / "a.sqlite3"))
@@ -446,7 +467,7 @@ class TestSyncAdminPage:
 
     def test_detail_page_shows_plan_and_can_execute(self, client):
         tc, svc = client
-        submitted = svc.sync_table(_spec(), CALLER, reason="本地复现")
+        submitted = svc.sync_table(_staging_spec(), CALLER, reason="本地复现")
         cid = submitted["change_id"]
 
         page = tc.get(f"/admin/approvals/{cid}")
