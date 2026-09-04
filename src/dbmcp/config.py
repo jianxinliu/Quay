@@ -164,6 +164,16 @@ class ConnectionConfig(BaseModel):
         return self
 
     @property
+    def sync_requires_approval(self) -> bool:
+        """sync_table 写入本连接是否需要人工审批。
+
+        只有「改动线上数据」才值得拦一道：local/dev 目标（典型用法是把线上表拉一份到本地
+        看）直接执行，仍照常审计留痕；staging 及以上要审批（prod 连接本就不许当同步目标）。
+        注意这**只放宽 sync_table**，agent 的 execute 写操作不受影响。
+        """
+        return self.environment not in ("local", "dev")
+
+    @property
     def elicitation_enabled(self) -> bool:
         """elicitation 快捷审批开关：显式配置优先，否则按环境（local/dev 开）。"""
         if self.policy.elicitation_approval is not None:

@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 import anyio.to_thread
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
@@ -28,6 +28,84 @@ from .sync import SyncSpec
 _WAIT_POLL_S = 1.0
 _WAIT_HEARTBEAT_S = 10.0   # 每 10s 报一次 progress，防客户端把长调用判超时
 _WAIT_MAX_S = 3600
+
+# elicitation 弹窗要「一屏能看完、一下能点」：客户端把 message 原样渲染在终端里，
+# 超长内容（典型是 sync_table 的整份计划带 CREATE TABLE）会把 Accept/Decline 顶出屏幕，
+# 人根本无从操作。这里只放摘要，完整语句/计划让人去审批页看。
+_ELICIT_MAX_LINES = 8
+_ELICIT_MAX_CHARS = 480
+_ELICIT_MAX_LINE_CHARS = 100
+
+
+class ApprovalDecision(BaseModel):
+    """elicitation 的回填结构。
+
+    **必须给默认值**：无默认值的字段会进 JSON Schema 的 required，客户端（如 Claude Code）
+    就要求人先把字段填上才允许 Accept，弹窗上出现「Value: not set / This field is required」，
+    多一步且看着像出错。给了默认值后 Accept 直接可点，含义即「批准」。
+    """
+
+    decision: Literal["approve", "deny"] = Field(
+        "approve", description="approve=批准并立即执行；deny=驳回（与 Decline 等价）"
+    )
+
+
+def _clip_block(
+    text: str,
+    *,
+    max_lines: int = _ELICIT_MAX_LINES,
+    max_chars: int = _ELICIT_MAX_CHARS,
+    max_line_chars: int = _ELICIT_MAX_LINE_CHARS,
+) -> tuple[str, bool]:
+    """把多行文本裁到弹窗放得下的体量，返回 (裁剪后文本, 是否被裁)。
+
+    行数、单行长度、总字符三条都卡：终端里长行会折行，只卡行数挡不住撑爆屏幕。
+    """
+    # 空行与纯分隔行（同步计划里的 `--`）在弹窗里只占地方，不带信息
+    lines = [ln.rstrip() for ln in text.strip().splitlines()
+             if ln.strip() and set(ln.strip()) != {"-"}]
+    clipped = len(lines) > max_lines
+    kept: list[str] = []
+    used = 0
+    for line in lines[:max_lines]:
+        if len(line) > max_line_chars:
+            line = line[: max_line_chars - 1] + "…"
+            clipped = True
+        if kept and used + len(line) > max_chars:
+            clipped = True
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept), clipped
+
+
+def build_elicit_message(
+    *,
+    change_id: int,
+    risk_level: str,
+    reasons: list[str],
+    project: str,
+    connection: str,
+    environment: str,
+    statement: str,
+    approval_url: str = "",
+) -> str:
+    """拼会话内确认弹窗的正文：摘要 + 截断的语句 + 审批页链接，保证一屏放得下。"""
+    body, clipped = _clip_block(statement)
+    lines = [
+        f"审批单 #{change_id} · 风险 {risk_level} · {project}/{connection}（{environment}）",
+        body,
+    ]
+    if clipped:
+        lines.append("…（内容已截断，完整语句见审批页）")
+    reason_text, _ = _clip_block("; ".join(reasons[:3]), max_lines=1, max_chars=120,
+                                 max_line_chars=120)
+    if reason_text:
+        lines.append(f"判定: {reason_text}")
+    if approval_url:
+        lines.append(f"详情: {approval_url}")
+    lines.append("Accept = 批准并立即执行；Decline = 驳回。")
+    return "\n".join(lines)
 
 
 def _tool_error_from_unavailable(e: ConnectionUnavailable) -> ToolError:
@@ -84,6 +162,22 @@ def _caller_from_ctx(ctx: Context | None) -> CallerInfo:
     return CallerInfo(agent=agent, session_id=session_id)
 
 
+def _decision_of(answer: object) -> str:
+    """从 elicitation 回执里取出决策词，兼容客户端回填的几种形态。
+
+    正常是 ApprovalDecision 实例；宽松客户端可能直接回 dict 或裸字符串。取不到就按
+    「Accept 即批准」处理（返回空串），因为 decision 有默认值、人点 Accept 就是批准。
+    """
+    data = getattr(answer, "data", None)
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict):
+        value = data.get("decision", data.get("value", ""))
+        return value if isinstance(value, str) else ""
+    value = getattr(data, "decision", "")
+    return value if isinstance(value, str) else ""
+
+
 async def _maybe_elicit_approval(
     service: DbmService,
     ctx: Context | None,
@@ -107,21 +201,24 @@ async def _maybe_elicit_approval(
 
     cid = result["change_id"]
     risk = result.get("risk", {})
-    message = (
-        f"Agent 请求执行数据变更（审批单 #{cid}，风险等级 {risk.get('level', '?')}）\n"
-        f"连接: {project}/{connection}（环境 {cfg.environment}）\n"
-        f"语句: {statement}\n"
-        f"判定: {'; '.join(risk.get('reasons', [])) or '—'}\n"
-        f"选择 approve 批准并立即执行；deny 或关闭则驳回。"
+    message = build_elicit_message(
+        change_id=cid,
+        risk_level=str(risk.get("level", "?")),
+        reasons=list(risk.get("reasons", [])),
+        project=project,
+        connection=connection,
+        environment=cfg.environment,
+        statement=statement,
+        approval_url=result.get("approval_url", ""),
     )
     try:
-        answer = await ctx.elicit(message, response_type=["approve", "deny"])
+        answer = await ctx.elicit(message, response_type=ApprovalDecision)
     except Exception:
         return result  # 客户端不支持 elicitation → 审批单流程兜底
 
     decided_by = f"elicitation:{caller.agent}"
     try:
-        if getattr(answer, "action", None) == "accept" and getattr(answer, "data", None) == "approve":
+        if getattr(answer, "action", None) == "accept" and _decision_of(answer) != "deny":
             service.approve_change(cid, decided_by=decided_by, note="会话内确认")
             return await anyio.to_thread.run_sync(resubmit, cid)
         service.reject_change(cid, decided_by=decided_by, note="会话内拒绝")
@@ -224,8 +321,9 @@ def build_mcp(service: DbmService) -> FastMCP:
             "把一张表从一个库同步到另一个库（典型：线上库 → 本地库）用 sync_table："
             "可同步表结构（按源表建表，跨引擎会转写成近似 DDL）和数据"
             "（按 where/order_by/limit 取一小撮，默认 1000 行、有服务端硬上限——它是拉样本"
-            "数据用的，不是全量迁移工具）；目标不能是 prod 连接。审批流程与 execute 相同，"
-            "先用 dry_run=True 可以只看计划不占审批单。"
+            "数据用的，不是全量迁移工具）；目标不能是 prod 连接。目标是 local/dev 连接时"
+            "不需要审批、直接执行（仍有审计），只有目标是 staging 才走 execute 那套审批流程；"
+            "先用 dry_run=True 可以只看计划。"
             "跨源 JOIN、大结果集聚合、多步分析请用分析工作台（DuckDB 本地沙箱）："
             "analysis_import 把各源查询结果快照为工作区数据集（reader 拉取、带行数上限），"
             "analysis_sql 在工作区自由 JOIN/聚合/建 VIEW（不需审批），只把小结果带回上下文。"
@@ -442,18 +540,19 @@ def build_mcp(service: DbmService) -> FastMCP:
         ] = None,
         ctx: Context | None = None,
     ) -> dict:
-        """把一张表从一个连接同步到另一个连接（典型场景：线上库 → 本地库），需人工授权。
+        """把一张表从一个连接同步到另一个连接（典型场景：线上库 → 本地库）。
 
         能同步**结构**（按源表建表；同引擎用源库建表语句原文，跨引擎用 sqlglot 转写成近似
         DDL 并列出被剥掉的东西）和**数据**（按 where/order_by/limit 取一小撮，参数化批量写入）。
         **数据量有硬上限**（默认 1000 行，上限见系统设置 sync_max_rows）——它用于拉一份能在
         本地跑起来的样本数据，不是全量迁移工具；要大批量请走导出/导入。
 
-        流程同 execute：首次提交生成审批单并在服务端等人决策，把返回的 approval_url 贴给用户
-        点开批准，批准后本次调用自动执行并返回 status=executed。等待超时返回
-        status=approval_required，用 wait_for_change(change_id) 续等，或带 change_id 重提
-        （重提时其余参数必须与提交时逐字一致，否则指纹校验会拒）。
-        先用 dry_run=True 可以只看计划、让用户确认要同步什么，不占用审批单。
+        **目标是 local/dev 环境的连接时不需要审批**，直接执行并返回 status=executed（动的不是
+        线上数据；执行仍照常审计留痕，可在后台回溯）。目标是 staging 时才走审批：流程同
+        execute——生成审批单并在服务端等人决策，把返回的 approval_url 贴给用户点开批准，
+        批准后本次调用自动执行；等待超时返回 status=approval_required，用
+        wait_for_change(change_id) 续等，或带 change_id 重提（重提时其余参数必须与提交时逐字
+        一致，否则指纹校验会拒）。先用 dry_run=True 可以只看计划、让用户确认要同步什么。
 
         限制：目标连接不能是 prod 环境（拒绝往生产灌数）；目标必须配了 writer 账号；
         ClickHouse 只能做源、Redis 不参与。同步的是**真实值**（不脱敏），
