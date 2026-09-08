@@ -123,6 +123,23 @@ class TestListSessionsFilters:
         assert {s["session_id"] for s in store.list_sessions(project="demo")} == {"sess-A", "sess-B"}
         assert store.list_sessions(project="other") == []
 
+    def test_status_scopes_session_and_counts(self, tmp_path):
+        """按状态筛选时，只保留有该状态操作的会话，ops 也只数这些操作。"""
+        store = AuditStore(tmp_path / "a.sqlite3")
+        ok = _rec("sess-A", "execute")
+        failed = _rec("sess-A", "execute")
+        failed.status = "rejected"
+        only_failed = _rec("sess-B", "execute")
+        only_failed.status = "rejected"
+        for r in (ok, failed, only_failed):
+            store.record(r)
+
+        got = store.list_sessions(status="ok")
+        assert [s["session_id"] for s in got] == ["sess-A"]
+        assert got[0]["ops"] == 1        # 只数成功那条
+        assert {s["session_id"] for s in store.list_sessions(status="rejected")} == {
+            "sess-A", "sess-B"}
+
     def test_only_with_writes(self, tmp_path):
         store = AuditStore(tmp_path / "a.sqlite3")
         store.record(_rec("sess-read", "query"))
@@ -287,6 +304,27 @@ class TestServiceListSessions:
         got = service.list_agent_sessions(CALLER, writes_only=True)
         assert [s["session_id"] for s in got] == ["sess-write"]
 
+    def test_writes_only_with_status_ok_means_really_changed(self, service):
+        """「真正改成过数据的会话」= writes_only + status=ok（只提交没批的不算）。"""
+        attempted = CallerInfo(agent="pytest/1.0", session_id="sess-attempted")
+        service.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", attempted)
+
+        done = CallerInfo(agent="pytest/1.0", session_id="sess-done")
+        r = service.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 2", done)
+        service.approve_change(r["change_id"], decided_by="alice@ops")
+        service.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 2", done,
+                        change_id=r["change_id"])
+
+        # 不带 status：两个会话都「有写操作」，但其中一个其实没落库
+        assert {s["session_id"] for s in service.list_agent_sessions(CALLER, writes_only=True)} == {
+            "sess-attempted", "sess-done"}
+        got = service.list_agent_sessions(CALLER, writes_only=True, status="ok")
+        assert [s["session_id"] for s in got] == ["sess-done"]
+
+    def test_bad_status_raises(self, service):
+        with pytest.raises(ValueError, match="不支持的状态"):
+            service.list_agent_sessions(CALLER, status="success")
+
     def test_bad_date_raises(self, service):
         with pytest.raises(ValueError):
             service.list_agent_sessions(CALLER, since="上周")
@@ -326,6 +364,23 @@ class TestServiceSessionHistory:
         assert executed["rollback_note"] == note
         assert executed["approval_status"] == "consumed"
         assert executed["row_count"] == 1
+
+    def test_status_filters_to_executed_only(self, service):
+        r = service.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", CALLER)
+        service.approve_change(r["change_id"], decided_by="alice@ops")
+        service.execute("demo", "main", "UPDATE users SET active = 0 WHERE id = 1", CALLER,
+                        change_id=r["change_id"])
+
+        out = service.session_history(CALLER, writes_only=True)
+        assert out["status_counts"] == {"ok": 1, "rejected": 1}   # 首提那条是 rejected
+
+        done = service.session_history(CALLER, writes_only=True, status="ok")
+        assert [o["status"] for o in done["operations"]] == ["ok"]
+        assert done["operations"][0]["row_count"] == 1
+
+    def test_bad_status_rejected_with_options(self, service):
+        with pytest.raises(ValueError, match="不支持的状态"):
+            service.session_history(CALLER, status="executed")
 
     def test_writes_only_filters_reads(self, service):
         service.query("demo", "main", "SELECT 1", CALLER)
@@ -448,8 +503,13 @@ async def test_tools_over_mcp_protocol(service):
         hist = await c.call_tool("session_history", {
             "session_id": sids[0], "writes_only": True})
         op = hist.data["operations"][0]
+        assert hist.data["status_counts"] == {"rejected": 1}   # 只提交了、还没批
         assert op["change_id"] == cid
         assert op["rollback_note"].startswith("id=1 改前 active=1")
         assert "sql" not in op                      # 默认不带 SQL 原文
         assert "sql" in (await c.call_tool("session_history", {
             "session_id": sids[0], "fields": "sql"})).data["operations"][0]
+
+        # 只看真正落地的改动：这单还没批准，故为空
+        assert (await c.call_tool("session_history", {
+            "session_id": sids[0], "writes_only": True, "status": "ok"})).data["count"] == 0

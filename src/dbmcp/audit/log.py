@@ -233,6 +233,7 @@ class AuditStore:
         keyword: str | None = None,
         project: str | None = None,
         connection: str | None = None,
+        status: str | None = None,
         only_with_writes: bool = False,
     ) -> list[dict]:
         """列出有过操作的 agent 会话（供审计页会话筛选与 agent 自查历史）。
@@ -242,15 +243,16 @@ class AuditStore:
 
         筛选条件都下推到 SQL：
         - since/until：ISO 时间串（UTC，与返回的 ts 同一时区），按操作时间过滤；
-        - project/connection：只保留在该项目/连接上有过操作的会话，且 ops/writes/首末时间
-          都只统计该项目/连接上的操作（「我在这个库上做过什么」这个问法的自然语义）；
+        - project/connection/status：只保留在该项目/连接上、或有该结果状态的操作的会话，
+          且 ops/writes/首末时间只统计符合条件的那些操作（「我在这个库上成功做成过什么」
+          这个问法的自然语义）；
         - keyword：模糊匹配会话名、简介，或该会话跑过的任意一条 SQL；
         - only_with_writes：只保留跑过写操作（需审批的那类工具）的会话。
         """
         marks = ",".join("?" * len(_WRITE_TOOLS))
         clauses, params = ["a.session_id <> ''"], []
         for col, val in (("a.agent", agent), ("a.project", project),
-                         ("a.connection", connection)):
+                         ("a.connection", connection), ("a.status", status)):
             if val:
                 clauses.append(f"{col} = ?")
                 params.append(val)

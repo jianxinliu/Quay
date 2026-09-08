@@ -304,6 +304,10 @@ class DbmService:
             "note": "" if sid else "当前客户端未提供会话 id，本次会话的 SQL 将无法按会话归类回溯",
         }
 
+    # 审计记录的结果状态：ok=真正执行成功；rejected=被挡下（首提生成审批单、
+    # 审批被驳回/过期、只读防线拒绝等，都没落库）；error=执行时出错。
+    HISTORY_STATUSES = ("ok", "rejected", "error")
+
     # 一条操作可回传的列。默认只给「回溯所需的骨架」——SQL 原文与错误明细都很占
     # 上下文（一次会话几十条就能吃掉几千 token），agent 认准了哪几条再用 fields 取。
     HISTORY_DEFAULT_FIELDS = ("ts", "tool", "connection", "status", "row_count",
@@ -313,6 +317,16 @@ class DbmService:
     # 单条记录里 SQL 的回传上限：写操作 SQL 通常很短，长的多半是批量迁移脚本，
     # 截断后给出提示，需要全文可以去审批页/审计页看。
     HISTORY_SQL_MAX_CHARS = 2000
+
+    def _history_status(self, status: str) -> str:
+        """校验结果状态入参，非法值直接报错而不是静默返回空列表。"""
+        st = (status or "").strip().lower()
+        if st and st not in self.HISTORY_STATUSES:
+            raise ValueError(
+                f"不支持的状态 {status!r}；可选: {', '.join(self.HISTORY_STATUSES)}"
+                "（ok=执行成功，rejected=被挡下未落库，error=执行出错）"
+            )
+        return st
 
     def _history_fields(self, fields: str) -> tuple[str, ...]:
         """解析 fields 入参：空=默认精简列，all=全部，否则按名字取（校验白名单）。"""
@@ -339,6 +353,7 @@ class DbmService:
         keyword: str = "",
         project: str = "",
         connection: str = "",
+        status: str = "",
         writes_only: bool = False,
     ) -> list[dict]:
         """列出跑过 SQL 的历史会话（默认只列当前 agent 自己的），最近活动在前。
@@ -346,6 +361,8 @@ class DbmService:
         供 agent 回溯「我上次/前几次都做了什么」：先在这里按日期/关键词/连接找到目标会话，
         再用 session_history(session_id) 看那次会话的具体操作。
         since/until 支持 `YYYY-MM-DD` 或 ISO 时间，不带时区时按本地时区解释。
+        status 只保留有该结果状态操作的会话（`writes_only=True, status="ok"` =
+        「真正改成过数据的会话」）。
         """
         rows = self.store.list_sessions(
             limit=limit,
@@ -355,6 +372,7 @@ class DbmService:
             keyword=keyword or None,
             project=project or None,
             connection=connection or None,
+            status=self._history_status(status) or None,
             only_with_writes=writes_only,
         )
         return [
@@ -375,13 +393,16 @@ class DbmService:
 
     def session_history(
         self, caller: CallerInfo, session_id: str = "", limit: int = 50,
-        writes_only: bool = False, fields: str = "",
+        writes_only: bool = False, status: str = "", fields: str = "",
     ) -> dict:
         """回溯某个会话跑过的操作（最近在前），写操作带上其审批单与回滚备注。
 
         session_id 省略即当前会话。写操作（execute/sync_write）通过审计记录上的
         change_id 关联回审批单，返回审批状态与提交时写下的 rollback_note——
         「这次改动前是什么值、怎么回滚」就在那里。
+
+        status 按结果筛选：`writes_only=True, status="ok"` 就是「审批通过并真正执行成功的
+        改动」——排查「上次到底改成了哪些」时用它，被挡下的首提记录不会混进来。
 
         默认只回精简列（见 HISTORY_DEFAULT_FIELDS）：SQL 原文与错误明细不默认返回，
         免得几十条记录把上下文吃满；要看时用 fields 显式点名（如 "sql,detail" 或 "all"）。
@@ -393,9 +414,12 @@ class DbmService:
                 "请先用 list_sessions 找到目标会话，再把 session_id 传进来"
             )
         want = self._history_fields(fields)
+        st = self._history_status(status)
         filters = {"session_id": sid}
         if writes_only:
             filters["rw"] = "write"
+        if st:
+            filters["status"] = st
         rows = self.store.recent(limit=limit, filters=filters)
         # 关联审批单只在真要用到审批信息时查，省一次库
         changes = {}
@@ -424,6 +448,10 @@ class DbmService:
             # 空值不占位（None/空串一律省掉），只留真正有内容的列
             ops.append({k: full[k] for k in want if full[k] not in (None, "")})
 
+        status_counts: dict[str, int] = {}
+        for r in rows:
+            status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
+
         meta = self.store.get_session(sid) or {}
         out = {
             "session_id": sid,
@@ -431,6 +459,7 @@ class DbmService:
             "note": meta.get("note") or "",
             "operations": ops,
             "count": len(ops),
+            "status_counts": status_counts,
             "fields": list(want),
             "order": "最近在前",
         }
