@@ -23,8 +23,8 @@ DeepSeek Harness 会把工具注册成 `mcp__<serverName>__<原名>`（例如 `m
 | 场景 | 工具 | 说明 |
 |---|---|---|
 | 声明会话 | `begin_session(title, note?)` | 开始跑 SQL 前调一次，登记本次会话的名字/背景，之后本会话的 SQL 在后台按会话归类、便于人回溯 |
-| 回溯自己 | `list_sessions(since?, until?, keyword?, project?, connection?, writes_only?, limit?)` | 查自己过去的工作会话（可按日期/关键词/连接筛选），找到「上次是哪一次」 |
-| 回溯改动 | `session_history(session_id?, writes_only?, fields?, limit?)` | 看某次会话跑过的操作；写操作带审批单号与 `rollback_note`（改动前的值/怎么回滚）。**默认不返回 SQL 原文与错误明细**，要看用 `fields="sql,detail"` |
+| 回溯自己 | `list_sessions(since?, until?, keyword?, project?, connection?, status?, writes_only?, limit?)` | 查自己过去的工作会话（可按日期/关键词/连接/结果筛选），找到「上次是哪一次」 |
+| 回溯改动 | `session_history(session_id?, writes_only?, status?, fields?, limit?)` | 看某次会话跑过的操作；写操作带审批单号与 `rollback_note`（改动前的值/怎么回滚）。**默认不返回 SQL 原文与错误明细**，要看用 `fields="sql,detail"` |
 | 发现 | `list_projects` / `list_connections` | 找到目标连接（项目 → 连接） |
 | 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
@@ -90,7 +90,8 @@ execute(sql) → 生成审批单，服务端就地等待人工决策（默认 12
 - 手动重提时必须是**同一条 SQL**（指纹校验，不一致直接拒）；真正执行的永远是审批单里存的 SQL。
 - 审批单 60 分钟过期、一次性核销。prod 环境强制走审批，没有捷径。
 - 客户端支持 elicitation 时（local/dev 环境），批准动作可能直接弹到会话里。
-- **可能要回滚的改动，先查旧值再写进 `rollback_note`**：
+- **你判断以后可能要回滚的改动，先查旧值再写进 `rollback_note`**（写不写由你判断，
+  补日志、加索引这类没有回滚价值的留空即可）：
 
   ```
   query("SELECT id, status FROM orders WHERE id IN (1001, 1002)")   # 先拿到旧值
@@ -106,9 +107,9 @@ execute(sql) → 生成审批单，服务端就地等待人工决策（默认 12
 ### 2.2 回溯以前做过什么（`list_sessions` / `session_history`）
 
 ```
-list_sessions(since="2026-09-01", writes_only=True)      # 这个月我改过数据的会话
+list_sessions(since="2026-09-01", writes_only=True, status="ok")  # 这个月真正改成过数据的会话
 list_sessions(keyword="orders")                          # 动过 orders 表的会话
-session_history(session_id="...", writes_only=True)      # 那次都改了什么、备注是什么
+session_history(session_id="...", writes_only=True, status="ok")  # 那次真正落地的改动
 session_history(session_id="...", limit=5, fields="sql") # 只把要看的那几条 SQL 原文取出来
 ```
 
@@ -116,6 +117,10 @@ session_history(session_id="...", limit=5, fields="sql") # 只把要看的那几
 - `list_sessions` 默认只列**当前 agent 自己**的会话（`all_agents=True` 才看别人的）；
   `since`/`until` 传 `YYYY-MM-DD` 或 ISO 时间，不带时区按**本地时间**算。
 - `keyword` 同时匹配会话名、简介和该会话跑过的 SQL——「哪次动过 orders 表」用它找最快。
+- **`status="ok"` = 真正执行成功的**。写操作首次提交（生成审批单那一下）记的是
+  `rejected`（还没落库），不加 status 会把它和真正执行的那条一起带出来；
+  查「上次到底改成了哪些」一律 `writes_only=True, status="ok"`。返回里的
+  `status_counts` 给出各结果各多少条，能看出还有没有被挡下（rejected）或出错（error）的。
 - `session_history` **默认只回精简列**（时间/工具/连接/状态/行数/审批单号/回滚备注），
   SQL 原文与错误明细不默认返回，避免几十条记录把上下文吃满；先扫一遍定位，
   再用 `limit` 收窄 + `fields="sql,detail"` 取全文。SQL 过长会截断，全文可在审批页看。

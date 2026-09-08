@@ -311,16 +311,18 @@ def build_mcp(service: DbmService) -> FastMCP:
             "项目/连接筛选，writes_only=True 只看改过数据的会话）找到会话，"
             "再用 session_history(session_id) 看那次会话的具体操作——写操作会带上审批单号与"
             "提交时写下的 rollback_note（改动前的值/回滚办法），据此可以拼出回滚 SQL；"
-            "它默认只回精简列，SQL 原文与错误明细要用 fields=\"sql,detail\" 显式点名才给。"
+            "它默认只回精简列，SQL 原文与错误明细要用 fields=\"sql,detail\" 显式点名才给；"
+            "只看真正落地的改动加 writes_only=True, status=\"ok\"。"
             "先用 list_projects / list_connections 找到目标连接，"
             "用 list_tables / describe_table / sample_rows 探索 schema。"
             "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
             "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
             "不要读取或把文件内容放入模型上下文。"
             "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
-            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：**改动可能需要回滚时，先用 "
-            "query 查出改动前的旧值，写进 execute 的 rollback_note 参数**（随审批单存下来，"
-            "审批人看得到，事后用 session_history 能取回）。首次提交会生成审批单，"
+            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：**你自己判断这次改动以后有没有"
+            "回溯/回滚的必要，认为有就先用 query 查出改动前的旧值、写进 rollback_note 参数**"
+            "（随审批单存下来，审批人看得到，事后用 session_history 能取回；"
+            "不必每次都写，无关紧要的改动留空即可）。首次提交会生成审批单，"
             "并在服务端等待人工决策——把返回的 approval_url 贴给用户让其点开审批，"
             "用户一批准本次调用就自动执行并返回 status=executed，不必让用户回来说「已批准」。"
             "若等待超时返回 status=approval_required，提醒用户后调 wait_for_change(change_id) "
@@ -430,6 +432,11 @@ def build_mcp(service: DbmService) -> FastMCP:
         ] = "",
         project: Annotated[str, Field(description="只看在这个项目上有操作的会话")] = "",
         connection: Annotated[str, Field(description="只看在这个连接上有操作的会话")] = "",
+        status: Annotated[
+            str, Field(description="按操作结果筛选：ok=执行成功 / rejected=被挡下未落库 / "
+                                   "error=执行出错；留空=不限。"
+                                   "配 writes_only=True 即「真正改成过数据的会话」")
+        ] = "",
         writes_only: Annotated[
             bool, Field(description="只列跑过写操作（改过数据）的会话")
         ] = False,
@@ -442,17 +449,19 @@ def build_mcp(service: DbmService) -> FastMCP:
 
         每条给出 session_id、begin_session 声明的 title/note、操作数 ops、写操作数 writes、
         首末时间；current=true 的那条是当前会话。可按时间窗（since/until）、关键词
-        （会话名/简介/跑过的 SQL，如某张表名）、项目/连接筛选，`writes_only=True` 只看
-        改过数据的会话。拿到 session_id 后用 session_history 看那次会话的具体操作。
+        （会话名/简介/跑过的 SQL，如某张表名）、项目/连接、结果状态筛选：
+        `writes_only=True, status="ok"` 就是「真正改成过数据的会话」。
+        拿到 session_id 后用 session_history 看那次会话的具体操作。
         没调过 begin_session 的会话也会列出来，只是 title 为空。
 
-        指定 project/connection 时，ops/writes/首末时间只统计该连接上的操作。
+        指定 project/connection/status 时，ops/writes/首末时间只统计符合条件的操作。
         """
         try:
             return service.list_agent_sessions(
                 _caller_from_ctx(ctx), limit, all_agents,
                 since=since, until=until, keyword=keyword,
-                project=project, connection=connection, writes_only=writes_only,
+                project=project, connection=connection, status=status,
+                writes_only=writes_only,
             )
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
@@ -466,6 +475,12 @@ def build_mcp(service: DbmService) -> FastMCP:
         writes_only: Annotated[
             bool, Field(description="只看写操作（execute / sync_write），排查改动时更省 token")
         ] = False,
+        status: Annotated[
+            str, Field(description="按结果筛选：ok=审批通过并真正执行成功 / "
+                                   "rejected=被挡下未落库（如首提生成审批单、被驳回/过期）/ "
+                                   "error=执行出错；留空=全都要。"
+                                   "查「上次到底改成了哪些」用 writes_only=True + status=ok")
+        ] = "",
         fields: Annotated[
             str, Field(description="要哪些列，逗号分隔。省略=精简列"
                                    "（ts,tool,connection,status,row_count,change_id,"
@@ -479,8 +494,13 @@ def build_mcp(service: DbmService) -> FastMCP:
         """回溯某个会话跑过的操作（最近在前），**写操作会带上审批单号与回滚备注**。
 
         用来回答「上次那批改动改了什么、还能不能改回去」：每条写操作返回 change_id、
-        approval_status，以及提交时写在 rollback_note 里的「改动前的值 / 回滚办法」。
-        据此可以自己拼出回滚 SQL，再走一次 execute（回滚同样需要人工审批）。
+        approval_status，以及提交时写在 rollback_note 里的「改动前的值 / 回滚办法」
+        （agent 自己判断有无回溯必要才写，可能为空）。据此可以自己拼出回滚 SQL，
+        再走一次 execute（回滚同样需要人工审批）。
+
+        **只看真正落地的改动用 `writes_only=True, status="ok"`**——首提生成审批单那条
+        记录是 rejected（还没落库），不加 status 会把它一起带出来。返回里的
+        status_counts 给出各结果各多少条，便于判断还有没有被挡下/出错的。
 
         默认只回精简列以省上下文——**SQL 原文与错误明细不会默认返回**；先用默认列扫一遍
         找到目标那几条，再用 `limit` 收窄 + `fields="sql,detail"` 取全文（SQL 超长会截断，
@@ -488,7 +508,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         """
         try:
             return service.session_history(
-                _caller_from_ctx(ctx), session_id, limit, writes_only, fields
+                _caller_from_ctx(ctx), session_id, limit, writes_only, status, fields
             )
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
@@ -531,7 +551,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             str, Field(description="回滚参考：改动前这些行/列是什么值、怎么改回去。"
                                    "先用 query 查出旧值再写在这里，如 "
                                    "`order 1001 status 改前=2；回滚 UPDATE orders SET status=2 "
-                                   "WHERE id=1001`。审批人能看到，事后也能用 session_history 取回")
+                                   "WHERE id=1001`。审批人能看到，事后也能用 session_history "
+                                   "取回。**由你自行判断是否需要**，无回滚价值的改动可留空")
         ] = "",
         change_id: Annotated[
             int | None, Field(description="已获批审批单号；批准后带上它重提相同 SQL 即可执行")
@@ -556,9 +577,10 @@ def build_mcp(service: DbmService) -> FastMCP:
         返回 status=rejected 时 reason 说明原因（被驳回/已过期/SQL 不一致），据此调整。
         只读语句会被直接执行。
 
-        **改动可能需要回滚时，先用 query 查出旧值，再把它写进 rollback_note**：它随审批单
-        一起存下来，审批人在审批页看得到，事后你（或另一个会话的 agent）用
-        session_history 就能取回「改前是什么值、怎么改回去」。
+        **你判断这次改动以后可能需要回滚时，先用 query 查出旧值，再写进 rollback_note**：
+        它随审批单一起存下来，审批人在审批页看得到，事后你（或另一个会话的 agent）用
+        session_history 就能取回「改前是什么值、怎么改回去」。要不要写由你自己判断，
+        无回滚价值的改动（如补日志、加索引）留空即可。
         """
         caller = _caller_from_ctx(ctx)
         run = partial(service.execute, project, connection, sql, caller, reason=reason,
