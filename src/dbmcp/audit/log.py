@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     status      TEXT NOT NULL,      -- ok / rejected / error
     detail      TEXT,               -- 拒绝原因或错误消息
     row_count   INTEGER,
-    duration_ms INTEGER
+    duration_ms INTEGER,
+    change_id   INTEGER            -- 关联的审批单号（写操作才有），供回溯改动与回滚备注
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
 CREATE INDEX IF NOT EXISTS idx_audit_conn ON audit_log (project, connection);
@@ -53,6 +54,31 @@ _WRITE_TOOLS = ("execute", "admin_execute", "admin_import", "admin_dcl",
                 "redis_command", "sync_write")
 
 
+def parse_time_filter(value: str | None, end_of_day: bool = False) -> str | None:
+    """把用户/agent 传的时间过滤值归一成可与 audit_log.ts 直接比较的 UTC ISO 串。
+
+    audit_log.ts 存的是 UTC ISO，而人和 agent 说的「2026-09-08」是**本地日期**，
+    直接拿去比会整体偏移一个时区（东八区会漏掉当天早 8 点前的记录）。
+    所以：不带时区的输入按本地时区解释再转 UTC；只给日期的补成当天 00:00:00
+    （end_of_day=True 时补 23:59:59.999，用于「截止到这一天」含当天）；
+    已带时区偏移的（如 2026-09-08T10:00:00+08:00）按其自身时区转 UTC。
+    """
+    value = (value or "").strip()
+    if not value:
+        return None
+    date_only = len(value) == 10
+    text = value + ("T23:59:59.999" if date_only and end_of_day else "T00:00:00" if date_only else "")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError as e:
+        raise ValueError(
+            f"时间格式无法解析: {value!r}（用 YYYY-MM-DD 或 ISO 时间，如 2026-09-08T10:00:00）"
+        ) from e
+    if dt.tzinfo is None:  # 无时区 = 本地时间
+        dt = dt.astimezone()
+    return dt.astimezone(UTC).isoformat(timespec="milliseconds")
+
+
 @dataclass
 class AuditRecord:
     project: str
@@ -68,6 +94,9 @@ class AuditRecord:
     detail: str = ""
     row_count: int | None = None
     duration_ms: int | None = None
+    # 关联审批单号：写操作生成审批单时、以及核销执行时都写上，
+    # 让「这条审计记录」能直接找回「那张审批单」（含回滚备注）。
+    change_id: int | None = None
 
 
 class AuditStore:
@@ -80,6 +109,10 @@ class AuditStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            # 老库迁移：change_id 是后加的列（CREATE TABLE IF NOT EXISTS 不会补列）
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(audit_log)")}
+            if "change_id" not in cols:
+                self._conn.execute("ALTER TABLE audit_log ADD COLUMN change_id INTEGER")
             self._conn.commit()
 
     def record(self, rec: AuditRecord) -> int:
@@ -87,8 +120,8 @@ class AuditStore:
             cur = self._conn.execute(
                 """INSERT INTO audit_log
                    (ts, agent, session_id, project, connection, environment, engine,
-                    tool, sql, fingerprint, status, detail, row_count, duration_ms)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tool, sql, fingerprint, status, detail, row_count, duration_ms, change_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     datetime.now(UTC).isoformat(timespec="milliseconds"),
                     rec.agent,
@@ -104,6 +137,7 @@ class AuditStore:
                     rec.detail,
                     rec.row_count,
                     rec.duration_ms,
+                    rec.change_id,
                 ),
             )
             self._conn.commit()
@@ -180,16 +214,63 @@ class AuditStore:
             )
             self._conn.commit()
 
-    def list_sessions(self, limit: int = 200, agent: str | None = None) -> list[dict]:
-        """列出有过操作的 agent 会话（供审计页会话筛选/回溯）。
+    def get_session(self, session_id: str) -> dict | None:
+        """取一个会话的登记信息（begin_session 声明的名字/简介）；没登记过返回 None。"""
+        if not session_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_session WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_sessions(
+        self,
+        limit: int = 200,
+        agent: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        keyword: str | None = None,
+        project: str | None = None,
+        connection: str | None = None,
+        only_with_writes: bool = False,
+    ) -> list[dict]:
+        """列出有过操作的 agent 会话（供审计页会话筛选与 agent 自查历史）。
 
         以 audit_log 里出现过的 session_id 为准（覆盖没调 begin_session 的会话），
         左连 agent_session 取名字/简介；带每会话操作数与首末时间，按最近活动倒序。
+
+        筛选条件都下推到 SQL：
+        - since/until：ISO 时间串（UTC，与返回的 ts 同一时区），按操作时间过滤；
+        - project/connection：只保留在该项目/连接上有过操作的会话，且 ops/writes/首末时间
+          都只统计该项目/连接上的操作（「我在这个库上做过什么」这个问法的自然语义）；
+        - keyword：模糊匹配会话名、简介，或该会话跑过的任意一条 SQL；
+        - only_with_writes：只保留跑过写操作（需审批的那类工具）的会话。
         """
-        clause, params = "a.session_id <> ''", []
-        if agent:
-            clause += " AND a.agent = ?"
-            params.append(agent)
+        marks = ",".join("?" * len(_WRITE_TOOLS))
+        clauses, params = ["a.session_id <> ''"], []
+        for col, val in (("a.agent", agent), ("a.project", project),
+                         ("a.connection", connection)):
+            if val:
+                clauses.append(f"{col} = ?")
+                params.append(val)
+        if since:
+            clauses.append("a.ts >= ?")
+            params.append(since)
+        if until:
+            clauses.append("a.ts <= ?")
+            params.append(until)
+        if keyword:
+            like = f"%{keyword}%"
+            # SQL 命中用相关子查询而不是直接进 WHERE：否则会把不匹配的行过滤掉，
+            # 使 ops/writes 只数到「含关键词的那几条」，与「这个会话有多大」的语义不符。
+            clauses.append(
+                "(s.title LIKE ? OR s.note LIKE ?"
+                " OR EXISTS (SELECT 1 FROM audit_log x"
+                "            WHERE x.session_id = a.session_id AND x.sql LIKE ?))"
+            )
+            params.extend([like, like, like])
+        having = " HAVING writes > 0" if only_with_writes else ""
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT a.session_id                    AS session_id,
@@ -197,14 +278,14 @@ class AuditStore:
                            s.title                         AS title,
                            s.note                          AS note,
                            COUNT(*)                        AS ops,
-                           SUM(CASE WHEN a.tool IN ({",".join("?" * len(_WRITE_TOOLS))})
+                           SUM(CASE WHEN a.tool IN ({marks})
                                     THEN 1 ELSE 0 END)     AS writes,
                            MIN(a.ts)                       AS first_ts,
                            MAX(a.ts)                       AS last_ts
                     FROM audit_log a
                     LEFT JOIN agent_session s ON s.session_id = a.session_id
-                    WHERE {clause}
-                    GROUP BY a.session_id
+                    WHERE {" AND ".join(clauses)}
+                    GROUP BY a.session_id{having}
                     ORDER BY last_ts DESC
                     LIMIT ?""",
                 (*_WRITE_TOOLS, *params, limit),

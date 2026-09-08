@@ -209,7 +209,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 ## 写操作的审批流程
 
 1. agent 调 `execute` 提交写 SQL。服务端评估风险、生成审批单，**当次调用就地等待**（默认 120 秒），并把 `approval_url` 回给 agent。
-2. 人点开会话里的链接（或 `/admin/approvals`）看风险报告，批准或拒绝。也可以在会话内 elicitation，或用 CLI（`dbm approvals` / `approve` / `reject`）。后台有「批准并立即执行」：人点一次当场落地。
+2. 人点开会话里的链接（或 `/admin/approvals`）看风险报告与 agent 写的「回滚参考」（改动前的旧值/回滚办法），批准或拒绝。也可以在会话内 elicitation，或用 CLI（`dbm approvals` / `approve` / `reject`）。后台有「批准并立即执行」：人点一次当场落地。
 3. 等待中的调用在批准后**自动执行审批单里存的 SQL**，返回 `status=executed`。不必让用户回到对话里说「已批准」，也不必 agent 再重提一次。重提文本只做指纹校验，不一致即拒绝。
 4. 等待超时返回 `approval_required`：审批单仍有效（60 分钟），agent 调 `wait_for_change` 续等。被拒绝时理由回给 agent，供其改完再提交。
 

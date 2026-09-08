@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from .approvals import KIND_SYNC, ApprovalError, ApprovalStore
 from .audit.classify import classify, fingerprint
-from .audit.log import AuditRecord, AuditStore
+from .audit.log import AuditRecord, AuditStore, parse_time_filter
 from .audit.redis_rules import classify_command, command_fingerprint, parse_command
 from .audit.risk import assess
 from .config import AppConfig, ConnectionConfig
@@ -232,6 +232,8 @@ def change_status_payload(change) -> dict:
         "decision_note": change.decision_note,
         "expires_at": change.expires_at,
     }
+    if change.rollback_note:
+        payload["rollback_note"] = change.rollback_note
     if change.exec_result:
         payload["exec_result"] = change.exec_result
     return payload
@@ -301,6 +303,146 @@ class DbmService:
             # session_id 为空时（如某些 stdio 客户端无会话 id）无法按会话归类，明确告知
             "note": "" if sid else "当前客户端未提供会话 id，本次会话的 SQL 将无法按会话归类回溯",
         }
+
+    # 一条操作可回传的列。默认只给「回溯所需的骨架」——SQL 原文与错误明细都很占
+    # 上下文（一次会话几十条就能吃掉几千 token），agent 认准了哪几条再用 fields 取。
+    HISTORY_DEFAULT_FIELDS = ("ts", "tool", "connection", "status", "row_count",
+                              "change_id", "approval_status", "rollback_note")
+    HISTORY_ALL_FIELDS = HISTORY_DEFAULT_FIELDS + (
+        "sql", "detail", "duration_ms", "environment", "agent", "fingerprint")
+    # 单条记录里 SQL 的回传上限：写操作 SQL 通常很短，长的多半是批量迁移脚本，
+    # 截断后给出提示，需要全文可以去审批页/审计页看。
+    HISTORY_SQL_MAX_CHARS = 2000
+
+    def _history_fields(self, fields: str) -> tuple[str, ...]:
+        """解析 fields 入参：空=默认精简列，all=全部，否则按名字取（校验白名单）。"""
+        raw = (fields or "").strip()
+        if not raw:
+            return self.HISTORY_DEFAULT_FIELDS
+        if raw.lower() == "all":
+            return self.HISTORY_ALL_FIELDS
+        wanted = [f.strip() for f in raw.split(",") if f.strip()]
+        unknown = [f for f in wanted if f not in self.HISTORY_ALL_FIELDS]
+        if unknown:
+            raise ValueError(
+                f"不支持的字段 {unknown}；可选: {', '.join(self.HISTORY_ALL_FIELDS)}（或 all）"
+            )
+        return tuple(wanted)
+
+    def list_agent_sessions(
+        self,
+        caller: CallerInfo,
+        limit: int = 20,
+        all_agents: bool = False,
+        since: str = "",
+        until: str = "",
+        keyword: str = "",
+        project: str = "",
+        connection: str = "",
+        writes_only: bool = False,
+    ) -> list[dict]:
+        """列出跑过 SQL 的历史会话（默认只列当前 agent 自己的），最近活动在前。
+
+        供 agent 回溯「我上次/前几次都做了什么」：先在这里按日期/关键词/连接找到目标会话，
+        再用 session_history(session_id) 看那次会话的具体操作。
+        since/until 支持 `YYYY-MM-DD` 或 ISO 时间，不带时区时按本地时区解释。
+        """
+        rows = self.store.list_sessions(
+            limit=limit,
+            agent=None if all_agents else (caller.agent or None),
+            since=parse_time_filter(since),
+            until=parse_time_filter(until, end_of_day=True),
+            keyword=keyword or None,
+            project=project or None,
+            connection=connection or None,
+            only_with_writes=writes_only,
+        )
+        return [
+            {
+                "session_id": r["session_id"],
+                # 没调过 begin_session 的会话没有名字，用空串而不是 None
+                "title": r["title"] or "",
+                "note": r["note"] or "",
+                "agent": r["agent"] or "",
+                "ops": r["ops"],
+                "writes": r["writes"],
+                "first_ts": r["first_ts"],
+                "last_ts": r["last_ts"],
+                "current": r["session_id"] == caller.session_id,
+            }
+            for r in rows
+        ]
+
+    def session_history(
+        self, caller: CallerInfo, session_id: str = "", limit: int = 50,
+        writes_only: bool = False, fields: str = "",
+    ) -> dict:
+        """回溯某个会话跑过的操作（最近在前），写操作带上其审批单与回滚备注。
+
+        session_id 省略即当前会话。写操作（execute/sync_write）通过审计记录上的
+        change_id 关联回审批单，返回审批状态与提交时写下的 rollback_note——
+        「这次改动前是什么值、怎么回滚」就在那里。
+
+        默认只回精简列（见 HISTORY_DEFAULT_FIELDS）：SQL 原文与错误明细不默认返回，
+        免得几十条记录把上下文吃满；要看时用 fields 显式点名（如 "sql,detail" 或 "all"）。
+        """
+        sid = (session_id or caller.session_id or "").strip()
+        if not sid:
+            raise ValueError(
+                "未指定 session_id，且当前客户端没有提供会话 id；"
+                "请先用 list_sessions 找到目标会话，再把 session_id 传进来"
+            )
+        want = self._history_fields(fields)
+        filters = {"session_id": sid}
+        if writes_only:
+            filters["rw"] = "write"
+        rows = self.store.recent(limit=limit, filters=filters)
+        # 关联审批单只在真要用到审批信息时查，省一次库
+        changes = {}
+        if self.approvals is not None and {"approval_status", "rollback_note"} & set(want):
+            changes = self.approvals.get_many(r["change_id"] for r in rows)
+
+        ops = []
+        for r in rows:
+            change = changes.get(r["change_id"])
+            full = {
+                "ts": r["ts"],
+                "tool": r["tool"],
+                "connection": f"{r['project']}/{r['connection']}",
+                "environment": r["environment"] or "",
+                "agent": r["agent"] or "",
+                "status": r["status"],
+                "row_count": r["row_count"],
+                "duration_ms": r["duration_ms"],
+                "detail": r["detail"] or "",
+                "fingerprint": r["fingerprint"] or "",
+                "sql": self._clip_history_sql(r["sql"] or ""),
+                "change_id": r["change_id"],
+                "approval_status": change.effective_status() if change else "",
+                "rollback_note": change.rollback_note if change else "",
+            }
+            # 空值不占位（None/空串一律省掉），只留真正有内容的列
+            ops.append({k: full[k] for k in want if full[k] not in (None, "")})
+
+        meta = self.store.get_session(sid) or {}
+        out = {
+            "session_id": sid,
+            "title": meta.get("title") or "",
+            "note": meta.get("note") or "",
+            "operations": ops,
+            "count": len(ops),
+            "fields": list(want),
+            "order": "最近在前",
+        }
+        if fields.strip().lower() not in ("all",) and "sql" not in want:
+            out["hint"] = ('默认不返回 SQL 原文与错误明细；需要时用 '
+                           'fields="sql,detail"（或 all）单独取，建议配合 limit 收窄')
+        return out
+
+    def _clip_history_sql(self, sql: str) -> str:
+        if len(sql) <= self.HISTORY_SQL_MAX_CHARS:
+            return sql
+        return sql[: self.HISTORY_SQL_MAX_CHARS] + "…（已截断）"
 
     def list_projects(self) -> list[dict]:
         # 对 agent 隐藏 Redis 连接（Redis 只供人通过 /admin/redis 操作）；
@@ -1399,6 +1541,7 @@ class DbmService:
         caller: CallerInfo,
         reason: str = "",
         change_id: int | None = None,
+        rollback_note: str = "",
     ) -> dict:
         """写操作统一入口。
 
@@ -1423,7 +1566,8 @@ class DbmService:
             self._syntax_precheck(project, connection, cfg, sql, caller, "execute")
         if verdict.readonly:
             return {"status": "executed", "readonly": True, **self.query(project, connection, sql, caller)}
-        return self._request_approval(project, connection, cfg, sql, reason, caller)
+        return self._request_approval(project, connection, cfg, sql, reason, caller,
+                                      rollback_note=rollback_note)
 
     def _request_approval(
         self,
@@ -1433,6 +1577,7 @@ class DbmService:
         sql: str,
         reason: str,
         caller: CallerInfo,
+        rollback_note: str = "",
     ) -> dict:
         report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
         report_dict = report.to_dict()
@@ -1451,8 +1596,10 @@ class DbmService:
             risk_report=report_dict,
             agent=caller.agent,
             session_id=caller.session_id,
+            rollback_note=rollback_note,
         )
         rec = self._base_record(project, connection, cfg, "execute", sql, caller)
+        rec.change_id = change.id
         rec.status = "rejected"
         rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {report.level}）"
         self.store.record(rec)
@@ -1499,6 +1646,7 @@ class DbmService:
         caller: CallerInfo,
     ) -> dict:
         rec = self._base_record(project, connection, cfg, "execute", sql, caller)
+        rec.change_id = change_id
         # 同步型审批单存的是计划而非可执行 SQL，走这条路会把计划文本当 SQL 发给 DB
         if self.approvals.get(change_id).kind == KIND_SYNC:
             return {"status": "rejected", "change_id": change_id,
@@ -1759,6 +1907,7 @@ class DbmService:
         change = self._create_sync_change(spec, plan, reason, caller)
         rec = self._base_record(spec.target_project, spec.target_connection, dst,
                                 "sync_write", plan["plan_text"], caller)
+        rec.change_id = change.id
         rec.status = "rejected"
         rec.detail = f"需人工授权，已生成同步审批单 #{change.id}（风险 {plan['risk']['level']}）"
         self.store.record(rec)
@@ -1827,6 +1976,7 @@ class DbmService:
 
         rec = self._base_record(spec.target_project, spec.target_connection, dst_cfg,
                                 "sync_write", change.sql, caller)
+        rec.change_id = change.id
         steps: list[dict] = []
         started = time.monotonic()
         try:

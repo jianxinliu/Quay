@@ -1540,6 +1540,12 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         reasons = "".join(f"<li>{_esc(r)}</li>" for r in risk.get("reasons", []))
         warnings = "".join(f"<li>⚠️ {_esc(w)}</li>" for w in risk.get("warnings", []))
 
+        # agent 提交时写下的「改动前是什么值 / 怎么回滚」——审批人判断可回滚性的关键信息
+        rollback_row = (
+            f"<dt>回滚参考</dt><dd><pre style='margin:0'>{_esc(c.rollback_note)}</pre></dd>"
+            if c.rollback_note else ""
+        )
+
         actions = ""
         if st == "pending":
             actions = f"""
@@ -1582,6 +1588,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
   <dt>提交 agent</dt><dd>{_esc(c.agent)}</dd>
   <dt>提交时间</dt><dd>{_esc(_fmt_ts(c.created_at))} · 有效期至 {_esc(_fmt_ts(c.expires_at))}</dd>
   <dt>变更原因</dt><dd>{_esc(c.reason) or '—'}</dd>
+  {rollback_row}
  </dl>
  <div class="sec-title">{"同步计划" if c.kind == "sync" else "SQL"}</div><pre>{_esc(c.sql)}</pre>
 </div>

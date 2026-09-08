@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS change_request (
     kind         TEXT NOT NULL DEFAULT 'sql',  -- sql（单/多语句）| sync（表同步计划）
     payload      TEXT,                -- JSON：kind=sync 时存 SyncSpec + 建表语句
     reason       TEXT,
+    rollback_note TEXT,               -- agent 提交时写的「改动前是什么/怎么回滚」备注
     risk_level   TEXT,
     risk_report  TEXT,                -- JSON
     agent        TEXT,
@@ -76,6 +77,9 @@ class ChangeRequest:
     agent: str
     session_id: str
     status: str
+    # 回滚参考：agent 提交写操作时记下的「改动前的数值 / 怎么回滚」，
+    # 审批人在审批页看得到，事后 agent 也能用 session_history 取回来据以回滚。
+    rollback_note: str = ""
     kind: str = KIND_SQL
     payload: dict | None = None  # kind=sync 的结构化计划（SyncSpec + ddl_sql + columns）
     decided_by: str = ""
@@ -118,6 +122,8 @@ class ApprovalStore:
                     f"ALTER TABLE change_request ADD COLUMN kind TEXT NOT NULL DEFAULT '{KIND_SQL}'")
             if "payload" not in cols:
                 self._conn.execute("ALTER TABLE change_request ADD COLUMN payload TEXT")
+            if "rollback_note" not in cols:
+                self._conn.execute("ALTER TABLE change_request ADD COLUMN rollback_note TEXT")
             self._conn.commit()
 
     def create(
@@ -134,6 +140,7 @@ class ApprovalStore:
         risk_report: dict,
         agent: str,
         session_id: str,
+        rollback_note: str = "",
         kind: str = KIND_SQL,
         payload: dict | None = None,
     ) -> ChangeRequest:
@@ -144,8 +151,8 @@ class ApprovalStore:
                 """INSERT INTO change_request
                    (created_at, expires_at, project, connection, environment, engine,
                     sql, fingerprint, reason, risk_level, risk_report, agent, session_id, status,
-                    kind, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rollback_note, kind, payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     now.isoformat(timespec="seconds"),
                     expires.isoformat(timespec="seconds"),
@@ -161,6 +168,7 @@ class ApprovalStore:
                     agent,
                     session_id,
                     STATUS_PENDING,
+                    rollback_note,
                     kind,
                     json.dumps(payload, ensure_ascii=False) if payload else None,
                 ),
@@ -190,6 +198,21 @@ class ApprovalStore:
                     "SELECT * FROM change_request ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
         return [self._row_to_change(r) for r in rows]
+
+    def get_many(self, change_ids) -> dict[int, ChangeRequest]:
+        """批量取审批单（供审计记录回溯时一次拿齐关联的审批单，避免逐条查库）。
+
+        不存在的 id 直接不出现在结果里（调用方按缺失处理，不报错）。
+        """
+        ids = sorted({int(i) for i in change_ids if i})
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM change_request WHERE id IN ({marks})", ids
+            ).fetchall()
+        return {int(r["id"]): self._row_to_change(r) for r in rows}
 
     def approve(self, change_id: int, decided_by: str, note: str = "") -> ChangeRequest:
         return self._decide(change_id, STATUS_APPROVED, decided_by, note)
@@ -301,6 +324,7 @@ class ApprovalStore:
             agent=row["agent"] or "",
             session_id=row["session_id"] or "",
             status=row["status"],
+            rollback_note=row["rollback_note"] or "",
             kind=row["kind"] or KIND_SQL,
             payload=json.loads(row["payload"]) if row["payload"] else None,
             decided_by=row["decided_by"] or "",
