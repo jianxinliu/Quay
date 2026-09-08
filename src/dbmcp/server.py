@@ -307,13 +307,20 @@ def build_mcp(service: DbmService) -> FastMCP:
         instructions=(
             "统一的数据库访问服务。开始跑 SQL 前，建议先调 begin_session(title, note) 声明本次"
             "会话的名字和背景，之后本会话跑过的 SQL 会在后台按此会话归类、方便人回溯。"
+            "要回顾自己以前做过什么，用 list_sessions（可按日期 since/until、关键词、"
+            "项目/连接筛选，writes_only=True 只看改过数据的会话）找到会话，"
+            "再用 session_history(session_id) 看那次会话的具体操作——写操作会带上审批单号与"
+            "提交时写下的 rollback_note（改动前的值/回滚办法），据此可以拼出回滚 SQL；"
+            "它默认只回精简列，SQL 原文与错误明细要用 fields=\"sql,detail\" 显式点名才给。"
             "先用 list_projects / list_connections 找到目标连接，"
             "用 list_tables / describe_table / sample_rows 探索 schema。"
             "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
             "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
             "不要读取或把文件内容放入模型上下文。"
             "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
-            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：首次提交会生成审批单，"
+            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：**改动可能需要回滚时，先用 "
+            "query 查出改动前的旧值，写进 execute 的 rollback_note 参数**（随审批单存下来，"
+            "审批人看得到，事后用 session_history 能取回）。首次提交会生成审批单，"
             "并在服务端等待人工决策——把返回的 approval_url 贴给用户让其点开审批，"
             "用户一批准本次调用就自动执行并返回 status=executed，不必让用户回来说「已批准」。"
             "若等待超时返回 status=approval_required，提醒用户后调 wait_for_change(change_id) "
@@ -409,6 +416,84 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise agent_error(e) from e
 
     @mcp.tool
+    def list_sessions(
+        limit: Annotated[int, Field(ge=1, le=100, description="最多列多少个会话")] = 20,
+        since: Annotated[
+            str, Field(description="起始时间，`YYYY-MM-DD` 或 ISO 时间；不带时区按本地时间算")
+        ] = "",
+        until: Annotated[
+            str, Field(description="截止时间，`YYYY-MM-DD`（含当天）或 ISO 时间")
+        ] = "",
+        keyword: Annotated[
+            str, Field(description="模糊匹配会话名、简介，或该会话跑过的任意一条 SQL"
+                                   "（如表名 `orders`）")
+        ] = "",
+        project: Annotated[str, Field(description="只看在这个项目上有操作的会话")] = "",
+        connection: Annotated[str, Field(description="只看在这个连接上有操作的会话")] = "",
+        writes_only: Annotated[
+            bool, Field(description="只列跑过写操作（改过数据）的会话")
+        ] = False,
+        all_agents: Annotated[
+            bool, Field(description="默认只列当前 agent 自己的会话；True 则列出所有 agent 的")
+        ] = False,
+        ctx: Context | None = None,
+    ) -> list[dict]:
+        """查自己过去的工作会话（最近活动在前），用于回溯「之前都做了什么」。
+
+        每条给出 session_id、begin_session 声明的 title/note、操作数 ops、写操作数 writes、
+        首末时间；current=true 的那条是当前会话。可按时间窗（since/until）、关键词
+        （会话名/简介/跑过的 SQL，如某张表名）、项目/连接筛选，`writes_only=True` 只看
+        改过数据的会话。拿到 session_id 后用 session_history 看那次会话的具体操作。
+        没调过 begin_session 的会话也会列出来，只是 title 为空。
+
+        指定 project/connection 时，ops/writes/首末时间只统计该连接上的操作。
+        """
+        try:
+            return service.list_agent_sessions(
+                _caller_from_ctx(ctx), limit, all_agents,
+                since=since, until=until, keyword=keyword,
+                project=project, connection=connection, writes_only=writes_only,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+
+    @mcp.tool
+    def session_history(
+        session_id: Annotated[
+            str, Field(description="要回溯的会话 id（来自 list_sessions）；省略=当前会话")
+        ] = "",
+        limit: Annotated[int, Field(ge=1, le=200, description="最多回多少条操作")] = 50,
+        writes_only: Annotated[
+            bool, Field(description="只看写操作（execute / sync_write），排查改动时更省 token")
+        ] = False,
+        fields: Annotated[
+            str, Field(description="要哪些列，逗号分隔。省略=精简列"
+                                   "（ts,tool,connection,status,row_count,change_id,"
+                                   "approval_status,rollback_note）；"
+                                   "**SQL 原文与错误明细默认不返回**，要看就点名 "
+                                   "`sql` / `detail`；`all` = 全部列。"
+                                   "可选：sql,detail,duration_ms,environment,agent,fingerprint")
+        ] = "",
+        ctx: Context | None = None,
+    ) -> dict:
+        """回溯某个会话跑过的操作（最近在前），**写操作会带上审批单号与回滚备注**。
+
+        用来回答「上次那批改动改了什么、还能不能改回去」：每条写操作返回 change_id、
+        approval_status，以及提交时写在 rollback_note 里的「改动前的值 / 回滚办法」。
+        据此可以自己拼出回滚 SQL，再走一次 execute（回滚同样需要人工审批）。
+
+        默认只回精简列以省上下文——**SQL 原文与错误明细不会默认返回**；先用默认列扫一遍
+        找到目标那几条，再用 `limit` 收窄 + `fields="sql,detail"` 取全文（SQL 超长会截断，
+        全文可在审批页查看）。
+        """
+        try:
+            return service.session_history(
+                _caller_from_ctx(ctx), session_id, limit, writes_only, fields
+            )
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+
+    @mcp.tool
     def query(
         project: str,
         connection: str,
@@ -442,6 +527,12 @@ def build_mcp(service: DbmService) -> FastMCP:
                                   "支持多语句批量（分号分隔，如 ALTER + 回填 UPDATE 的迁移），"
                                   "整批一次审批、按语句拆开在同一事务逐条执行")],
         reason: Annotated[str, Field(description="变更原因，供审批人参考")] = "",
+        rollback_note: Annotated[
+            str, Field(description="回滚参考：改动前这些行/列是什么值、怎么改回去。"
+                                   "先用 query 查出旧值再写在这里，如 "
+                                   "`order 1001 status 改前=2；回滚 UPDATE orders SET status=2 "
+                                   "WHERE id=1001`。审批人能看到，事后也能用 session_history 取回")
+        ] = "",
         change_id: Annotated[
             int | None, Field(description="已获批审批单号；批准后带上它重提相同 SQL 即可执行")
         ] = None,
@@ -464,9 +555,14 @@ def build_mcp(service: DbmService) -> FastMCP:
         用户一次，然后调 wait_for_change(change_id) 继续等即可（审批单 60 分钟内有效）。
         返回 status=rejected 时 reason 说明原因（被驳回/已过期/SQL 不一致），据此调整。
         只读语句会被直接执行。
+
+        **改动可能需要回滚时，先用 query 查出旧值，再把它写进 rollback_note**：它随审批单
+        一起存下来，审批人在审批页看得到，事后你（或另一个会话的 agent）用
+        session_history 就能取回「改前是什么值、怎么改回去」。
         """
         caller = _caller_from_ctx(ctx)
-        run = partial(service.execute, project, connection, sql, caller, reason=reason)
+        run = partial(service.execute, project, connection, sql, caller, reason=reason,
+                      rollback_note=rollback_note)
         # 首提、等待期间的批准后执行都在同一个 try 内：批准后真正落库时才暴露的 DB 错误
         # （锁超时、约束冲突等）同样必须走 agent_error 翻译，不能裸奔到传输层。
         try:

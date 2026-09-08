@@ -23,11 +23,13 @@ DeepSeek Harness 会把工具注册成 `mcp__<serverName>__<原名>`（例如 `m
 | 场景 | 工具 | 说明 |
 |---|---|---|
 | 声明会话 | `begin_session(title, note?)` | 开始跑 SQL 前调一次，登记本次会话的名字/背景，之后本会话的 SQL 在后台按会话归类、便于人回溯 |
+| 回溯自己 | `list_sessions(since?, until?, keyword?, project?, connection?, writes_only?, limit?)` | 查自己过去的工作会话（可按日期/关键词/连接筛选），找到「上次是哪一次」 |
+| 回溯改动 | `session_history(session_id?, writes_only?, fields?, limit?)` | 看某次会话跑过的操作；写操作带审批单号与 `rollback_note`（改动前的值/怎么回滚）。**默认不返回 SQL 原文与错误明细**，要看用 `fields="sql,detail"` |
 | 发现 | `list_projects` / `list_connections` | 找到目标连接（项目 → 连接） |
 | 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
 | 数据导出 | `export_table(project, connection, table, fields?, limit?, format?, database?)` | 按库、表、字段和行数导出 CSV/JSON/Markdown/XLSX 文件 |
-| 数据变更 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` + `wait_for_change(change_id)` / `get_change_status(change_id)` | 提交后就地等人批准、批准即自动执行，见下 |
+| 数据变更 | `execute(project, connection, sql, reason?, rollback_note?, change_id?, wait_seconds?)` + `wait_for_change(change_id)` / `get_change_status(change_id)` | 提交后就地等人批准、批准即自动执行，见下 |
 | 表同步 | `sync_table(source_project, source_connection, source_table, target_project, target_connection, ...)` | 把一张表从一个库同步到另一个库（线上 → 本地），结构 + 少量数据，同 execute 走审批，见下 |
 | 连通性 | `test_connection(project, connection)` | SELECT 1 |
 | 跨源分析 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 本地沙箱，见下 |
@@ -88,6 +90,35 @@ execute(sql) → 生成审批单，服务端就地等待人工决策（默认 12
 - 手动重提时必须是**同一条 SQL**（指纹校验，不一致直接拒）；真正执行的永远是审批单里存的 SQL。
 - 审批单 60 分钟过期、一次性核销。prod 环境强制走审批，没有捷径。
 - 客户端支持 elicitation 时（local/dev 环境），批准动作可能直接弹到会话里。
+- **可能要回滚的改动，先查旧值再写进 `rollback_note`**：
+
+  ```
+  query("SELECT id, status FROM orders WHERE id IN (1001, 1002)")   # 先拿到旧值
+  execute(sql="UPDATE orders SET status = 3 WHERE id IN (1001, 1002)",
+          reason="修复卡单",
+          rollback_note="改前 1001.status=2, 1002.status=2；"
+                        "回滚 UPDATE orders SET status=2 WHERE id IN (1001,1002)")
+  ```
+
+  这段备注随审批单存下来：审批人在审批页看得到（便于判断可回滚性），事后你或另一个
+  会话的 agent 用 `session_history` 就能取回来，据此拼出回滚 SQL（回滚同样走审批）。
+
+### 2.2 回溯以前做过什么（`list_sessions` / `session_history`）
+
+```
+list_sessions(since="2026-09-01", writes_only=True)      # 这个月我改过数据的会话
+list_sessions(keyword="orders")                          # 动过 orders 表的会话
+session_history(session_id="...", writes_only=True)      # 那次都改了什么、备注是什么
+session_history(session_id="...", limit=5, fields="sql") # 只把要看的那几条 SQL 原文取出来
+```
+
+要点：
+- `list_sessions` 默认只列**当前 agent 自己**的会话（`all_agents=True` 才看别人的）；
+  `since`/`until` 传 `YYYY-MM-DD` 或 ISO 时间，不带时区按**本地时间**算。
+- `keyword` 同时匹配会话名、简介和该会话跑过的 SQL——「哪次动过 orders 表」用它找最快。
+- `session_history` **默认只回精简列**（时间/工具/连接/状态/行数/审批单号/回滚备注），
+  SQL 原文与错误明细不默认返回，避免几十条记录把上下文吃满；先扫一遍定位，
+  再用 `limit` 收窄 + `fields="sql,detail"` 取全文。SQL 过长会截断，全文可在审批页看。
 
 ### 2.5 把线上表同步到本地（`sync_table`）
 
