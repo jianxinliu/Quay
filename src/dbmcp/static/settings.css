@@ -1,0 +1,186 @@
+/* 系统设置页。只在 /admin/settings 加载。
+
+   这一页不是「偏好面板」，是**护栏控制台**——这里的旋钮决定 agent 能拿走多少数据、
+   写操作要不要人批、密钥存在哪。所以版式要回答的两个问题是：
+   「这是什么」和「它现在是多少」。
+
+   做法是账本式的两栏行（左：名字 + 一句话后果；右：控件 + 换算后的读数），
+   而不是一摞长得一样的卡片——后者会让「编辑器字号」和「会话结果配额」看起来同样重要。
+
+   配色刻意沿用产品既有的青色品牌色，只新增一个琥珀色，且**只**用于标记护栏区：
+   设置页与查询台/看板是同一个产品，换一套调色板只会让它像另一个应用；
+   差异化放在结构上。 */
+
+.set-page{--guard:#b45309;--guard-soft:#fffbeb;max-width:920px}
+/* 表格型 tab 要更宽：正文要控行长，表格不用 */
+.set-page.wide{max-width:1200px}
+/* 两字表头别折行——「地 / 址」读起来像两个字段 */
+.set-page table th{white-space:nowrap}
+
+/* ---------- 页头与分区导航 ---------- */
+.set-head{display:flex;align-items:flex-end;gap:20px;flex-wrap:wrap;margin-bottom:18px}
+.set-head h2{font-size:22px;margin:0 0 3px}
+.set-head .sub{color:var(--muted);font-size:13px}
+.set-head .spacer{flex:1}
+
+/* 搜索：15 个旋钮里找一个，比在四个 tab 之间来回翻快得多 */
+.set-search{position:relative}
+.set-search input{width:230px;padding-left:31px;border-radius:9px;background:var(--surface)}
+.set-search::before{content:"";position:absolute;left:11px;top:50%;width:13px;height:13px;
+  transform:translateY(-50%);background-color:var(--faint);pointer-events:none;
+  -webkit-mask-image:var(--ico-search);mask-image:var(--ico-search);
+  -webkit-mask-size:contain;mask-size:contain;-webkit-mask-repeat:no-repeat;mask-repeat:no-repeat}
+.set-page{--ico-search:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.6' stroke-linecap='round'><circle cx='7' cy='7' r='4.6'/><path d='m10.6 10.6 3 3'/></svg>")}
+
+/* 分组的分区条：八个 tab 平铺成一行读不出关系，按「偏好 / 能力 / 资源 / 系统」分组，
+   组间一根发丝竖线。分组本身就是信息。 */
+.set-nav{display:flex;align-items:center;gap:3px;flex-wrap:wrap;
+  border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:22px}
+.set-nav .grp{display:flex;gap:3px}
+.set-nav .sep{width:1px;height:16px;background:var(--border);margin:0 9px}
+.set-nav a{padding:6px 12px;border-radius:8px;color:var(--muted);font-size:13.5px;
+  text-decoration:none;transition:background .12s,color .12s;white-space:nowrap}
+.set-nav a:hover{background:#eceef1;color:var(--text);text-decoration:none}
+.set-nav a.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+
+/* ---------- 分区面板 ---------- */
+.set-sec{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:2px 22px 4px;margin-bottom:16px}
+.set-sec>header{padding:18px 0 14px}
+.set-sec>header h3{font-size:15px;font-weight:600;color:var(--text);margin:0}
+.set-sec>header p{margin:5px 0 0;color:var(--muted);font-size:12.5px;line-height:1.5;max-width:62ch}
+
+/* 护栏区：左边一道琥珀窄条 + 极淡的底。改错护栏有后果，改错字号没有——
+   这个区别应该由版式说出来，而不是靠使用者读完每一段说明才明白。 */
+.set-sec.guard{border-color:#f3ddb4;background:linear-gradient(90deg,var(--guard-soft),var(--surface) 320px)}
+.set-sec.guard>header{position:relative}
+.set-sec.guard>header h3::before{content:"";position:absolute;left:-22px;top:19px;bottom:14px;
+  width:3px;border-radius:0 3px 3px 0;background:var(--guard)}
+
+/* 收起的分区：标题整块可点。给提示词这类「几十行文本框、平时不看」的内容用。 */
+.set-sec.fold>details>summary{padding:18px 0 14px;cursor:pointer;list-style:none;
+  display:flex;flex-direction:column;position:relative}
+.set-sec.fold>details>summary::-webkit-details-marker{display:none}
+.set-sec.fold>details>summary::after{content:"";position:absolute;right:2px;top:26px;
+  width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;
+  border-top:6px solid var(--faint);transition:transform .15s}
+.set-sec.fold>details[open]>summary::after{transform:rotate(180deg)}
+.set-sec.fold>details>summary h3{font-size:15px;font-weight:600;color:var(--text);margin:0}
+.set-sec.fold>details>summary p{margin:5px 0 0;color:var(--muted);font-size:12.5px;
+  line-height:1.5;max-width:62ch}
+.set-sec.fold>details>summary:hover h3{color:var(--accent-ink)}
+
+/* ---------- 账本行 ---------- */
+.set-row{display:grid;grid-template-columns:1fr 240px;gap:14px 24px;align-items:start;
+  padding:15px 0;border-top:1px solid var(--line)}
+.set-sec.guard .set-row{border-top-color:#f0e3cd}
+.set-row .nm{font-size:14px;font-weight:500;color:var(--text);margin:0;display:flex;
+  align-items:center;gap:8px;flex-wrap:wrap}
+.set-row .desc{margin:5px 0 0;color:var(--muted);font-size:12.5px;line-height:1.55;max-width:62ch}
+.set-row .desc b{color:var(--text);font-weight:600}
+.set-row .desc code{background:#f1f3f5;padding:1px 5px;border-radius:4px;font-size:12px}
+.set-row .ctl{justify-self:end;text-align:right;width:240px}
+/* 数字 + 单位并排：单位是数字的一部分（「40000 字符」），不该掉到下一行去 */
+.set-row .ctl:has(.unit){display:flex;flex-wrap:wrap;justify-content:flex-end;
+  align-items:center;gap:8px}
+.set-row .ctl .unit{font-size:12.5px;color:var(--muted);flex:none}
+.set-row .ctl:has(.unit) input[type=number]{flex:1;min-width:96px}
+.set-row .ctl:has(.unit) .read{flex-basis:100%;margin-top:2px;text-align:right}
+/* 「清除已存」这类跟在输入框后面的小复选框 */
+.set-row .clearkey{display:inline-flex;align-items:center;gap:5px;margin:8px 0 0;
+  font-size:12px;color:var(--muted);font-weight:400}
+.set-row .clearkey input{width:14px;height:14px}
+.set-row .ctl input[type=number],.set-row .ctl input[type=text],
+.set-row .ctl input[type=password],.set-row .ctl select{width:100%;max-width:240px}
+.set-row .ctl input[type=number]{text-align:right;font-family:var(--mono);font-size:13px}
+/* 读数：把 400000 翻译成「≈114k token」、67108864 翻译成「64 MB」。
+   让人自己做这个换算是设置页最常见的失礼。 */
+.set-row .read{display:block;margin-top:6px;font-family:var(--mono);font-size:11.5px;
+  color:var(--faint);line-height:1.4}
+.set-row.wide{grid-template-columns:1fr}
+/* 整宽行（提示词、渠道选择、webhook）要真的占满：右列那 240px 的定宽必须撤掉，
+   否则选项卡片被挤成一条，中文会折成「只在后台/铃铛里」这种断法。 */
+.set-row.wide .ctl{justify-self:stretch;text-align:left;margin-top:10px;width:auto}
+.set-row.wide .ctl input,.set-row.wide .ctl select{max-width:520px}
+.set-row.wide .ctl textarea{max-width:none;width:100%}
+
+/* 「已改」：治理工具里「我把哪道护栏放松了」必须一眼可见，
+   不能只在心里记着或翻 git。 */
+.set-tag{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:1px 6px;
+  border-radius:5px;background:var(--accent-soft);color:var(--accent-ink);
+  border:1px solid rgba(13,148,136,.22)}
+.set-sec.guard .set-tag{background:#fdf0d8;color:var(--guard);border-color:#f0d9ae}
+
+/* ---------- 开关 ---------- */
+/* 二元状态就该长得像二元状态：原来用 <select> 装「开/关」，
+   既占一整个下拉的宽度，也要点两下才知道当前是哪一档。 */
+.sw{position:relative;display:inline-flex;align-items:center;gap:9px;cursor:pointer;
+  font-size:12.5px;color:var(--muted);user-select:none}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw .track{width:38px;height:22px;border-radius:11px;background:#d6dae0;flex:none;
+  transition:background .16s;position:relative}
+.sw .track::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,20,27,.25);
+  transition:transform .16s}
+.sw input:checked+.track{background:var(--accent)}
+.sw input:checked+.track::after{transform:translateX(16px)}
+.sw input:focus-visible+.track{box-shadow:0 0 0 3px rgba(13,148,136,.25)}
+.sw .state{min-width:2.2em;text-align:left}
+.sw input:checked~.state{color:var(--accent-ink);font-weight:500}
+
+/* ---------- 选择列表（通知渠道这类「选一个」）---------- */
+.set-choice{display:grid;gap:8px;margin-top:2px;max-width:640px}
+.set-choice label{display:flex;align-items:flex-start;gap:10px;margin:0;padding:11px 13px;
+  border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:13.5px;
+  color:var(--text);font-weight:400;transition:border-color .12s,background .12s}
+.set-choice label:hover{border-color:#cfd4db;background:#fbfcfd}
+.set-choice label:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.set-choice input{margin-top:2px;accent-color:var(--accent)}
+.set-choice .t{display:block;font-weight:500}
+.set-choice .h{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+/* 只有选中的渠道展开自己的字段——四组表单同时摊开就是一堵墙 */
+.set-fields{margin:12px 0 0;padding:14px 16px;border:1px solid var(--border);
+  border-radius:10px;background:#fbfcfd}
+.set-fields .set-row:first-child{border-top:none;padding-top:0}
+
+/* ---------- 折叠的长说明 ---------- */
+.set-more{margin-top:8px}
+.set-more summary{cursor:pointer;color:var(--accent-ink);font-size:12.5px;
+  list-style:none;display:inline-flex;align-items:center;gap:5px}
+.set-more summary::-webkit-details-marker{display:none}
+.set-more summary::after{content:"";width:0;height:0;border-left:4px solid transparent;
+  border-right:4px solid transparent;border-top:5px solid currentColor;transition:transform .15s}
+.set-more[open] summary::after{transform:rotate(180deg)}
+.set-more .body{margin-top:8px;color:var(--muted);font-size:12.5px;line-height:1.6;max-width:62ch}
+
+/* ---------- 改动条 ---------- */
+/* 保存按钮原来钉在十几行表单的最下面，改完上面第二项还得滚到底。
+   改动条只在真有改动时浮出来，并说清楚「改了几项」。 */
+.set-bar{position:sticky;bottom:18px;margin-top:20px;display:flex;align-items:center;gap:14px;
+  padding:12px 16px;border-radius:12px;background:var(--ink);color:#e6e8ec;
+  box-shadow:0 10px 30px rgba(15,20,27,.22);
+  opacity:0;transform:translateY(10px);pointer-events:none;transition:opacity .18s,transform .18s}
+.set-bar.on{opacity:1;transform:none;pointer-events:auto}
+.set-bar .n{font-size:13.5px}
+.set-bar .n b{color:#5eead4}
+.set-bar .spacer{flex:1}
+.set-bar .msg{font-size:12.5px;color:#9aa1ac}
+.set-bar button{border:none;border-radius:8px;padding:8px 16px;font-size:13.5px;cursor:pointer;
+  font-family:var(--sans)}
+.set-bar .save{background:var(--accent);color:#fff;font-weight:500}
+.set-bar .save:hover{filter:brightness(1.12)}
+.set-bar .reset{background:transparent;color:#9aa1ac}
+.set-bar .reset:hover{color:#e6e8ec}
+@media (prefers-reduced-motion:reduce){
+  .set-bar,.sw .track,.sw .track::after{transition:none}
+}
+
+/* 搜索无结果 / 全部过滤掉的分区 */
+.set-sec.hide,.set-row.hide{display:none}
+.set-empty{padding:26px 2px;color:var(--faint);font-size:13px}
+
+@media (max-width:780px){
+  .set-row{grid-template-columns:1fr}
+  .set-row .ctl{justify-self:stretch;text-align:left}
+  .set-search input{width:100%}
+}
