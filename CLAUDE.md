@@ -129,11 +129,21 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
   - **带 backdrop 的右键菜单 z-index 必须高于 backdrop（踩坑）**：dbCtx 菜单初版用裸 `.dg-ctx`（z-index 95），而 `.dg-ctx-backdrop` 是 190——backdrop 盖在菜单上，表现为「按钮光标不是 pointer、点了没反应、也没 toast」（点击先命中 backdrop 触发 `closeDbCtx`，`reconnect()` 根本没跑）。`.dg-colmenu` 早有 `z-index:191` 正是为此。修法：给菜单加 `.dg-dbmenu{z-index:191}`。**凡是 `dg-ctx + dg-ctx-backdrop` 组合的菜单，菜单层必须 >190**。排查特征：右键菜单显示出来了但按钮 hover 光标是箭头/文本、点击只是把菜单关掉 → 十有八九被更高 z-index 的透明遮罩截了点击。
 - **ClickHouse 只读支持（native 驱动，本期只读分析优先）**：新增依赖 `clickhouse-sqlalchemy`（走 `clickhouse+native://`，端口 9000，隧道默认端口也随之），engine 类型加 `clickhouse`。**数据库层只读防线的坑：`readonly=1` 必须走 URL query 参数**（`URL.create(..., query={"readonly":"1","max_execution_time":str(s)})`）——实测 clickhouse-driver 的 per-query `settings` dict（connect_args）**不生效**（`system.settings.readonly` 仍是 0、写不被拦），只有 URL query 参数才真正落到会话、写/DDL 报 `Code 164 Cannot execute query in readonly mode`；`readonly=1` 与 `max_execution_time` 可共存。**这只有真实 ClickHouse 才验得出，SQLite 单测发现不了**（回归见 test_clickhouse.py::test_readonly_enforced_at_db_layer，真实 CH 容器 e2e）。其余方言细节：SHOW CREATE TABLE 返回**单列** DDL（`row[0]`，MySQL 是 row[1]）；反射把 ORDER BY key 映射为 primary_key、get_indexes 返回 []（均不抛）；行数估算用 `system.tables.total_rows`、容量用 `system.parts.bytes_on_disk`（active）、搜表用 `system.tables`；系统库 `system`/`information_schema`/`INFORMATION_SCHEMA` 过滤。sqlglot 原生支持 `clickhouse` 方言（classify/risk/paginate/format/lint 都加了）。**本期只读**：连接表单不显示 writer 字段、无 writer 账号 → 写操作被分类器拦（`kind:confirm` 风险报告）且实际无法执行；取消功能对 CH 为空操作（拿不到稳定 query_id），由服务端 max_execution_time 兜底。前端标识符用反引号（同 MySQL）。**取消/写审批闭环、集群留待后续**。
 
+- **「此刻谁在查」不可能从审计表里查出来**（做看板时才意识到）：`audit_log` 是**操作结束后**才写的一条记录，正在跑的那条根本还不存在。所以看板的实时区必须另有一份进程内的在途登记簿（`metrics.LiveOps`），挂在**所有 DB 触达的唯一入口** `service._run_touching_db` 上（给它加一个可选的 `rec` 参数即可，八处调用点原本就把 `AuditRecord` 拿在手里）。注销必须放 `finally`——只在成功分支清理，出错的查询会在看板上变成永远不消失的幽灵行。健康探测/语法预检这类内部动作不传 rec、不登记，免得刷屏。
+- **给看板画图，稀疏序列必须补成完整时间窗**：SQL 按小时 `GROUP BY` 出来的只有「有数据的那几个小时」，一小时窗口里只有一个桶时，柱子宽度 = 整幅宽度，渲染出来是一整块实心色块，既不像图表也看不出其余时间其实是空闲的。正解是前端按 `generated_at` 与窗口长度**补齐空桶**（`fillSeries`）。另外粒度要跟着窗口走——一律按小时的话，1 小时窗口只剩一两个点、30 天窗口有 720 根柱子；改成 ≤1h 用分钟、≤48h 用小时、更长用天（`traffic_series` 的桶宽就是 UTC ISO 前缀长度：10/13/16）。
+- **给 agent 的「用法说明」不能只放 MCP instructions**：各客户端对 instructions 的处理差异很大（截断、折叠、只在最外层放一次），实测 agent 读不到或读过就忘。可靠的送达点是**会话第一次成功调用工具时**——用 fastmcp 的 `Middleware.on_call_tool` 给 `ToolResult.content` **前插一个 TextContent 块**（不动 `structured_content`，按 schema 消费的客户端完全无感），会话 id 去重、有界 FIFO 存已发过的会话。只在**成功**的调用后记账：首次调用就报错时把一大段说明拼在错误前面，反而会盖住「下一步该怎么办」。
+- **单次结果上限管不住「一直查」**：行数 + 字符预算都是**每次调用**的闸门，一次 1 万字符查两百次照样烧掉几十万 token（多半还是 agent 陷进了重拉同一份数据的循环）。补一道**会话级**配额（`budget.py`）：累计超限就拒绝取数，错误文案是「**停下来问用户**是否确认继续」而不是「换个写法重试」，用户点头后 agent 调 `allow_more_results(reason=...)` 才追加一份额度——额度不自动续、放行理由留痕并显示在看板上，人能核对它到底问没问过。追加时用 `max(allowance, used) + limit`，不能从 0 重算，否则超得越多反而赚得越多。
+- **改完文件记得 write**：用 `python3 - <<PY` 脚本改源码时漏掉最后的 `p.write_text(s)`，改动会静默丢失且测试照样绿（因为那条路径没被测到）。这次 `query` 工具的配额闸门就这样丢过一次，靠 `grep -n _budget_gate` 只有一个调用点才发现。**批量改源码后，用 grep 确认每一处都真的落盘了。**
+- **`fastmcp` 的版本自检会在有 SOCKS 代理的 shell 里把服务拖死**：`dbm serve` 启动时 fastmcp 去 PyPI 查新版本，走 httpx + SOCKS 代理但没装 `socksio`，直接 `ImportError` 让进程起不来。launchd 实例不受影响（它自己从 `scutil --proxy` 读系统代理）。**本机手工起测试实例时要清掉代理环境变量**：`env ALL_PROXY= all_proxy= HTTP_PROXY= HTTPS_PROXY= NO_PROXY='*' uv run dbm serve ...`。
+
 ## 模块地图（src/dbmcp/）
 
 - `ai.py` AI 辅助生成 SQL（`build_sql_prompt`/`build_followup_prompt` 纯函数拼 prompt + `run_ai` provider 分发 claude/codex CLI + `parse_ai_output` 解析，`generate_sql` 串起来；`AIResult` 带 session_id 支持续接会话）；service `ai_generate_sql`、admin `/admin/sql/ai`、console.js「✨ AI」浮层
 - `server.py` MCP 工具注册 → `service.py` 核心逻辑（可单测）；`ConnectionUnavailable` 转带 `[connection_unavailable]`/`[connection_exhausted]` 前缀的 ToolError
 - `health.py` 连接健康位断路器（`ok/unavailable/exhausted`）+ 后台重连（5→15→30→45→60s 退避，**封顶 60s 后持续重试、无终态放弃**）+ 退避到点的 half-open 放行（DB 恢复即自愈）+ `is_connection_error` 分类；service `_run_touching_db` 包每个 DB 触达入口，agent 侧看到明确"稍后重试/需人介入"；`GET /admin/sql/health` 给查询台画告警条
+- `metrics.py` 运行指标：`LiveOps`（在途操作登记簿——审计只在操作**结束后**落库，「此刻谁在查」只有它答得了；由 `service._run_touching_db` 统一登记/注销）+ `estimate_result_bytes`（结果集体积估算，落进 `audit_log.result_bytes` 供看板统计流量）
+- `budget.py` 会话级结果配额：`SessionBudget` 按会话累计 agent 取回的字符数，超额抛 `ResultBudgetExceeded`（文案是「去问用户」而非「换写法重试」）；`allow_more_results` 工具在用户点头后 `grant()` 追加一份额度，放行次数与理由在看板可见。只作用于 agent 的 `query`/`sample_rows`（server.py 的 `_budget_gate`），后台/人的路径不经过
+- `guide.py` 给 agent 的完整使用说明（按场景给工具组合）：由 `server._FirstCallGuide` 中间件在**每个会话第一次成功工具调用**时作为额外文本块附在结果里（不动 structured_content），`usage_guide()` 工具可随时重读
 - `errors.py` 驱动异常 → 分类化 + 已脱敏的错误（`translate_db_error`/`sanitize_db_message`/`classify_db_error`，纯函数）；`server.py::agent_error` 是 **agent 侧唯一错误出口**，`admin.error_payload` 是查询台的（额外给连接类错误打 `error_kind` 驱动重连按钮）
 - `notify.py` 通知抽象：`Notifier` + `NoopNotifier`（默认）+ `MacOsNotifier`（osascript）+ `WebhookNotifier`（Bark/企微/飞书三个 provider 模板）+ `CompositeNotifier`（并发多路，单渠道失败不阻断）+ `NotifierRouter`（每次 send 读最新 settings 动态组装 → 改配置即时生效不重启）；`build_from_settings(settings, inbox)` 把设置项翻译成 Composite；`_cmd_serve` 才注入真路由
 - `inbox.py` 站内通知收件箱：`InboxStore`（SQLite `notification` 表，7 天保留）+ `InboxNotifier`（写库并通过内存 fan-out 推给 SSE 订阅者）；后台铃铛 SSE 走这里；管理后台**默认渠道恒开、不可关**
@@ -159,6 +169,14 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 
 ## 当前状态
 
+- [x] 系统使用看板 + 建表语句/结构同步工具 + agent 用法治理（本次，分支 `feat/dashboard-and-ddl-tool`）：
+  - **看板 `/admin/dashboard`**（左侧导航第一项，原生 JS + 手绘 SVG 柱图，5s 自动刷新可关）：
+    指标磁贴（连接数/异常数、此刻占用的物理连接、正在执行数、操作数与失败、读出数据量与行数、写入影响行、待审批）+ 两幅柱图（操作数/传输量，窗口 1h/6h/24h/7d/30d，粒度自动切 分钟/小时/天）+ **此刻正在执行**（在途登记簿，秒表锚定服务端 elapsed_ms）+ 连接健康与占用 + 活跃会话 + **会话结果配额** + 排行。数据源三份：config+health+池 `stats()` / `LiveOps` / `audit_log` 聚合（`traffic_summary`/`traffic_series`/`top_groups`，全下推 SQL）。`audit_log` 新增 `result_bytes` 列（老库自动 ALTER）。
+  - **`table_ddl` MCP 工具**：看建表语句原文，表名逗号分隔可一次多张（单表出错原样报错、批量逐表容错）。
+  - **`sync_table_ddl` MCP 工具**：批量只同步结构不带数据（本地照着线上重建空表），复用 `sync_table(data=none)` 的全套红线与审批，只做「按表循环 + 汇总」。
+  - **表同步补体积闸门**：原来只有行数上限，行很宽的表照样能搬几个 GB。新增 `sync_max_bytes`（默认 64MB），`fetch_rows_for_copy(max_bytes=)` 到预算即停并区分「撞行数」还是「撞体积」的提示。**注意它保护的是本进程内存与目标库——源库那边已按 LIMIT 把行发过来了（缓冲游标），减轻源库压力只能靠调小 limit / 收窄 where。**
+  - **会话首次调用附使用说明**（`guide.py` + 中间件）与**会话级结果配额**（`budget.py`，默认 400000 字符≈114k token，超额拒绝取数 → agent 须问用户 → `allow_more_results` 放行）。
+  - 1095 测试全过（+88：test_dashboard 41 / test_agent_governance 23 / test_table_ddl 24）+ 真机 e2e（8201 测试实例：真实 HTTP MCP 跑通首次说明只发一次、配额告警→拒绝→放行→继续、table_ddl 多表、sync_table_ddl；浏览器验证看板全部区块、在途查询秒表走字、窗口切换与自动刷新开关、无 console 报错）。**未做**：MySQL/PG 真机——新增逻辑全是 SQLite/纯函数/前端，与方言无关。
 - [x] Agent 自查历史会话 + 回滚备注（据「让 agent 查它自己过去的 session 记录、回溯改动，可能要回滚的把改动前的数值写在备注上」需求）：
   - **两个新 MCP 工具**：`list_sessions`（查自己过去的会话，可按 `since`/`until` 日期、`keyword`（同时匹配会话名/简介/**该会话跑过的 SQL**）、`project`/`connection`、`writes_only` 筛选；默认只列**当前 agent 自己的**，`all_agents=True` 才看别人的）→ `session_history(session_id)`（看那次会话的操作，最近在前）。
   - **审批单新增 `rollback_note` 字段**（正是用户问的「要不要在审批记录中增加一个字段」——要）：`execute(..., rollback_note="改前 1001.status=2；回滚 UPDATE ...")` 存进审批单，**审批人在审批页看得到**（新增「回滚参考」栏，判断可回滚性），事后 agent 用 `session_history` 取回来拼回滚 SQL（回滚照样走审批）。老库自动 ALTER 补列。

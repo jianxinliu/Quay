@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail      TEXT,               -- 拒绝原因或错误消息
     row_count   INTEGER,
     duration_ms INTEGER,
-    change_id   INTEGER            -- 关联的审批单号（写操作才有），供回溯改动与回滚备注
+    change_id   INTEGER,           -- 关联的审批单号（写操作才有），供回溯改动与回滚备注
+    result_bytes INTEGER           -- 结果集估算字节数（见 metrics.estimate_result_bytes），供看板统计流量
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
 CREATE INDEX IF NOT EXISTS idx_audit_conn ON audit_log (project, connection);
@@ -97,6 +98,8 @@ class AuditRecord:
     # 关联审批单号：写操作生成审批单时、以及核销执行时都写上，
     # 让「这条审计记录」能直接找回「那张审批单」（含回滚备注）。
     change_id: int | None = None
+    # 本次操作从库里取回的结果集估算字节数（写操作无结果集，为 0/None）。
+    result_bytes: int | None = None
 
 
 class AuditStore:
@@ -113,6 +116,8 @@ class AuditStore:
             cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(audit_log)")}
             if "change_id" not in cols:
                 self._conn.execute("ALTER TABLE audit_log ADD COLUMN change_id INTEGER")
+            if "result_bytes" not in cols:
+                self._conn.execute("ALTER TABLE audit_log ADD COLUMN result_bytes INTEGER")
             self._conn.commit()
 
     def record(self, rec: AuditRecord) -> int:
@@ -120,8 +125,9 @@ class AuditStore:
             cur = self._conn.execute(
                 """INSERT INTO audit_log
                    (ts, agent, session_id, project, connection, environment, engine,
-                    tool, sql, fingerprint, status, detail, row_count, duration_ms, change_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tool, sql, fingerprint, status, detail, row_count, duration_ms,
+                    change_id, result_bytes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     datetime.now(UTC).isoformat(timespec="milliseconds"),
                     rec.agent,
@@ -138,6 +144,7 @@ class AuditStore:
                     rec.row_count,
                     rec.duration_ms,
                     rec.change_id,
+                    rec.result_bytes,
                 ),
             )
             self._conn.commit()
@@ -291,6 +298,95 @@ class AuditStore:
                     ORDER BY last_ts DESC
                     LIMIT ?""",
                 (*_WRITE_TOOLS, *params, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------ 看板统计
+    #
+    # 看板要的是「一段时间内系统被怎么用了」，全部由 audit_log 聚合下推到 SQL——
+    # 不在 Python 里拉全表再统计（审计表按保留期能有几十万行）。
+    # 时间参数都是 UTC ISO 串，与 ts 同一格式，可直接字符串比较。
+
+    # 可分组的列白名单（防注入：列名要拼进 SQL，不能来自外部原样字符串）
+    _GROUPABLE = ("project", "connection", "tool", "agent", "session_id",
+                  "status", "engine", "environment")
+
+    def traffic_summary(self, since: str, until: str | None = None) -> dict:
+        """时间窗内的总量：操作数、按状态分布、读出行数/字节、写入影响行数、耗时。
+
+        读/写按 _WRITE_TOOLS 区分：写工具的 row_count 是「影响行数」而非「读出行数」，
+        两者混在一起加毫无意义，所以分开统计。
+        """
+        marks = ",".join("?" * len(_WRITE_TOOLS))
+        clauses, params = ["ts >= ?"], [since]
+        if until:
+            clauses.append("ts <= ?")
+            params.append(until)
+        where = " AND ".join(clauses)
+        with self._lock:
+            row = self._conn.execute(
+                f"""SELECT COUNT(*)                                              AS ops,
+                           SUM(CASE WHEN status='ok'       THEN 1 ELSE 0 END)    AS ok,
+                           SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END)    AS rejected,
+                           SUM(CASE WHEN status='error'    THEN 1 ELSE 0 END)    AS error,
+                           SUM(CASE WHEN tool IN ({marks}) THEN 1 ELSE 0 END)    AS writes,
+                           COALESCE(SUM(result_bytes), 0)                        AS bytes_read,
+                           COALESCE(SUM(CASE WHEN tool NOT IN ({marks})
+                                             THEN row_count ELSE 0 END), 0)      AS rows_read,
+                           COALESCE(SUM(CASE WHEN tool IN ({marks}) AND status='ok'
+                                             THEN row_count ELSE 0 END), 0)      AS rows_written,
+                           COALESCE(SUM(duration_ms), 0)                         AS total_ms,
+                           COALESCE(MAX(duration_ms), 0)                         AS max_ms,
+                           COUNT(DISTINCT session_id)                            AS sessions,
+                           COUNT(DISTINCT project || '/' || connection)          AS connections
+                    FROM audit_log WHERE {where}""",
+                (*_WRITE_TOOLS, *_WRITE_TOOLS, *_WRITE_TOOLS, *params),
+            ).fetchone()
+        out = {k: (row[k] or 0) for k in row.keys()}
+        out["avg_ms"] = int(out["total_ms"] / out["ops"]) if out["ops"] else 0
+        return out
+
+    def traffic_series(self, since: str, bucket: str = "hour", limit: int = 800) -> list[dict]:
+        """时间序列（供看板柱图）。按 UTC 的分钟 / 小时 / 天聚合。
+
+        桶标签直接取 ts 的前缀（ts 是 UTC ISO：前 10 位是天、13 位是小时、16 位是分钟），
+        前端据此补齐空桶并转成本地时间显示——不在 SQLite 里做时区转换。
+        """
+        width = {"day": 10, "hour": 13, "minute": 16}.get(bucket)
+        if width is None:
+            raise ValueError(
+                f"不支持的聚合粒度: {bucket!r}（只支持 minute / hour / day）")
+        marks = ",".join("?" * len(_WRITE_TOOLS))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT substr(ts, 1, {width})                                 AS bucket,
+                           COUNT(*)                                               AS ops,
+                           SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END)          AS failed,
+                           SUM(CASE WHEN tool IN ({marks}) THEN 1 ELSE 0 END)     AS writes,
+                           COALESCE(SUM(result_bytes), 0)                         AS bytes_read,
+                           COALESCE(SUM(row_count), 0)                            AS rows_total
+                    FROM audit_log WHERE ts >= ?
+                    GROUP BY bucket ORDER BY bucket LIMIT ?""",
+                (*_WRITE_TOOLS, since, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def top_groups(self, column: str, since: str, limit: int = 8) -> list[dict]:
+        """时间窗内按某列排行（连接/工具/agent/会话），按操作数倒序。"""
+        if column not in self._GROUPABLE:
+            raise ValueError(f"不可分组的列: {column}")
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT {column}                                AS name,
+                           COUNT(*)                                AS ops,
+                           SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END) AS failed,
+                           COALESCE(SUM(result_bytes), 0)          AS bytes_read,
+                           COALESCE(SUM(row_count), 0)             AS rows_total,
+                           MAX(ts)                                 AS last_ts
+                    FROM audit_log
+                    WHERE ts >= ? AND {column} IS NOT NULL AND {column} <> ''
+                    GROUP BY {column} ORDER BY ops DESC LIMIT ?""",
+                (since, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 

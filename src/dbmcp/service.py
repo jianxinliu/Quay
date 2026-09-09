@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from .approvals import KIND_SYNC, ApprovalError, ApprovalStore
@@ -22,6 +23,8 @@ from .config import AppConfig, ConnectionConfig
 from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
 from .masking import apply_mask, resolve_default_patterns
 from .metadata import MetadataCache
+from .budget import SessionBudget
+from .metrics import LiveOps
 from .notify import NoopNotifier, Notifier
 from . import engines, privileges, redis_engine, sync
 
@@ -36,6 +39,8 @@ ADMIN_PAGE_SIZE = 100  # 查询台每页行数（上限受连接 max_rows 约束
 DEFAULT_AGENT_MAX_RESULT_CHARS = 40000  # agent 结果字符预算的最终兜底（settings 未启用时）
 DEFAULT_APPROVAL_WAIT_S = 120  # execute 等待人工审批的默认秒数（settings 未启用时）
 DEFAULT_SYNC_MAX_ROWS = 10_000  # 表同步单次行数上限的兜底（settings 未启用时）
+DEFAULT_SYNC_MAX_BYTES = 64 * 1024 * 1024  # 表同步单次体积上限的兜底
+DEFAULT_SESSION_BUDGET_CHARS = 400_000  # 单会话累计返回字符上限的兜底
 
 
 class QueryRejected(Exception):
@@ -220,6 +225,11 @@ class CallerInfo:
     session_id: str = ""
 
 
+# _audited 包着的工具若返回 dict（而非 QueryResult），用这个私有键把结果集体积捎给
+# 审计层。_audited 记完流量后会 pop 掉，绝不出现在给 agent / 前端的返回值里。
+AUDIT_BYTES_KEY = "__audit_result_bytes__"
+
+
 def change_status_payload(change) -> dict:
     """审批单状态的统一回传结构（get_change_status / wait_for_change / execute 等待共用）。"""
     payload = {
@@ -282,6 +292,13 @@ class DbmService:
         self._sched_ticked_minute: set[tuple[str, str]] = set()  # {(name, "YYYY-MM-DD HH:MM")}
         self.data_dir = None   # serve 时注入，供 xlsx 产物落盘
         self.base_url = ""     # serve 时注入，如 http://127.0.0.1:8100（导出下载链接）
+        # 在途操作登记簿：审计只在操作**结束后**落库，「此刻谁在查」只能靠它。
+        # 由 _run_touching_db 统一登记/注销，看板 /admin/dashboard 读它。
+        self.live = LiveOps()
+        # 会话级结果配额（只约束 agent 取数；后台/人的路径不经过它）。
+        # 上限跟随系统设置：每次取用前同步，改设置即时生效、不必重启。
+        self.session_budget = SessionBudget(DEFAULT_SESSION_BUDGET_CHARS)
+        self.started_at = time.time()
 
     # ---------- 元信息 ----------
 
@@ -534,7 +551,7 @@ class DbmService:
             )
 
         try:
-            result = self._run_touching_db(project, connection, _do)
+            result = self._run_touching_db(project, connection, _do, rec)
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -559,6 +576,7 @@ class DbmService:
         rec.status = "ok"
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
+        rec.result_bytes = result.result_bytes
         self.store.record(rec)
         rows, masked = (
             apply_mask(result.columns, result.rows, cfg.policy, self.mask_default_patterns(cfg))
@@ -705,7 +723,7 @@ class DbmService:
             return engines.run_write(engine, sql, on_start=on_start)
 
         try:
-            result = self._run_touching_db(project, connection, _do)
+            result = self._run_touching_db(project, connection, _do, rec)
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -872,7 +890,7 @@ class DbmService:
             return engines.insert_rows(engine, table, columns, rows, schema=schema)
 
         try:
-            result = self._run_touching_db(project, connection, _do)
+            result = self._run_touching_db(project, connection, _do, rec)
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -1698,7 +1716,7 @@ class DbmService:
             return engines.run_write(engine, change.sql)
 
         try:
-            result = self._run_touching_db(project, connection, _do)
+            result = self._run_touching_db(project, connection, _do, rec)
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -1749,6 +1767,20 @@ class DbmService:
 
     # ---------- 跨连接表同步（线上库 → 本地库）----------
 
+    def result_budget(self) -> SessionBudget:
+        """会话结果配额器，上限已同步为当前设置值（改设置即时生效）。"""
+        value = self._setting("agent_session_budget_chars")
+        try:
+            self.session_budget.limit_chars = max(int(value), 0)
+        except (TypeError, ValueError):
+            self.session_budget.limit_chars = DEFAULT_SESSION_BUDGET_CHARS
+        return self.session_budget
+
+    def guide_on_first_call(self) -> bool:
+        """会话首次调用工具时是否附带使用说明（系统设置，默认开）。"""
+        value = self._setting("agent_guide_on_first_call")
+        return True if value is None else bool(value)
+
     def sync_max_rows(self) -> int:
         """同步单次行数硬上限：系统设置优先，最终受 sync.MAX_SYNC_ROWS 封顶。"""
         value = self._setting("sync_max_rows")
@@ -1756,6 +1788,14 @@ class DbmService:
             return min(int(value), sync.MAX_SYNC_ROWS)
         except (TypeError, ValueError):
             return min(DEFAULT_SYNC_MAX_ROWS, sync.MAX_SYNC_ROWS)
+
+    def sync_max_bytes(self) -> int:
+        """同步单次体积上限（估算字节）：行数管不住宽表，这道闸门管的是「搬多少数据」。"""
+        value = self._setting("sync_max_bytes")
+        try:
+            return max(int(value), 1)
+        except (TypeError, ValueError):
+            return DEFAULT_SYNC_MAX_BYTES
 
     def _sync_endpoints(self, spec: "sync.SyncSpec") -> tuple[ConnectionConfig, ConnectionConfig]:
         """取源/目标连接配置并做「这条同步允不允许发生」的守卫。
@@ -1884,6 +1924,65 @@ class DbmService:
             # 目标是本地/开发库：动的不是线上数据，直接执行（仍建审批单留痕 + 审计）
             return self._run_sync_without_approval(spec, plan, reason, caller)
         return self._request_sync_approval(spec, plan, reason, caller)
+
+    # 一次结构同步最多多少张表：整库重建常有几十张，20 张太碎；再多就该分批，
+    # 免得一次调用里跑上百条 DDL、中途失败时难以判断做到哪儿了。
+    MAX_SYNC_DDL_TABLES = 50
+
+    def sync_table_ddls(
+        self, source_project: str, source_connection: str,
+        target_project: str, target_connection: str,
+        tables: list[str], caller: CallerInfo, *,
+        source_database: str | None = None, target_database: str | None = None,
+        ddl: str = sync.DDL_CREATE_IF_MISSING, reason: str = "", dry_run: bool = False,
+    ) -> dict:
+        """批量**只同步结构、不同步数据**（在本地重建线上库的表结构）。
+
+        实现上就是对每张表跑一次 `sync_table(data=none)`——**刻意不另开一条执行路径**：
+        建表语句的生成/转写、目标不能是 prod、审批与审计，全部沿用同一套，
+        这里只负责「按表循环 + 汇总结果」。
+
+        单张表失败不中断整批（表名写错、目标已存在同名视图等），逐表如实报状态；
+        只有连接级故障才中断——那对后面每张表都一样，接着试没有意义。
+        """
+        if ddl not in (sync.DDL_CREATE_IF_MISSING, sync.DDL_RECREATE):
+            raise ValueError(
+                f"结构同步的 ddl 只能是 {sync.DDL_CREATE_IF_MISSING} 或 {sync.DDL_RECREATE}"
+                f"（{sync.DDL_RECREATE} 会先 DROP 目标表），收到 {ddl!r}")
+        names = [t.strip() for t in tables if t and t.strip()]
+        if not names:
+            raise ValueError("至少要给一个表名")
+        if len(names) > self.MAX_SYNC_DDL_TABLES:
+            raise ValueError(
+                f"一次最多同步 {self.MAX_SYNC_DDL_TABLES} 张表的结构（本次 {len(names)} 张），请分批")
+
+        results = []
+        for name in names:
+            spec = sync.SyncSpec(
+                source_project=source_project, source_connection=source_connection,
+                source_table=name,
+                target_project=target_project, target_connection=target_connection,
+                target_table=name,
+                ddl=ddl, data=sync.DATA_NONE, limit=1,
+                source_database=source_database, target_database=target_database,
+            )
+            try:
+                out = self.sync_table(spec, caller, reason=reason, dry_run=dry_run)
+                results.append({"table": name, **out})
+            except ConnectionUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001
+                results.append({"table": name, "status": "failed",
+                                "error": f"{type(e).__name__}: {e}"})
+        done = [r for r in results if r.get("status") in ("executed", "consumed", "planned")]
+        return {
+            "source": f"{source_project}/{source_connection}",
+            "target": f"{target_project}/{target_connection}",
+            "ddl": ddl,
+            "requested": len(names),
+            "succeeded": len(done),
+            "tables": results,
+        }
 
     def _create_sync_change(
         self, spec: "sync.SyncSpec", plan: dict, reason: str, caller: CallerInfo,
@@ -2059,7 +2158,12 @@ class DbmService:
             "source_truncated": source_truncated,
         }
         if source_truncated:
+            # 少于 limit 行却被截断 = 撞的是体积预算而不是行数上限，两种情况的解法不同
             payload["note"] = (
+                f"只同步了前 {copied} 行：累计数据量达到体积上限"
+                f"（系统设置 sync_max_bytes，当前 {self.sync_max_bytes()} 字节）。"
+                "该表的行较宽，请收窄 where、减少 limit，或只挑需要的列。"
+                if copied < spec.limit else
                 f"源表符合条件的数据超过 {spec.limit} 行，只同步了前 {copied} 行。"
                 "如需更多请收窄 where 或调大 limit（受系统设置 sync_max_rows 约束）后重新发起。"
             )
@@ -2088,7 +2192,8 @@ class DbmService:
         def _do() -> "engines.QueryResult":
             engine = self.pool.get(spec.source_project, spec.source_connection, src_cfg,
                                    schema=spec.source_database)
-            cols, rows, truncated = engines.fetch_rows_for_copy(engine, select_sql, spec.limit)
+            cols, rows, truncated = engines.fetch_rows_for_copy(
+                engine, select_sql, spec.limit, max_bytes=self.sync_max_bytes())
             result["rows"] = rows
             result["truncated"] = truncated
             result["columns"] = cols
@@ -2286,7 +2391,7 @@ class DbmService:
                                                 max_cell_chars=cfg.policy.max_cell_chars)
 
             try:
-                result = self._run_touching_db(project, connection, _do_read)
+                result = self._run_touching_db(project, connection, _do_read, rec)
             except ConnectionUnavailable as e:
                 rec.status = "error"
                 rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -2324,7 +2429,7 @@ class DbmService:
                                             max_cell_chars=cfg.policy.max_cell_chars)
 
         try:
-            result = self._run_touching_db(project, connection, _do_write)
+            result = self._run_touching_db(project, connection, _do_write, rec)
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -2455,6 +2560,37 @@ class DbmService:
         detail = f"{schema}.{table}" if schema else table
         return self._audited(project, connection, cfg, "table_ddl", detail, caller,
                              lambda: engines.get_table_ddl(engine, cfg.engine, table, schema))
+
+    # 一次批量取多少张表的 DDL：再多就该用 list_tables 先筛，而不是把整库结构灌进上下文
+    MAX_DDL_TABLES = 20
+
+    def get_table_ddls(
+        self, project: str, connection: str, tables: list[str], caller: CallerInfo,
+        schema: str | None = None, database: str | None = None,
+    ) -> list[dict]:
+        """批量取建表语句，按传入顺序返回 [{table, ddl} | {table, error}]。
+
+        单张表取不到（表名写错、无权限）**不中断整批**：把这张表标成 error 继续取下一张，
+        agent 一次调用就能看清「哪几张拿到了、哪几张没拿到、为什么」，不必逐张重试。
+        """
+        names = [t.strip() for t in tables if t and t.strip()]
+        if not names:
+            raise ValueError("至少要给一个表名")
+        if len(names) > self.MAX_DDL_TABLES:
+            raise ValueError(
+                f"一次最多取 {self.MAX_DDL_TABLES} 张表的建表语句（本次 {len(names)} 张）；"
+                "请分批取，或先用 list_tables 缩小范围")
+        out = []
+        for name in names:
+            try:
+                ddl = self.get_table_ddl(project, connection, name, caller,
+                                         schema=schema, database=database)
+                out.append({"table": name, "ddl": ddl})
+            except ConnectionUnavailable:
+                raise  # 连接级故障对后续每张表都一样，没必要接着试
+            except Exception as e:  # noqa: BLE001
+                out.append({"table": name, "error": f"{type(e).__name__}: {e}"})
+        return out
 
     def ai_generate_sql(
         self, project: str, connection: str, question: str, caller: CallerInfo,
@@ -2614,6 +2750,7 @@ class DbmService:
             rows, masked = apply_mask(result.columns, result.rows, cfg.policy,
                                        self.mask_default_patterns(cfg))
             out = {
+                AUDIT_BYTES_KEY: result.result_bytes,
                 "columns": result.columns,
                 "rows": rows,
                 "row_count": result.row_count,
@@ -2668,6 +2805,117 @@ class DbmService:
 
     # ---------- 内部 ----------
 
+    # ------------------------------------------------------------------ 看板
+    #
+    # 「系统现在被怎么用了」由三份数据拼出来，各自答不同的问题：
+    #   config + health + 池 stats  →  有几条连接、连得上吗、此刻占了多少物理连接
+    #   self.live                   →  此刻谁在跑什么（审计只在结束后落库，答不了）
+    #   audit_log 聚合              →  一段时间内跑了多少、传了多少数据、谁跑得最多
+    # 这里只做汇总，不碰 DB——看板每几秒刷一次，绝不能顺带去 ping 真实数据库。
+
+    DASHBOARD_WINDOWS = {"1h": 1, "6h": 6, "24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+
+    def dashboard_snapshot(self, window: str = "24h", live_limit: int = 50) -> dict:
+        """看板数据快照。window 为统计窗口（见 DASHBOARD_WINDOWS），非法值报错。"""
+        hours = self.DASHBOARD_WINDOWS.get(window)
+        if hours is None:
+            raise ValueError(
+                f"不支持的统计窗口: {window!r}（可选 {', '.join(self.DASHBOARD_WINDOWS)}）")
+        now = datetime.now(UTC)
+        since = (now - timedelta(hours=hours)).isoformat(timespec="milliseconds")
+        # 粒度按窗口长短选：一律用小时的话，1 小时窗口只剩一两个点、30 天窗口有 720 根柱子
+        bucket = "minute" if hours <= 1 else "hour" if hours <= 48 else "day"
+
+        summary = self.store.traffic_summary(since)
+        series = self.store.traffic_series(since, bucket=bucket)
+        live_ops = self.live.snapshot()
+
+        return {
+            "generated_at": now.isoformat(timespec="milliseconds"),
+            "window": window,
+            "window_hours": hours,
+            "bucket": bucket,
+            "uptime_s": int(time.time() - self.started_at),
+            "connections": self._dashboard_connections(),
+            "live": {"count": len(live_ops), "ops": live_ops[:live_limit]},
+            "traffic": summary,
+            "series": series,
+            "top": {
+                "connections": self.store.top_groups("connection", since),
+                "tools": self.store.top_groups("tool", since),
+                "agents": self.store.top_groups("agent", since),
+            },
+            "sessions": self.store.list_sessions(limit=8, since=since),
+            # 会话结果配额是进程内的实时用量，与 audit_log 里的历史会话是两回事：
+            # 人要判断「哪个 agent 正在猛拉数据」看的是这个。
+            "budgets": self.result_budget().snapshot()[:8],
+            "approvals": {"pending": self._pending_approvals_count()},
+        }
+
+    def _pending_approvals_count(self) -> int:
+        if self.approvals is None:
+            return 0
+        try:
+            # 惰性过期：存储态仍是 pending 但已过 TTL 的单不算「待处理」（与侧栏角标一致）
+            return len([c for c in self.list_changes("pending")
+                        if c.effective_status() == "pending"])
+        except Exception:  # noqa: BLE001
+            logger.debug("dashboard: 取待审批数失败", exc_info=True)
+            return 0
+
+    def _dashboard_connections(self) -> dict:
+        """每条已配置连接的健康位与实时占用（配置 ∪ 引擎池 ∪ Redis 池）。
+
+        以**配置**为准列出全部连接（哪怕从没连过，看板也该看到它存在），再把池里的
+        引擎按 (project, connection) 归并上去——一条连接可能因 role/schema/database
+        维度而有多个引擎，看板关心的是「这条连接一共占了几个引擎、几条物理连接」。
+        """
+        pooled = self.pool.stats() + self.redis_pool.stats()
+        by_conn: dict[tuple[str, str], list[dict]] = {}
+        for entry in pooled:
+            by_conn.setdefault((entry["project"], entry["connection"]), []).append(entry)
+        health = self.health.snapshot()
+        now = time.monotonic()
+
+        items, by_engine, by_env = [], {}, {}
+        for project, proj in sorted(self.config.projects.items()):
+            for name, cfg in sorted(proj.connections.items()):
+                engs = by_conn.get((project, name), [])
+                # checked_out 取不到的池类型（SQLite）记 None，不参与求和
+                outs = [e["checked_out"] for e in engs if e["checked_out"] is not None]
+                h = health.get((project, name))
+                by_engine[cfg.engine] = by_engine.get(cfg.engine, 0) + 1
+                env = cfg.environment or "—"
+                by_env[env] = by_env.get(env, 0) + 1
+                items.append({
+                    "project": project,
+                    "connection": name,
+                    "engine": cfg.engine,
+                    "environment": cfg.environment,
+                    "host": cfg.host,
+                    "database": cfg.database,
+                    "has_writer": cfg.writer is not None,
+                    "state": h.state if h else "ok",
+                    "fail_count": h.fail_count if h else 0,
+                    "last_error": h.last_error if h else "",
+                    # 距下次自动重连还有多少秒（健康位用单调时钟存的绝对时刻）
+                    "retry_in_s": (max(int(h.next_retry_at - now), 0)
+                                   if h and h.state != "ok" else 0),
+                    "engines": len(engs),
+                    "checked_out": sum(outs) if outs else 0,
+                    "tunnel": any(e["tunnel"] for e in engs),
+                    "idle_s": min((e["idle_s"] for e in engs), default=None),
+                })
+        return {
+            "configured": len(items),
+            "by_engine": by_engine,
+            "by_environment": by_env,
+            "unhealthy": sum(1 for i in items if i["state"] != "ok"),
+            "pooled_engines": len(pooled),
+            "checked_out": sum(i["checked_out"] for i in items),
+            "items": items,
+        }
+
     def _base_record(
         self,
         project: str,
@@ -2693,7 +2941,7 @@ class DbmService:
     def _audited(self, project, connection, cfg, tool, detail_sql, caller, fn):  # noqa: ANN001
         rec = self._base_record(project, connection, cfg, tool, detail_sql, caller)
         try:
-            result = self._run_touching_db(project, connection, fn)
+            result = self._run_touching_db(project, connection, fn, rec)
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
@@ -2705,6 +2953,13 @@ class DbmService:
             self.store.record(rec)
             raise
         rec.status = "ok"
+        # 结果集体积计入流量统计：返回 QueryResult 的直接取属性；返回 dict 的（如
+        # sample_rows 已把行脱敏成前端结构）用 AUDIT_BYTES_KEY 捎带，取完就 pop 掉。
+        # 返回结构性小数据的（list_tables/describe_table 等）体积可忽略，不计。
+        if isinstance(result, dict) and AUDIT_BYTES_KEY in result:
+            rec.result_bytes = result.pop(AUDIT_BYTES_KEY)
+        else:
+            rec.result_bytes = getattr(result, "result_bytes", None)
         self.store.record(rec)
         return result
 
@@ -2747,15 +3002,22 @@ class DbmService:
             f"{res.error}。请修正语法后重试，不要原样重发。"
         )
 
-    def _run_touching_db(self, project: str, connection: str, fn):  # noqa: ANN001
+    def _run_touching_db(self, project: str, connection: str, fn,  # noqa: ANN001
+                         rec: AuditRecord | None = None):
         """任何"会触达 DB/隧道"的动作都过这里：入口先查健康位、出错时按类别打标。
 
         - 若健康位为 unavailable/exhausted：直接抛 ConnectionUnavailable（不碰 DB）
         - 执行成功：清健康标记（如果之前挂过）
         - 失败：判断是不是"连接级"异常，是就打标 + 启后台重连，然后原样再抛
           （非连接级异常如 SQL 语法/权限拒/审批拒不打标，重连也没用）
+
+        rec：本次操作的审计记录骨架。给了就在执行期间登记进 `self.live`——审计要等
+        操作结束才落库，看板问的「此刻谁在查」只有这里答得了。不给（如健康探测、
+        语法预检这类内部动作）就不登记，免得看板被噪音刷屏。
         """
         self.health.check(project, connection)
+        live_id = None if rec is None else self.live.begin(
+            project, connection, rec.tool, rec.agent, rec.session_id, rec.sql)
         try:
             result = fn()
         except ConnectionUnavailable:
@@ -2770,6 +3032,9 @@ class DbmService:
                     pass
                 self.health.mark_failed(project, connection, f"{type(e).__name__}: {e}")
             raise
+        finally:
+            if live_id is not None:
+                self.live.end(live_id)
         self.health.mark_ok(project, connection)
         return result
 

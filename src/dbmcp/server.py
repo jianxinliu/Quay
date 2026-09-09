@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from functools import partial
 from typing import Annotated, Literal
@@ -12,6 +15,8 @@ from typing import Annotated, Literal
 import anyio.to_thread
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
@@ -19,12 +24,16 @@ from starlette.responses import FileResponse, Response
 from .agent_format import render_agent_result
 from .approvals import STATUS_APPROVED, STATUS_CONSUMED, STATUS_PENDING, ApprovalError
 from .errors import translate_db_error
+from .budget import ResultBudgetExceeded, usage_note
+from .guide import USAGE_GUIDE
 from .health import ConnectionUnavailable
 from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
 from .sync import SyncSpec
 
 # 等待人工审批：每 1s 复查一次审批单状态。用轮询而非进程内条件变量，是因为决策也可能
 # 来自别的进程（`dbm approve` CLI），条件变量覆盖不到；1s 延迟对「人点批准」无感。
+logger = logging.getLogger(__name__)
+
 _WAIT_POLL_S = 1.0
 _WAIT_HEARTBEAT_S = 10.0   # 每 10s 报一次 progress，防客户端把长调用判超时
 _WAIT_MAX_S = 3600
@@ -129,6 +138,7 @@ def agent_error(e: BaseException) -> ToolError:
 
     - `[connection_unavailable]` / `[connection_exhausted]`：连接问题，稍后重试 / 需人介入
     - `[sql_syntax_error]` 等 DB 错误分类（见 errors.py）：改 SQL，别原样重发
+    - `[result_budget_exceeded]`：本会话取回的数据太多，去问用户要不要继续
     - 其余业务拒绝（审批/只读限制/参数错）：原样透传服务层已经写好的人话
 
     ToolError 本身直接放行（上游已经组织好文案）。
@@ -137,6 +147,9 @@ def agent_error(e: BaseException) -> ToolError:
         return e
     if isinstance(e, ConnectionUnavailable):
         return _tool_error_from_unavailable(e)
+    if isinstance(e, ResultBudgetExceeded):
+        # 配额是治理规则，不是数据库错误——别让它落进 translate_db_error 的兜底分类
+        return ToolError(f"[result_budget_exceeded] {e}")
     if isinstance(e, (QueryRejected, ValueError)):
         return ToolError(str(e))
     if isinstance(e, KeyError):
@@ -292,6 +305,66 @@ async def _wait_then_execute(
     return {"status": "rejected", "change_id": cid, "reason": reason}
 
 
+class _FirstCallGuide(Middleware):
+    """会话内第一次成功调用工具时，把使用说明随结果一起送出去。
+
+    为什么挂在中间件而不是逐个工具里：谁是「第一次」事先不知道，且这与工具本身的职责无关。
+    做法是给结果**多加一个文本块**（不动 structured_content），所以按结构化返回值消费的
+    客户端完全不受影响，只有读文本的模型会看到它。
+
+    只在**成功**的调用后记账：首次调用就报错时不发说明也不算数，留给下一次成功的调用——
+    把一大段说明拼在错误消息前面反而会盖住「下一步该怎么办」。
+    """
+
+    def __init__(self, guide: str, enabled: Callable[[], bool], max_sessions: int = 512):
+        self._guide = guide
+        self._enabled = enabled
+        self._seen: OrderedDict[str, None] = OrderedDict()
+        self._max = max_sessions
+        self._lock = threading.Lock()
+
+    def _claim(self, session_id: str) -> bool:
+        """本会话是否「还没发过说明」；是则就地标记为已发（同一会话并发调用只会发一次）。"""
+        with self._lock:
+            if session_id in self._seen:
+                return False
+            self._seen[session_id] = None
+            while len(self._seen) > self._max:
+                self._seen.popitem(last=False)  # 有界 FIFO：常驻进程不能无限攒会话 id
+            return True
+
+    async def on_call_tool(self, context, call_next):  # noqa: ANN001, ANN201
+        result = await call_next(context)
+        try:
+            if not self._enabled():
+                return result
+            ctx = context.fastmcp_context
+            # 无会话 id 的客户端（部分 stdio 实现）退化成「本进程发一次」
+            session_id = (getattr(ctx, "session_id", "") or "-") if ctx else "-"
+            if self._claim(session_id):
+                result.content = [TextContent(type="text", text=self._guide), *result.content]
+        except Exception:  # noqa: BLE001
+            logger.debug("附带使用说明失败，忽略", exc_info=True)
+        return result
+
+
+def _budget_gate(service: DbmService, caller: CallerInfo):  # noqa: ANN201
+    """取数前查会话配额，返回一个「记账并按需追加提醒」的收尾函数。
+
+    check 在**执行前**：超额就不该再去打数据库。charge 在拿到最终文本之后——计的是
+    agent 真正收进上下文的那串字符，而不是行数或库里的原始体积。
+    """
+    budget = service.result_budget()
+    budget.check(caller.session_id)
+
+    def charge(text: str) -> str:
+        usage = budget.charge(caller.session_id, len(text))
+        note = usage_note(usage)
+        return f"{text}\n{note}" if note else text
+
+    return charge
+
+
 def build_mcp(service: DbmService) -> FastMCP:
     from contextlib import asynccontextmanager
 
@@ -366,9 +439,54 @@ def build_mcp(service: DbmService) -> FastMCP:
             "`[permission_denied]`/`[readonly_violation]` = 只读账号不能写，数据变更走 execute 审批流；"
             "`[query_timeout]` = 收窄范围或改用聚合/分析工作台；"
             "`[connection_unavailable]` = 连接暂时断开、后台正在自动重连，按提示的秒数稍后重试即可；"
-            "`[connection_exhausted]` = 连续重连失败（仍在自动重试），提醒用户去后台看一眼连接。"
+            "`[connection_exhausted]` = 连续重连失败（仍在自动重试），提醒用户去后台看一眼连接；"
+            "`[result_budget_exceeded]` = 本会话累计返回的数据已达配额——**停下来问用户**是否"
+            "确认继续这些耗 token 的查询，用户同意后调 allow_more_results(reason=...) 再放行，"
+            "别靠重试绕过去。"
+            "\n完整使用说明（各场景该用哪套工具组合、边界在哪）会在本会话第一次调用工具时"
+            "随结果附上一份，也可随时调 usage_guide() 重读。"
         ),
     )
+
+    mcp.add_middleware(_FirstCallGuide(
+        USAGE_GUIDE, enabled=lambda: service.guide_on_first_call()))
+
+    @mcp.tool
+    def allow_more_results(
+        reason: Annotated[
+            str, Field(description="用户确认继续的说明，如「用户已确认：还要核对 3 张表的对账差异」。"
+                                   "会显示在后台看板上，供人核对确实问过")
+        ],
+        ctx: Context | None = None,
+    ) -> dict:
+        """本会话结果配额用尽后，**在用户确认继续之后**调用它再放行一个额度。
+
+        用法：取数被配额拒绝 → 停下来问用户「是否确认继续这些会消耗大量 token 的查询」，
+        说明还要查什么、大概多少 → 用户同意后调这个工具（把用户的确认写进 reason）→ 继续查。
+        **不要在没问过用户的情况下调它来绕过限制**——放行记录会显示在后台看板上。
+
+        在问用户之前先想想有没有更省的做法：聚合只取结论、export_table 落文件、
+        analysis_* 把计算下推到本地沙箱。
+        """
+        caller = _caller_from_ctx(ctx)
+        usage = service.result_budget().grant(caller.session_id, reason)
+        logger.info("会话 %s 追加结果配额（第 %d 次）：%s",
+                    caller.session_id or "-", usage["grants"], reason)
+        return {
+            "granted": True,
+            "used_chars": usage["used_chars"],
+            "allowance_chars": usage["allowance_chars"],
+            "grants": usage["grants"],
+            "note": "已放行一个额度，可以继续取数。请继续用聚合/收窄条件控制单次结果大小。",
+        }
+
+    @mcp.tool
+    def usage_guide() -> str:
+        """本服务的完整使用说明与最佳实践：各场景该用哪个工具或哪套组合、边界在哪。
+
+        会话第一次调用工具时已经随结果发过一份；忘了或者想确认某个场景的推荐做法时再调一次。
+        """
+        return USAGE_GUIDE
 
     @mcp.custom_route("/exports/{token:str}/{filename:str}", methods=["GET"])
     async def _download_export(req: Request) -> Response:
@@ -531,11 +649,16 @@ def build_mcp(service: DbmService) -> FastMCP:
         **不要重复拉全量**，改用 WHERE/LIMIT/聚合收窄，或用分析工作台（analysis_*）下推计算。
 
         非只读语句（含多语句、CTE 中夹带 DML、SELECT FOR UPDATE、SLEEP 等有副作用函数）会被拒绝。
+
+        还有一道**会话级**配额：本会话累计返回量超出上限后会被拒绝取数，届时请先问用户
+        是否继续，用户同意后调 allow_more_results 再放行。
         """
+        caller = _caller_from_ctx(ctx)
         try:
-            result = service.query(project, connection, sql, _caller_from_ctx(ctx))
+            _charge = _budget_gate(service, caller)
+            result = service.query(project, connection, sql, caller)
             budget = service.agent_result_budget(project, connection)
-            return render_agent_result(result, budget)
+            return _charge(render_agent_result(result, budget))
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
 
@@ -602,6 +725,59 @@ def build_mcp(service: DbmService) -> FastMCP:
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
         return result
+
+    @mcp.tool
+    async def sync_table_ddl(
+        source_project: str,
+        source_connection: Annotated[str, Field(description="源连接（结构从这里读）")],
+        target_project: str,
+        target_connection: Annotated[
+            str, Field(description="目标连接（在这里建表）；不能是 prod 环境的连接")
+        ],
+        tables: Annotated[
+            str, Field(description="要同步结构的表名，多张用逗号分隔，如 `orders,order_item,users`")
+        ],
+        source_database: Annotated[
+            str | None, Field(description="源库/schema；不传时用连接默认库")
+        ] = None,
+        target_database: Annotated[
+            str | None, Field(description="目标库/schema；不传时用连接默认库")
+        ] = None,
+        ddl: Annotated[
+            Literal["create_if_missing", "recreate"],
+            Field(description="create_if_missing=目标表不存在才建（已存在的跳过）；"
+                              "recreate=先 DROP 目标表再重建（破坏性，会丢掉目标表里已有的数据）"),
+        ] = "create_if_missing",
+        reason: Annotated[str, Field(description="同步原因，供审批人参考")] = "",
+        dry_run: Annotated[
+            bool, Field(description="只返回每张表的建表计划，不真的建表")
+        ] = False,
+        ctx: Context | None = None,
+    ) -> dict:
+        """批量同步表结构（不带任何数据），用于在本地照着线上库重建一套空表。
+
+        等价于对每张表调一次 `sync_table(ddl=…, data="none")`，只是不用一张张写。
+        同引擎用源库建表语句原文（保真）；跨引擎用 sqlglot 转写成**近似 DDL** 并在 warnings
+        里列出被剥掉的方言私有成分（ENGINE/CHARSET/二级索引等）——照着建出来的表能用，
+        但不等于源表的逐字复制。
+
+        目标是 local/dev 连接时直接执行；staging 目标每张表各生成一张审批单（所以建议
+        先 dry_run 看一遍计划）。目标不能是 prod 环境。单张表失败不影响其余表，
+        返回里逐表给出 status，失败的带 error。
+
+        要连数据一起拉一小撮样本，用 sync_table；要把数据取到文件而不进上下文，用 export_table。
+        """
+        names = [t.strip() for t in tables.split(",") if t.strip()]
+        try:
+            return await anyio.to_thread.run_sync(partial(
+                service.sync_table_ddls,
+                source_project, source_connection, target_project, target_connection,
+                names, _caller_from_ctx(ctx),
+                source_database=source_database, target_database=target_database,
+                ddl=ddl, reason=reason, dry_run=dry_run,
+            ))
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     async def sync_table(
@@ -796,6 +972,45 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise agent_error(e) from e
 
     @mcp.tool
+    def table_ddl(
+        project: str,
+        connection: str,
+        table: Annotated[
+            str, Field(description="表名；一次要多张就用逗号分隔，如 `orders,order_item`")
+        ],
+        database: Annotated[
+            str | None, Field(description="库/schema；不传时使用连接默认库")
+        ] = None,
+        ctx: Context | None = None,
+    ) -> str:
+        """查看建表语句（DDL）。比 describe_table 多给出索引定义、字符集、引擎、分区等原文细节。
+
+        MySQL / ClickHouse 返回 `SHOW CREATE TABLE` 的原文；PostgreSQL / SQLite 等没有这条
+        语句的引擎，返回由表结构反射拼出的**近似 DDL**（首行注释会标明），可用来读懂结构，
+        但不要当作可原样执行的建库脚本。
+
+        只需要字段名和类型时用 describe_table 更省上下文；要看索引怎么建的、有没有分区、
+        建表时的默认值/注释原文，才用这个。
+        """
+        names = [t.strip() for t in table.split(",") if t.strip()]
+        caller = _caller_from_ctx(ctx)
+        try:
+            # 单表走原路径：表名写错/无权限就该原样报错给 agent，而不是回一段
+            # 「取失败」的注释文本让它以为调用成功了。批量才需要逐表容错。
+            if len(names) == 1:
+                return service.get_table_ddl(project, connection, names[0], caller,
+                                             schema=database)
+            items = service.get_table_ddls(project, connection, names, caller, schema=database)
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+        # 多表：每段前加表名注释分隔，取失败的那张也如实标出来（不静默跳过）
+        return "\n\n".join(
+            f"-- {it['table']}\n" + (it["ddl"] if "ddl" in it
+                                     else f"-- 取建表语句失败: {it['error']}")
+            for it in items
+        )
+
+    @mcp.tool
     def sample_rows(
         project: str,
         connection: str,
@@ -803,11 +1018,16 @@ def build_mcp(service: DbmService) -> FastMCP:
         limit: Annotated[int, Field(ge=1, le=100)] = 10,
         ctx: Context | None = None,
     ) -> str:
-        """抽样查看表数据（默认 10 行，上限 100 行）。返回紧凑 TSV 文本（格式同 query）。"""
+        """抽样查看表数据（默认 10 行，上限 100 行）。返回紧凑 TSV 文本（格式同 query）。
+
+        与 query 共用同一份会话级结果配额。
+        """
+        caller = _caller_from_ctx(ctx)
         try:
-            result = service.sample_rows(project, connection, table, limit, _caller_from_ctx(ctx))
+            _charge = _budget_gate(service, caller)
+            result = service.sample_rows(project, connection, table, limit, caller)
             budget = service.agent_result_budget(project, connection)
-            return render_agent_result(result, budget)
+            return _charge(render_agent_result(result, budget))
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
 
