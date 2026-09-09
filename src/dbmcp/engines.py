@@ -24,6 +24,7 @@ from sqlalchemy.engine import Engine as SAEngine
 
 from . import __version__
 from .config import ConnectionConfig, SshIdentity
+from .metrics import estimate_cell_bytes, estimate_result_bytes
 from .secrets import resolve_secret
 from .tunnel import SSHTunnel, open_tunnel
 
@@ -59,6 +60,9 @@ class QueryResult:
     # 每列的权威类型分类（number/string/datetime/date/time/bool/json/binary/""），
     # 由原始 Python 值类型推断——供前端类型图标用，尤其大整数以字符串传输后仍标为 number。
     column_types: list[str] = field(default_factory=list)
+    # 结果集估算字节数（见 metrics.estimate_result_bytes）：落进审计供看板统计数据传输量。
+    # 写语句无结果集，恒为 0。
+    result_bytes: int = 0
 
 
 @dataclass
@@ -137,6 +141,47 @@ class EnginePool:
         with self._lock:
             for key in [k for k in self._entries if k[0] == project and k[1] == connection]:
                 self._entries.pop(key).dispose()
+
+    def stats(self) -> list[dict]:
+        """池内每个引擎的实时状态（看板「连接数」用）。
+
+        连接数分两层，看板要都给出来才有意义：**引擎数**是我们按
+        (project, connection, role, schema, database) 缓存了几个 SQLAlchemy 引擎；
+        **checked_out** 才是此刻真正占用的 DB 物理连接。SQLite 等用的池类型没有
+        QueuePool 的计数方法，取不到就给 None（不硬编 0，免得看板把「没这个指标」
+        显示成「有 0 条连接」）。
+        """
+        now = time.monotonic()
+        out = []
+        with self._lock:
+            items = list(self._entries.items())
+        for (project, connection, role, schema, database), entry in items:
+            pool = entry.engine.pool
+            def _num(name: str):  # noqa: ANN202
+                fn = getattr(pool, name, None)
+                if not callable(fn):
+                    return None
+                try:
+                    return int(fn())
+                except Exception:  # noqa: BLE001
+                    return None
+            out.append({
+                "kind": "sql",
+                "project": project,
+                "connection": connection,
+                "role": role,
+                "schema": schema,
+                "database": database,
+                "pool_class": type(pool).__name__,
+                "checked_out": _num("checkedout"),
+                "checked_in": _num("checkedin"),
+                "pool_size": _num("size"),
+                "overflow": _num("overflow"),
+                "idle_s": int(now - entry.last_used),
+                "tunnel": None if entry.tunnel is None else entry.tunnel.is_alive(),
+            })
+        out.sort(key=lambda e: (e["project"], e["connection"], e["role"]))
+        return out
 
     def dispose(self) -> None:
         with self._lock:
@@ -511,7 +556,8 @@ def run_query(
         else:
             columns, rows, truncated, column_types = [], [], False, []
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
-    return QueryResult(columns, rows, len(rows), truncated, duration_ms, column_types)
+    return QueryResult(columns, rows, len(rows), truncated, duration_ms, column_types,
+                       estimate_result_bytes(columns, rows))
 
 
 def truncate_cell(value: Any, max_chars: int) -> Any:
@@ -630,7 +676,7 @@ def search_tables(engine: SAEngine, engine_kind: str, q: str, limit: int = 50) -
 
 
 def fetch_rows_for_copy(
-    engine: SAEngine, sql: str, max_rows: int
+    engine: SAEngine, sql: str, max_rows: int, max_bytes: int | None = None
 ) -> tuple[list[str], list[list], bool]:
     """取数用于**跨库复制**：返回原生 Python 值，不做 JSON 化、不截断、不脱敏。
 
@@ -639,8 +685,12 @@ def fetch_rows_for_copy(
     损坏**。复制路径必须拿驱动返回的原值，再原样绑参写回目标表（datetime/Decimal/bytes
     都由目标驱动自己适配）。
 
-    返回 (列名, 行, 是否被 max_rows 截断)。调用方已在 SQL 里注入 LIMIT，这里的 +1 只用于
-    判断「源侧其实还有更多」，好在结果里如实告知。
+    返回 (列名, 行, 是否被截断)。行数上限由调用方注入进 SQL 的 LIMIT 保证，这里多取一行
+    只为判断「源侧其实还有更多」。
+
+    max_bytes 是**体积**上限：行数管不住行很宽的表（1 万行 BLOB 能有几个 GB）。累计到预算
+    就停止收行并标 truncated。注意它保护的是本进程内存与目标库的写入量——**源库那边**
+    已经按 LIMIT 把这些行发过来了（缓冲游标），要减轻源库压力只能调小 limit / 收窄 where。
     """
     with engine.connect() as conn:
         result = conn.execute(text(sql))
@@ -649,7 +699,19 @@ def fetch_rows_for_copy(
         columns = list(result.keys())
         fetched = result.fetchmany(max_rows + 1)
     truncated = len(fetched) > max_rows
-    return columns, [list(r) for r in fetched[:max_rows]], truncated
+    rows = [list(r) for r in fetched[:max_rows]]
+    if max_bytes and rows:
+        total, kept = 0, 0
+        for row in rows:
+            total += sum(estimate_cell_bytes(v) for v in row)
+            if total > max_bytes:
+                break
+            kept += 1
+        if kept < len(rows):
+            # 至少留一行：一行就超预算说明该表本身就宽，返回空会让调用方以为源表是空的
+            rows = rows[: max(kept, 1)]
+            truncated = True
+    return columns, rows, truncated
 
 
 def insert_rows(engine: SAEngine, table: str, columns: list[str],

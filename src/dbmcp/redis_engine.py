@@ -86,6 +86,39 @@ class RedisPool:
             for key in [k for k in self._entries if k[0] == project and k[1] == connection]:
                 self._entries.pop(key).dispose()
 
+    def stats(self) -> list[dict]:
+        """池内每个 Redis 客户端的实时状态（看板「连接数」用，与 EnginePool.stats 同构）。
+
+        redis-py 的连接池计数在 `_created_connections` / `_available_connections`
+        （无公开 API），取不到就给 None。
+        """
+        now = time.monotonic()
+        out = []
+        with self._lock:
+            items = list(self._entries.items())
+        for (project, connection, role, db), entry in items:
+            pool = getattr(entry.client, "connection_pool", None)
+            created = getattr(pool, "_created_connections", None)
+            available = getattr(pool, "_available_connections", None)
+            out.append({
+                "kind": "redis",
+                "project": project,
+                "connection": connection,
+                "role": role,
+                "schema": "",
+                "database": str(db),
+                "pool_class": type(pool).__name__ if pool is not None else "",
+                "checked_out": (int(created) - len(available)
+                                if isinstance(created, int) and available is not None else None),
+                "checked_in": len(available) if available is not None else None,
+                "pool_size": int(created) if isinstance(created, int) else None,
+                "overflow": None,
+                "idle_s": int(now - entry.last_used),
+                "tunnel": None if entry.tunnel is None else entry.tunnel.is_alive(),
+            })
+        out.sort(key=lambda e: (e["project"], e["connection"], e["role"]))
+        return out
+
     def dispose(self) -> None:
         with self._lock:
             for entry in self._entries.values():

@@ -146,6 +146,7 @@ codex mcp add dbm --url http://127.0.0.1:8100/mcp
 flowchart TB
     DB[("MySQL · PostgreSQL · SQLite · ClickHouse · Redis<br/>（内网库经 SSH 多跳直达）")]
     DB --> GOV["治理层<br/>连接与密码管理 · reader/writer 双账号<br/>SQL 风险审计 · 拒绝—重提审批 · 操作留痕 · 脱敏"]
+    GOV --> T0["看板<br/>连接占用 · 流量 · 谁在查（人用）"]
     GOV --> T1["查询台<br/>SQL IDE（人用）"]
     GOV --> T2["Redis 控制台<br/>（人用）"]
     GOV --> T3["分析工作台<br/>DuckDB 跨源（人 + agent）"]
@@ -240,16 +241,26 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 写操作：生成审批单并等待批准，批准即自动执行 |
 | `wait_for_change(change_id)` / `get_change_status(change_id)` | 超时后续等 / 立即查审批单状态 |
 | `sync_table(...)` | 把表从一个库同步到另一个库（典型：线上 → 本地）：结构 + 按条件取的少量数据。目标是 local/dev 连接直接执行（仍审计），staging 才走 execute 那套审批；目标不能是 prod |
+| `sync_table_ddl(...)` | 批量只同步表结构、不带数据（在本地照着线上重建一套空表），表名逗号分隔 |
 | `list_tables` / `describe_table` / `sample_rows` | 探索 schema |
+| `table_ddl(project, connection, table, database?)` | 看建表语句原文（索引/分区/字符集/注释）；表名逗号分隔可一次多张 |
 | `test_connection` | 连通性检查 |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 跨源分析（取数受审计和行数上限约束，沙箱内自由计算） |
 | `save_workflow` / `run_workflow` | 把分析沉淀成可重跑的流程（脚本或 DAG 画布） |
+| `usage_guide()` | 完整用法与最佳实践；会话第一次调用工具时已自动附过一份 |
+| `allow_more_results(reason)` | 会话结果配额用尽后、**问过用户并得到同意**才调，放行一个额度 |
 
 给 agent 的查询结果做了几项针对性处理：
 
 - 输出用紧凑的 TSV 格式而不是 JSON，实测省 25% 左右的 token。
 - 结果有两级硬上限：行数（默认 1000）和字符数（默认 40000，约 12k token），超限截断并提示用 WHERE / 聚合收窄——上限在服务端强制，agent 无法拉爆自己的上下文。
 - 超出 JavaScript 安全整数范围（2⁵³−1）的大整数以字符串返回，雪花 ID 之类的值不丢精度。
+- **会话第一次调用工具时随结果附一份完整使用说明**（各场景该用哪套工具组合、结果上限、
+  错误怎么读）。MCP instructions 各客户端处理不一，实测 agent 常常读不到；说明在它正要
+  用工具时送达，一个会话只发一次。可在系统设置里关掉，agent 仍可主动调 `usage_guide()`。
+- **会话级结果配额**：同一会话累计返回超过上限（默认 400000 字符≈114k token）后拒绝继续
+  取数，要求 agent 先问你是否确认继续，你同意后它调 `allow_more_results` 才放行一个额度。
+  单次上限管不住「一直查」，这道闸门管的是**整个会话**烧掉多少上下文。用量与放行次数在看板上。
 
 Redis 有意不暴露给 agent，只能由人在后台操作。
 

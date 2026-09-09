@@ -195,7 +195,7 @@ _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
 def _page(title: str, body: str, pending: int = 0, doc: bool = True,
-          font_size: int | None = None) -> str:
+          font_size: int | None = None, extra_head: str = "") -> str:
     nav_badge = f"<span class='nav-count'>{pending}</span>" if pending else ""
     banner = (f"<a class='pending-banner' href='/admin/approvals'>"
               f"⚠ <b>{pending}</b> 条数据变更待审批，点此处理 →</a>" if pending else "")
@@ -208,11 +208,12 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · Quay</title>
 {_FAVICON_LINK}
-<link rel="stylesheet" href="/admin/static/admin-chrome.css">{doc_css}{font_css}</head><body>
+<link rel="stylesheet" href="/admin/static/admin-chrome.css">{doc_css}{font_css}{extra_head}</head><body>
 <div class="shell">
  <aside class="side">
   <div class="brand">{_FAVICON_SVG}<div><b>Quay</b><span>gatekeeper</span></div></div>
   <nav>
+   <a href="/admin/dashboard"><span class="nico nico-dash"></span><span class="nlabel">看板</span></a>
    <a href="/admin/sql"><span class="nico nico-sql"></span><span class="nlabel">查询台</span></a>
    <a href="/admin/redis"><span class="nico nico-redis"></span><span class="nlabel">Redis</span></a>
    <a href="/admin/workflows"><span class="nico nico-flow"></span><span class="nlabel">流程</span></a>
@@ -276,6 +277,54 @@ def _pagehead(eyebrow: str, title: str, sub: str = "") -> str:
     subline = f'<div class="muted" style="margin-top:4px">{_esc(sub)}</div>' if sub else ""
     return (f'<div class="pagehead"><div class="eyebrow">{_esc(eyebrow)}</div>'
             f'<h2 style="font-size:22px">{_esc(title)}</h2>{subline}</div>')
+
+
+def _dashboard_body() -> str:
+    """看板页骨架。内容全部由 dashboard.js 拉 /admin/dashboard/data 填充——
+
+    这一页每几秒就要整体换一遍数，服务端渲染出来立刻就会被 JS 覆盖掉，
+    不如只给容器（其余服务端渲染页仍照旧，不改风格）。
+    """
+    return """<div class="pagehead">
+ <div class="eyebrow">dashboard</div>
+ <h2 style="font-size:22px">看板</h2>
+ <div class="muted" style="margin-top:4px">连接占用、数据传输量与此刻正在执行的查询。
+  传输量为结果集体积的估算值（按返回给使用者的单元格内容计），不含协议开销。</div>
+</div>
+<div id="dash">
+ <div class="dash-bar">
+  <div class="dash-win" id="dash-win"></div>
+  <span class="dash-live-dot" id="dash-dot"></span>
+  <label class="dash-auto"><input type="checkbox" id="dash-auto"> 自动刷新</label>
+  <span class="spacer"></span>
+  <span class="dash-meta" id="dash-updated">加载中…</span>
+ </div>
+ <div class="errbar" id="dash-err" style="display:none"></div>
+ <div class="dash-tiles" id="dash-tiles"></div>
+ <div class="dash-charts">
+  <div class="card">
+   <div class="chart-head"><h3>操作数</h3><span class="tot" id="dash-ops-total"></span></div>
+   <div id="dash-chart-ops"></div>
+  </div>
+  <div class="card">
+   <div class="chart-head"><h3>读出数据量</h3><span class="tot" id="dash-bytes-total"></span></div>
+   <div id="dash-chart-bytes"></div>
+  </div>
+ </div>
+ <div class="card"><h2>此刻正在执行</h2><div id="dash-live"></div></div>
+ <div class="card"><h2>连接</h2><div id="dash-conns"></div></div>
+ <div class="card"><h2>活跃会话</h2><div id="dash-sessions"></div></div>
+ <div class="card"><h2>会话结果配额</h2>
+  <div class="muted" style="margin-bottom:10px">agent 把多少数据搬进了自己的上下文。
+   撞到上限后它会被拒绝取数，须先问你、你同意后它才能追加额度——「已放行」列即它问过几次。</div>
+  <div id="dash-budgets"></div>
+ </div>
+ <div class="card"><h2>排行</h2><div class="dash-cols">
+  <div><div class="sec-title">连接</div><div id="dash-top-conn"></div></div>
+  <div><div class="sec-title">工具</div><div id="dash-top-tool"></div></div>
+  <div><div class="sec-title">agent</div><div id="dash-top-agent"></div></div>
+ </div></div>
+</div>"""
 
 
 def _env_badge(env: str) -> str:
@@ -858,12 +907,24 @@ def _settings_db_body(s: dict) -> str:
                         "按内置词表（password / token / secret / id_card…）猜哪些列敏感，命中即以 ***MASKED*** 返回。"
                         "<b>只作用于 agent 的 query / sample_rows</b>——查询台与导出一直是真实值。"
                         "单个连接可在「连接管理」里覆盖这里；连接上手动点名的「脱敏列」不受本开关影响。")
+        + _bool_setting("首次调用附带使用说明", "agent_guide_on_first_call", s, True,
+                        "开（推荐）", "关",
+                        "agent 每个会话第一次调用工具时，随结果附一份完整使用说明与最佳实践"
+                        "（各场景该用哪套工具、结果上限、错误怎么读），减少误用与无效重试。"
+                        "一个会话只发一次；关掉后 agent 仍可主动调 usage_guide 读。")
+        + _num_setting("Agent 会话结果配额（字符）", "agent_session_budget_chars", s, 400000,
+                       "单个 agent 会话累计最多返回多少字符（默认 400000≈114k token）。"
+                       "撞到就拒绝继续取数，要求 agent 先问你是否继续；你同意后它调 "
+                       "allow_more_results 再放行一个额度（放行次数见看板）。0 = 不限制。")
         + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
                        "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
                        "连接级 Policy 可单独覆盖。")
         + _num_setting("表同步单次行数上限", "sync_max_rows", s, 10000,
                        "agent 用 sync_table 把线上表同步到本地库时，单次最多同步多少行。"
                        "agent 传的 limit 会被夹到这个上限内——它是拉样本数据用的，不是全量迁移工具。")
+        + _num_setting("表同步单次体积上限（字节）", "sync_max_bytes", s, 64 * 1024 * 1024,
+                       "单次同步最多搬多少数据（估算值，默认 64 MB）。行数管不住行很宽的表——"
+                       "1 万行 BLOB 可能有几个 GB；累计到这里就停下并在结果里标明截断。")
         + _num_setting("审批等待时长（秒）", "approval_wait_seconds", s, 120,
                        "agent 提交写操作后，服务端等你审批的秒数：你在审批页点批准，"
                        "agent 那边即刻自动执行、无需你回会话里说一声。0 = 不等待（只返回审批单号）；"
@@ -1341,7 +1402,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return await handler(req)
         return _wrapped
 
-    def _shell(title: str, body: str, doc: bool = True) -> HTMLResponse:
+    def _shell(title: str, body: str, doc: bool = True,
+               extra_head: str = "") -> HTMLResponse:
         """渲染登录后的页面，自动注入待审批数（侧栏角标 + 顶部横幅）。"""
         try:
             # 惰性过期：存储态还是 pending 但已过 TTL 的单不该继续闪红点
@@ -1355,7 +1417,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 fs = int(service.get_settings().get("ui_font_size") or 14)
             except Exception:
                 fs = None
-        return HTMLResponse(_page(title, body, pending=pending, doc=doc, font_size=fs))
+        return HTMLResponse(_page(title, body, pending=pending, doc=doc, font_size=fs,
+                                  extra_head=extra_head))
 
     @mcp.custom_route("/favicon.ico", methods=["GET"])
     @mcp.custom_route("/favicon.svg", methods=["GET"])
@@ -1396,6 +1459,26 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     @guard
     async def _index(_req: Request) -> RedirectResponse:
         return RedirectResponse(url="/admin/approvals")
+
+    @mcp.custom_route("/admin/dashboard", methods=["GET"])
+    @guard
+    async def _dashboard(_req: Request) -> HTMLResponse:
+        head = ('<link rel="stylesheet" href="/admin/static/dashboard.css">'
+                '<script defer src="/admin/static/dashboard.js"></script>')
+        return _shell("看板", _dashboard_body(), extra_head=head)
+
+    @mcp.custom_route("/admin/dashboard/data", methods=["GET"])
+    @guard
+    async def _dashboard_data(req: Request) -> JSONResponse:
+        window = req.query_params.get("window") or "24h"
+        try:
+            # 只读 SQLite + 进程内状态，不触达任何业务库；仍卸到线程避免审计表大时
+            # 的聚合查询阻塞同一 ASGI 上的 agent 调用。
+            snap = await anyio.to_thread.run_sync(
+                partial(service.dashboard_snapshot, window))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e), status_code=400)
+        return JSONResponse(snap)
 
     @mcp.custom_route("/admin/exports", methods=["GET"])
     @guard

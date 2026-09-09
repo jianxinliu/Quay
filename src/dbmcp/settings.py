@@ -48,8 +48,17 @@ DEFAULTS: dict[str, object] = {
     "approval_wait_seconds": 120,
     # ——表同步（sync_table）：单次最多同步多少行（agent 传的 limit 会被夹到这个上限内）
     "sync_max_rows": 10000,
+    # 单次最多搬多少字节（估算值）。行数管不住「行很宽」的表——1 万行 BLOB 能有几个 GB，
+    # 把常驻进程的内存和目标库一起拖垮。到预算就停下并如实标注截断。
+    "sync_max_bytes": 64 * 1024 * 1024,
     # ——Agent 输出
-    "agent_max_result_chars": 40000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
+    # 会话第一次调用工具时，随结果附一份完整使用说明与最佳实践（见 guide.py）。
+    # 关掉只影响这份「自动送达」，agent 仍可主动调 usage_guide()。
+    "agent_guide_on_first_call": True,
+    "agent_max_result_chars": 40000,
+    # 单个 agent 会话累计能返回多少字符（≈token×3.5）。撞到就拒绝继续取数，要求 agent
+    # 先问用户，用户同意后调 allow_more_results 再放行一个额度。0 = 不限制。
+    "agent_session_budget_chars": 400_000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
     # ——AI 辅助写 SQL（查询台「✨ AI」按钮；产物只回填编辑器/画布、不执行）
     "ai_enabled": True,            # 总开关：关则前端按钮不出现、路由直接 403
     "ai_provider": "claude",       # AI 后端：claude / codex（命令行）/ api（直连 HTTP）
@@ -85,8 +94,10 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
     "redis_scan_count": (50, 10_000),
     "redis_min_dbs": (1, 256),
     "agent_max_result_chars": (2000, 500_000),
+    "agent_session_budget_chars": (0, 20_000_000),
     "approval_wait_seconds": (0, 3600),
     "sync_max_rows": (1, 200_000),
+    "sync_max_bytes": (1024 * 1024, 8 * 1024 * 1024 * 1024),
     "mcp_max_concurrency": (10, 500),
     "engine_pool_size": (5, 100),
     "ai_timeout_s": (10, 600),

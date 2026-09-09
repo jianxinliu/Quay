@@ -27,10 +27,14 @@ DeepSeek Harness 会把工具注册成 `mcp__<serverName>__<原名>`（例如 `m
 | 回溯改动 | `session_history(session_id?, writes_only?, status?, fields?, limit?)` | 看某次会话跑过的操作；写操作带审批单号与 `rollback_note`（改动前的值/怎么回滚）。**默认不返回 SQL 原文与错误明细**，要看用 `fields="sql,detail"` |
 | 发现 | `list_projects` / `list_connections` | 找到目标连接（项目 → 连接） |
 | 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
+| 建表语句 | `table_ddl(project, connection, table, database?)` | 看 DDL 原文（索引定义/分区/字符集/注释）；表名逗号分隔可一次多张。只要字段和类型用 `describe_table` 更省 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
 | 数据导出 | `export_table(project, connection, table, fields?, limit?, format?, database?)` | 按库、表、字段和行数导出 CSV/JSON/Markdown/XLSX 文件 |
 | 数据变更 | `execute(project, connection, sql, reason?, rollback_note?, change_id?, wait_seconds?)` + `wait_for_change(change_id)` / `get_change_status(change_id)` | 提交后就地等人批准、批准即自动执行，见下 |
 | 表同步 | `sync_table(source_project, source_connection, source_table, target_project, target_connection, ...)` | 把一张表从一个库同步到另一个库（线上 → 本地），结构 + 少量数据，同 execute 走审批，见下 |
+| 结构同步 | `sync_table_ddl(source_*, target_*, tables, ddl?, dry_run?)` | 批量只同步表结构、不带数据（在本地照着线上重建一套空表），表名逗号分隔 |
+| 追加配额 | `allow_more_results(reason)` | 本会话取数被配额拒绝后，**问过用户并得到同意**才调，放行一个额度 |
+| 使用说明 | `usage_guide()` | 本服务的完整用法与最佳实践；会话第一次调用工具时已自动附过一份 |
 | 连通性 | `test_connection(project, connection)` | SELECT 1 |
 | 跨源分析 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 本地沙箱，见下 |
 | 流程沉淀 | `save_workflow(name, workspace, script)` | 把验证过的分析脚本存为可重跑 workflow |
@@ -138,8 +142,10 @@ sync_table(source_project=..., source_connection="prod-mysql", source_table="ord
 
 - **同步什么**：`ddl` 控制结构（`skip` 不建表 / `create_if_missing` 默认 / `recreate` 先删再建），
   `data` 控制数据（`none` 只要结构 / `append` 默认 / `replace` 先清空目标表）。
-- **数据量有硬上限**：默认 1000 行，服务端还有 `sync_max_rows` 上限。它是拉**样本**用的，
-  不是全量迁移工具——想搬全库请让用户走导出/导入。**务必带上 `where` 收窄**。
+- **数据量有双重硬上限**：行数（默认 1000，服务端 `sync_max_rows` 封顶）**和体积**
+  （`sync_max_bytes`，默认 64MB——行数管不住行很宽的表）。任一撞上都会只搬前一部分并在
+  `note` 里说明是哪一个。它是拉**样本**用的，不是全量迁移工具——想搬全库请让用户走
+  导出/导入。**务必带上 `where` 收窄**。
 - **先看计划**：`dry_run=True` 只返回计划（建表语句、要复制的列、告警），不占审批单，
   适合先给用户确认「要同步的是这些」。
 - **目标是 local/dev 连接时不需要审批**：直接执行并返回 `status=executed`（动的不是线上
@@ -150,6 +156,27 @@ sync_table(source_project=..., source_connection="prod-mysql", source_table="ord
 - **限制**：目标连接不能是 prod（拒绝往生产灌数）；目标要配了 writer 账号；
   ClickHouse 只能做源，Redis 不参与。同步的是**真实值不脱敏**，从生产同步时提醒用户
   本地会留下一份生产数据副本。
+
+### 2.6 只重建结构 / 做本地备份（`sync_table_ddl` + `export_table`）
+
+只想在本地照着线上建一套**空表**（不要数据）时用 `sync_table_ddl`，一次可传多张表：
+
+```
+sync_table_ddl(source_project=..., source_connection="prod-mysql",
+               target_project=..., target_connection="local-mysql",
+               tables="orders,order_item,users")
+```
+
+- 等价于对每张表跑 `sync_table(data="none")`，只是不用一张张写；同引擎用源库建表语句
+  原文，跨引擎转写成近似 DDL 并在 `warnings` 里列出剥掉的东西。
+- 单张表失败不影响其余表：返回里逐表给 `status`，失败的带 `error`。
+- 目标是 staging 时**每张表各一张审批单**——先 `dry_run=True` 看一遍计划再提交。
+
+**做本地备份**的正确组合是「结构 + 文件」，不是让 `sync_table` 搬全量：
+
+1. `sync_table_ddl(...)` 在本地建好结构；
+2. `export_table(...)` 把数据导成文件，返回 `download_url`；
+3. 用程序把文件下载到目标位置——**绝不要把文件内容读进上下文**。
 
 ### 3. 跨源分析（分析工作台）
 
@@ -203,6 +230,12 @@ run_workflow(name)   → {steps: [每步 ✓/✗ 与行数], output: 最终结�
 - 拿不到权限/被审批卡住时：把 approval_url 给用户并用 `wait_for_change` 等着，
   不要反复重提同一条写操作，也不要循环调 `get_change_status` 空轮询。
 - 大表探索先 `describe_table` + `sample_rows`，别上来就 `SELECT *`。
+- **会话有结果配额**：本会话累计返回的字符数有上限（系统设置 `agent_session_budget_chars`，
+  默认 400000≈114k token）。接近时结果末尾会多出一行 `# budget: …` 提醒；超出后取数被拒。
+  **这时要停下来问用户**是否确认继续这些耗 token 的查询，用户同意后调
+  `allow_more_results(reason="用户已确认：……")` 再继续——放行记录会显示在后台看板上，
+  不要在没问过用户的情况下调它来绕过限制。与其撞墙，不如一开始就把聚合写进 SQL、
+  用 `export_table` 落文件、或用分析工作台把计算下推。
 - Redis 不对 agent 开放：没有 Redis MCP 工具，`list_connections` 也不会返回 Redis 连接。
   Redis 只能由人在管理后台的 Redis 控制台操作，需要 Redis 数据时请让用户去后台处理。
 
@@ -220,6 +253,7 @@ run_workflow(name)   → {steps: [每步 ✓/✗ 与行数], output: 最终结�
 | `[duplicate_key]` / `[constraint_violation]` | 唯一键或外键/非空约束冲突 | 检查待写数据，或改用 UPSERT 语义 |
 | `[connection_unavailable]` | 连接暂时断开，后台正在自动退避重连 | 按提示的秒数**稍后重试**即可，连接恢复后会自动放行 |
 | `[connection_exhausted]` | 连续重连失败（**仍在每 60 秒自动重试**，不会永久放弃） | 告诉用户去管理后台看一眼；后台查询台的连接告警条上有「立即重连」 |
+| `[result_budget_exceeded]` | 本会话累计取回的数据已达配额 | 停下来问用户是否继续，同意后调 `allow_more_results` 再查；别靠重试绕过去 |
 | `[db_error]` | 未归类的数据库错误（已脱敏） | 按错误正文调整，不要原样重试 |
 
 ## 写 SQL 的约定（务必遵守）
