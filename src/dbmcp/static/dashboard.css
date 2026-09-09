@@ -1,9 +1,6 @@
-/* 看板（/admin/dashboard）：统计卡片 + 手绘 SVG 柱图 + 实时表格。
+/* 看板（/admin/dashboard）：统计卡片 + echarts 图表 + 实时表格。
    只在这一页加载，沿用 admin-doc.css 的 .card/.badge/table 等既有原语，
-   这里只补它没有的东西（指标磁贴、图表、在途操作行）。
-
-   有意不引 echarts：这页要的只是「几十根柱子」，用 <rect> 画比拉一个图表库
-   （以及它与 Monaco loader 的 AMD 冲突，见 CLAUDE.md）省事得多。 */
+   这里只补它没有的东西（指标磁贴、图表容器、在途操作行）。 */
 
 .dash-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
 .dash-bar .spacer{flex:1}
@@ -40,13 +37,38 @@
 .chart-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
 .chart-head h3{margin:0}
 .chart-head .tot{font-family:var(--mono);font-size:12px;color:var(--muted)}
-.chart svg{display:block;width:100%;height:110px}
-.chart .xaxis{display:flex;justify-content:space-between;margin-top:6px;
-  font-family:var(--mono);font-size:11px;color:var(--faint)}
-.chart-empty{height:110px;display:flex;align-items:center;justify-content:center;
+/* echarts 需要一个有确定高度的容器，否则 init 时量到 0 高什么都画不出来 */
+#dash-chart-ops,#dash-chart-bytes{height:170px}
+/* 空窗口不画空坐标轴：一条平线比一句话更让人犯嘀咕 */
+#dash-chart-ops.is-empty,#dash-chart-bytes.is-empty{
+  display:flex;align-items:center;justify-content:center;
   color:var(--faint);font-size:13px;border:1px dashed var(--border);border-radius:8px}
+#dash-chart-ops.is-empty>*,#dash-chart-bytes.is-empty>*{display:none}
+#dash-chart-ops.is-empty::after,#dash-chart-bytes.is-empty::after{content:attr(data-empty-text)}
 
 /* ---- 表格补充 ---- */
+/* 固定高度 + 内部滚动：连接和会话都可能几十行，平铺下去整页会被一张表撑得老长，
+   下面的卡片全被推到屏幕外。表头 sticky，滚动时仍知道每列是什么。 */
+.dash-scroll{max-height:300px;overflow-y:auto;overflow-x:auto}
+.dash-scroll thead th{position:sticky;top:0;z-index:1;background:var(--surface);
+  box-shadow:inset 0 -1px 0 var(--border)}
+.dash-scroll,.dash-scroll *{scrollbar-width:thin}
+/* 连接的主机/库信息可能很长（SQLite 的绝对路径、带参数的 DSN），
+   截断成一行、悬停看全文——否则每行折成三行，一屏只剩三条连接。 */
+.connmeta{display:block;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cardsub{font-size:12px;font-weight:400;color:var(--faint);font-family:var(--mono);margin-left:8px}
+
+/* 可排序表头：整格可点，当前排序列的箭头实心、其余留一个淡色占位，
+   免得 hover 时箭头忽然出现把文字挤动一下。 */
+th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortable:hover{color:var(--text)}
+.sarrow{display:inline-block;width:0;height:0;margin-left:5px;vertical-align:middle;
+  border-left:4px solid transparent;border-right:4px solid transparent;
+  border-bottom:5px solid var(--border)}
+th.sortable:hover .sarrow{border-bottom-color:var(--faint)}
+.sarrow.asc{border-bottom-color:var(--accent)}
+.sarrow.desc{border-bottom:none;border-top:5px solid var(--accent)}
+
 .dash-empty{padding:18px 2px;color:var(--faint);font-size:13px}
 .num{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
 .dash-sql{font-family:var(--mono);font-size:12px;color:var(--muted);
