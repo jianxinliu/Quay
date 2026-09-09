@@ -829,120 +829,235 @@ _SETTINGS_TABS = [("general", "整体设置"), ("db", "DB"), ("redis", "Redis"),
                   ("ai", "AI 助手"), ("notify", "通知"),
                   ("connections", "连接管理"), ("ssh", "SSH 配置"), ("info", "系统信息")]
 
-_SETTINGS_SUBMIT_JS = """<script>
-document.querySelectorAll('form.settings-form').forEach(function(f){
-  f.addEventListener('submit', async function(e){
-    e.preventDefault();
-    var msg=f.querySelector('.settings-msg'); if(msg)msg.textContent='保存中…';
-    try{ var r=await fetch('/admin/settings/save',{method:'POST',body:new FormData(f)});
-      var d=await r.json();
-      if(msg)msg.textContent=d.ok?'✓ 已保存（重新打开查询台/Redis 生效）':'保存失败：'+d.error;
-    }catch(err){ if(msg)msg.textContent='保存失败：'+err; }
-  });
-});
-</script>"""
+# 分区按「做什么用」分组，而不是平铺八个 tab——组本身就是信息：
+# 偏好=看着舒服，能力=接外部服务，资源=连库与凭证，系统=只读信息。
+_SETTINGS_GROUPS = [
+    ("偏好", [("general", "整体"), ("db", "查询与 Agent"), ("redis", "Redis")]),
+    ("能力", [("ai", "AI 助手"), ("notify", "通知")]),
+    ("资源", [("connections", "连接管理"), ("ssh", "SSH 配置")]),
+    ("", [("info", "系统信息")]),
+]
+_SETTINGS_TABS = [(k, label) for _, items in _SETTINGS_GROUPS for k, label in items]
 
 
-def _settings_tabs(active: str) -> str:
-    items = "".join(
-        f"<a class='stab{' active' if active == k else ''}' "
-        f"href='/admin/settings?tab={k}'>{_esc(label)}</a>"
-        for k, label in _SETTINGS_TABS
-    )
-    return f"<div class='stabs'>{items}</div>"
+def _settings_nav(active: str) -> str:
+    parts = []
+    for gi, (_, items) in enumerate(_SETTINGS_GROUPS):
+        if gi:
+            parts.append("<span class='sep'></span>")
+        links = "".join(
+            f"<a class='{'on' if active == k else ''}' href='/admin/settings?tab={k}'>"
+            f"{_esc(label)}</a>" for k, label in items)
+        parts.append(f"<div class='grp'>{links}</div>")
+    return f"<nav class='set-nav'>{''.join(parts)}</nav>"
 
 
-def _settings_form(inner: str) -> str:
-    return (f"<div class='card' style='max-width:560px'><form class='settings-form'>{inner}"
-            "<button class='btn btn-primary' type='submit'>保存</button>"
-            "<span class='settings-msg muted' style='margin-left:12px'></span>"
-            f"</form></div>{_SETTINGS_SUBMIT_JS}")
+def _settings_head(searchable: bool) -> str:
+    """页头：标题 + 一句话说明；表单页额外给一个搜索框。"""
+    box = ("<div class='set-search'><input type='search' placeholder='搜索设置…' "
+           "aria-label='搜索设置'></div>" if searchable else "")
+    return ("<div class='set-head'><div>"
+            "<h2>系统设置</h2>"
+            "<div class='sub'>改动保存在服务端，所有浏览器一致。</div>"
+            "</div><div class='spacer'></div>" + box + "</div>")
 
 
-def _num_setting(label: str, name: str, s: dict, default: object, hint: str) -> str:
-    return ("<div style='margin-bottom:16px'>"
-            + _field(label, name, s.get(name, default), ph=str(default), typ="number", width="200px")
-            + f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
+def _set_changed(name: str, s: dict) -> bool:
+    """当前值是否偏离默认。治理工具里「我把哪道护栏放松了」必须一眼可见。"""
+    from .settings import DEFAULTS  # noqa: PLC0415
+    if name not in DEFAULTS or name not in s:
+        return False
+    return str(s.get(name)) != str(DEFAULTS[name])
+
+
+def _set_row(name: str, label: str, desc: str, control: str, s: dict | None = None,
+             wide: bool = False, more: str = "") -> str:
+    """一条账本行：左边「这是什么」，右边「现在是多少」。"""
+    tag = ("<span class='set-tag'>已改</span>"
+           if s is not None and _set_changed(name, s) else "")
+    extra = (f"<details class='set-more'><summary>展开说明</summary>"
+             f"<div class='body'>{more}</div></details>" if more else "")
+    return (f"<div class='set-row{' wide' if wide else ''}'>"
+            f"<div><div class='nm'>{_esc(label)}{tag}</div>"
+            f"<p class='desc'>{desc}</p>{extra}</div>"
+            f"<div class='ctl'>{control}</div></div>")
+
+
+def _set_section(title: str, desc: str, rows: str, guard: bool = False,
+                 folded: bool = False) -> str:
+    """一个分区。folded=True 时默认收起——留给提示词这类「几十行文本框、平时不看」的内容，
+    否则它们会把整页撑长，把真正要调的旋钮挤到屏幕外。"""
+    head = (f"<h3>{_esc(title)}</h3>" + (f"<p>{desc}</p>" if desc else ""))
+    if folded:
+        return (f"<section class='set-sec fold'><details><summary>{head}</summary>"
+                f"{rows}</details></section>")
+    return (f"<section class='set-sec{' guard' if guard else ''}'>"
+            f"<header>{head}</header>{rows}</section>")
+
+
+def _settings_layout(sections: str, active: str, actions: str = "") -> str:
+    """表单型设置页的外壳：分区导航 + 表单 + 浮出的改动条。"""
+    return ("<div class='set-page'>"
+            + _settings_head(True) + _settings_nav(active)
+            + "<form class='settings-form'>" + sections
+            + "<div class='set-empty' style='display:none'>没有匹配的设置项。</div>"
+            + "<div class='set-bar'><span class='n'></span><span class='spacer'></span>"
+            + "<span class='msg'></span>" + actions
+            + "<button type='button' class='reset'>放弃</button>"
+            + "<button type='button' class='save'>保存改动</button></div>"
+            + "</form></div>")
+
+
+def _plain_settings_page(content: str, active: str) -> str:
+    """非表单型 tab（连接管理 / SSH / 系统信息）：同一套页头与分区导航。
+
+    比表单页宽：这几个 tab 装的是表格，不是需要控制行长的正文，
+    920px 会把「地址」「跳板」这种两字表头挤到折行。
+    """
+    return (f"<div class='set-page wide'>{_settings_head(False)}"
+            f"{_settings_nav(active)}{content}</div>")
+
+
+def _num_setting(label: str, name: str, s: dict, default: object, hint: str,
+                 unit: str = "", read: str = "", more: str = "") -> str:
+    """数字设置。read=bytes/tokens 时前端把原始值换算成人话显示在输入框下面。"""
+    val = _esc(str(s.get(name, default)))
+    suffix = f"<span class='unit'>{_esc(unit)}</span>" if unit else ""
+    ctl = (f"<input type='number' name='{name}' value='{val}' placeholder='{_esc(str(default))}'>"
+           f"{suffix}<span class='read' data-kind='{read}'></span>")
+    return _set_row(name, label, hint, ctl, s, more=more)
 
 
 def _bool_setting(label: str, name: str, s: dict, default: bool,
-                  on_text: str, off_text: str, hint: str) -> str:
+                  on_text: str, off_text: str, hint: str, more: str = "") -> str:
+    """开关。二元状态就该长得像二元状态——原来用 <select> 装「开/关」，
+    既占一整个下拉的宽度，也要点开才知道当前是哪一档。
+
+    值由隐藏 input 承载：未勾选的复选框不会进 FormData，而保存接口要显式的 true/false。
+    """
     on = bool(s.get(name, default))
-    opts = (f"<option value='true'{' selected' if on else ''}>{_esc(on_text)}</option>"
-            f"<option value='false'{'' if on else ' selected'}>{_esc(off_text)}</option>")
-    return (f"<div style='margin-bottom:16px'><label>{_esc(label)}</label>"
-            f"<select name='{name}' style='width:200px'>{opts}</select>"
-            f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
+    ctl = (f"<input type='hidden' name='{name}' value='{'true' if on else 'false'}'>"
+           f"<label class='sw'><input type='checkbox' data-field='{name}'"
+           f"{' checked' if on else ''} data-on='{_esc(on_text)}' data-off='{_esc(off_text)}'>"
+           f"<span class='track'></span><span class='state'></span></label>")
+    return _set_row(name, label, hint, ctl, s, more=more)
+
+
+def _select_setting(label: str, name: str, s: dict, default: str,
+                    options: list[tuple[str, str]], hint: str, more: str = "") -> str:
+    cur = str(s.get(name, default))
+    opts = "".join(f"<option value='{v}'{' selected' if cur == v else ''}>{_esc(t)}</option>"
+                   for v, t in options)
+    return _set_row(name, label, hint, f"<select name='{name}'>{opts}</select>", s, more=more)
 
 
 def _settings_general_body(s: dict) -> str:
-    def sel(v: str) -> str:
-        return " selected" if s.get("theme") == v else ""
-    return _settings_form(
-        "<div style='margin-bottom:16px'><label>界面主题</label>"
-        f"<select name='theme' style='width:200px'>"
-        f"<option value='dark'{sel('dark')}>深色（默认）</option>"
-        f"<option value='light'{sel('light')}>浅色</option></select>"
-        "<div class='muted' style='margin-top:4px'>作用于查询台与 Redis 控制台的深色 IDE 界面。</div></div>"
-        + _num_setting("后台整体字号（px）", "ui_font_size", s, 14, "后台各页面的基础字号，10–20 之间。")
-        + _bool_setting("审计页默认自动刷新", "audit_auto_refresh", s, False,
-                        "开启（每 5s）", "关闭（默认）", "打开操作审计页时是否默认每 5 秒自动刷新。")
-        + _bool_setting("审计页默认隐藏 admin-ui", "audit_hide_admin_ui", s, True,
-                        "隐藏（默认）", "显示", "默认是否隐藏 agent=admin-ui（查询台自身操作）的审计记录。"))
+    return _settings_layout(
+        _set_section(
+            "外观", "后台各页面的基础观感。查询台与 Redis 是独立的深色 IDE，主题在这里切。",
+            _select_setting("界面主题", "theme", s, "dark",
+                            [("dark", "深色（默认）"), ("light", "浅色")],
+                            "作用于查询台与 Redis 控制台；后台其余页面始终是浅色。")
+            + _num_setting("后台字号", "ui_font_size", s, 14,
+                           "后台各页面的基础字号，10–20 之间。", unit="px"))
+        + _set_section(
+            "操作审计页", "打开审计页时的默认视图，随时可在页面上临时切换。",
+            _bool_setting("自动刷新", "audit_auto_refresh", s, False,
+                          "每 5 秒", "关闭",
+                          "打开审计页时是否默认每 5 秒拉一次最新记录。")
+            + _bool_setting("隐藏后台自身操作", "audit_hide_admin_ui", s, True,
+                            "隐藏", "显示",
+                            "查询台自己跑的 SQL 也会进审计（agent=admin-ui）。"
+                            "默认隐藏，只看 agent 的操作。")),
+        "general")
 
 
 def _settings_db_body(s: dict) -> str:
-    return _settings_form(
-        _num_setting("查询台结果每页行数", "sql_page_size", s, 100, "查询台（DB）结果分页大小。")
-        + _bool_setting("编辑器 minimap（代码缩略图）", "sql_minimap", s, True,
-                        "显示（默认）", "隐藏", "编辑器右侧代码缩略图，隐藏可让出更多编辑宽度。")
-        + _num_setting("编辑器字号（px）", "sql_font_size", s, 13, "查询台 SQL 编辑器字号，10–24 之间。")
-        + _bool_setting("编辑器自动换行", "sql_word_wrap", s, False,
-                        "开启", "关闭（默认）", "超出宽度的长 SQL 是否自动折行。")
-        + _num_setting("结果默认行上限", "sql_max_rows", s, 1000,
-                       "缺 LIMIT 的查询自动兜底的行上限、非分页读取的截断上限。")
-        + _num_setting("单元格最大字符数", "sql_max_cell_chars", s, 4096,
-                       "超长 TEXT/BLOB 单元格截断的字符数。")
-        + _bool_setting("敏感列自动脱敏（agent 查询）", "mask_sensitive_columns", s, True,
-                        "开：自动脱敏（默认）", "关：返回真实值",
-                        "按内置词表（password / token / secret / id_card…）猜哪些列敏感，命中即以 ***MASKED*** 返回。"
-                        "<b>只作用于 agent 的 query / sample_rows</b>——查询台与导出一直是真实值。"
-                        "单个连接可在「连接管理」里覆盖这里；连接上手动点名的「脱敏列」不受本开关影响。")
-        + _bool_setting("首次调用附带使用说明", "agent_guide_on_first_call", s, True,
-                        "开（推荐）", "关",
-                        "agent 每个会话第一次调用工具时，随结果附一份完整使用说明与最佳实践"
-                        "（各场景该用哪套工具、结果上限、错误怎么读），减少误用与无效重试。"
-                        "一个会话只发一次；关掉后 agent 仍可主动调 usage_guide 读。")
-        + _num_setting("Agent 会话结果配额（字符）", "agent_session_budget_chars", s, 400000,
-                       "单个 agent 会话累计最多返回多少字符（默认 400000≈114k token）。"
-                       "撞到就拒绝继续取数，要求 agent 先问你是否继续；你同意后它调 "
-                       "allow_more_results 再放行一个额度（放行次数见看板）。0 = 不限制。")
-        + _num_setting("Agent 结果字符预算", "agent_max_result_chars", s, 40000,
-                       "给 agent（MCP query/sample_rows）的 TSV 结果字符上限（≈token×4，默认 40000≈12k token）。"
-                       "连接级 Policy 可单独覆盖。")
-        + _num_setting("表同步单次行数上限", "sync_max_rows", s, 10000,
-                       "agent 用 sync_table 把线上表同步到本地库时，单次最多同步多少行。"
-                       "agent 传的 limit 会被夹到这个上限内——它是拉样本数据用的，不是全量迁移工具。")
-        + _num_setting("表同步单次体积上限（字节）", "sync_max_bytes", s, 64 * 1024 * 1024,
-                       "单次同步最多搬多少数据（估算值，默认 64 MB）。行数管不住行很宽的表——"
-                       "1 万行 BLOB 可能有几个 GB；累计到这里就停下并在结果里标明截断。")
-        + _num_setting("审批等待时长（秒）", "approval_wait_seconds", s, 120,
-                       "agent 提交写操作后，服务端等你审批的秒数：你在审批页点批准，"
-                       "agent 那边即刻自动执行、无需你回会话里说一声。0 = 不等待（只返回审批单号）；"
-                       "若 MCP 客户端单次工具调用超时更短，把它调小，agent 会分多次续等。")
-        + _num_setting("MCP 最大并发数", "mcp_max_concurrency", s, 40,
-                       "同进程最多并行的阻塞 DB 调用数（anyio 线程池），10–500，默认 40。"
-                       "决定「多少个不同连接能同时跑」，改后即时生效。")
-        + _num_setting("单连接引擎池大小", "engine_pool_size", s, 15,
-                       "单个引擎（连接×角色×库）的最大连接数（5 常驻 + 其余 overflow），5–100，默认 15。"
-                       "决定「同一连接上能并行多少条 SQL」；改后回收旧引擎、按新大小重建。"))
+    return _settings_layout(
+        _set_section(
+            "给 Agent 的护栏",
+            "决定 agent 一次、一个会话最多能把多少数据拿进它的上下文。"
+            "放松这些值不会有二次确认，改动会标上「已改」。",
+            _num_setting("单次结果预算", "agent_max_result_chars", s, 40000,
+                         "一次 query / sample_rows 最多返回多少字符，超出即截断并提示收窄。"
+                         "单个连接可在连接管理里覆盖。",
+                         unit="字符", read="tokens")
+            + _num_setting("会话累计配额", "agent_session_budget_chars", s, 400000,
+                           "一个会话累计返回多少字符后停止取数。撞到上限时 agent 必须先问你，"
+                           "你同意后它才能追加额度。填 0 = 不限制。",
+                           unit="字符", read="tokens",
+                           more="单次预算管不住「一直查」——一次 1 万字符查两百次照样烧掉几十万 token，"
+                                "而且这种情况多半是 agent 陷进了反复重拉同一份数据的循环。"
+                                "追加额度的次数与理由显示在看板的「会话结果配额」里，"
+                                "你可以核对它到底问没问过你。")
+            + _bool_setting("敏感列自动脱敏", "mask_sensitive_columns", s, True,
+                            "开启", "关闭",
+                            "按内置词表（password / token / secret / id_card…）猜哪些列敏感，"
+                            "命中即以 <code>***MASKED***</code> 返回给 agent。",
+                            more="<b>只作用于 agent 的 query / sample_rows</b>——你自己在查询台看到的、"
+                                 "导出文件里的，任何开关下都是真实值。单个连接可在连接管理里覆盖本开关；"
+                                 "连接上手动点名的「脱敏列」始终脱敏，不受影响。")
+            + _bool_setting("首次调用附带使用说明", "agent_guide_on_first_call", s, True,
+                            "开启", "关闭",
+                            "agent 每个会话第一次调用工具时，随结果附一份用法与最佳实践，"
+                            "减少误用与无效重试。",
+                            more="MCP 的 instructions 各客户端处理不一（截断、折叠、只在最外层放一次），"
+                                 "实测 agent 常常读不到。改在它正要用工具时送达，一个会话只发一次。"
+                                 "关掉后 agent 仍可主动调 <code>usage_guide</code> 读。"),
+            guard=True)
+        + _set_section(
+            "表同步上限",
+            "agent 用 sync_table 把线上表拉到本地时的两道闸门。它是取样本用的，不是迁移工具。",
+            _num_setting("单次行数", "sync_max_rows", s, 10000,
+                         "agent 传的 limit 会被夹到这个值以内。", unit="行")
+            + _num_setting("单次体积", "sync_max_bytes", s, 64 * 1024 * 1024,
+                           "累计到这里就停下，并在结果里说明是撞了体积而不是行数。",
+                           unit="字节", read="bytes",
+                           more="行数管不住「行很宽」的表——1 万行 BLOB 可能有几个 GB。"
+                                "注意它保护的是本机内存与目标库：源库那边已经按 LIMIT 把行发过来了，"
+                                "要减轻源库压力只能调小 limit 或收窄 where。"),
+            guard=True)
+        + _set_section(
+            "查询台",
+            "SQL 编辑器与结果表格的观感，改完重新打开查询台生效。",
+            _num_setting("结果每页行数", "sql_page_size", s, 100,
+                         "结果表格一页显示多少行。", unit="行")
+            + _num_setting("编辑器字号", "sql_font_size", s, 13,
+                           "SQL 编辑器的字号，10–24 之间。", unit="px")
+            + _bool_setting("代码缩略图", "sql_minimap", s, True, "显示", "隐藏",
+                            "编辑器右侧的 minimap，隐藏可让出更多编辑宽度。")
+            + _bool_setting("自动换行", "sql_word_wrap", s, False, "开启", "关闭",
+                            "超出宽度的长 SQL 是否折行显示。")
+            + _num_setting("结果行上限", "sql_max_rows", s, 1000,
+                           "缺 LIMIT 的查询自动兜底的行上限，也是非分页读取的截断上限。",
+                           unit="行")
+            + _num_setting("单元格字符上限", "sql_max_cell_chars", s, 4096,
+                           "超长 TEXT / BLOB 单元格截断到多少字符。", unit="字符"))
+        + _set_section(
+            "审批与并发",
+            "写操作等你审批多久，以及这台服务同时能跑多少条 SQL。",
+            _num_setting("审批等待时长", "approval_wait_seconds", s, 120,
+                         "agent 提交写操作后，服务端等你决策的秒数。你在审批页点批准，"
+                         "它那边即刻自动执行，无需你回会话里说一声。填 0 = 不等待。",
+                         unit="秒",
+                         more="如果你的 MCP 客户端单次工具调用超时更短（Codex 的 "
+                              "<code>tool_timeout_sec</code>、DeepSeek 的 "
+                              "<code>toolCallTimeoutMs</code> 默认常是 60 秒），把这里调小，"
+                              "agent 会用 <code>wait_for_change</code> 分多次续等，不会丢单。")
+            + _num_setting("MCP 最大并发", "mcp_max_concurrency", s, 40,
+                           "同时并行的阻塞 DB 调用数，决定「多少个不同连接能同时跑」。"
+                           "10–500，改后即时生效。", unit="个")
+            + _num_setting("单连接引擎池", "engine_pool_size", s, 15,
+                           "单个引擎（连接 × 角色 × 库）的最大连接数，决定「同一连接上能并行"
+                           "多少条 SQL」。5–100，改后回收旧引擎按新大小重建。", unit="条")),
+        "db")
 
 
 def _text_setting(label: str, name: str, s: dict, default: str, hint: str,
-                  width: str = "260px") -> str:
-    return ("<div style='margin-bottom:16px'>"
-            + _field(label, name, s.get(name, default), ph=str(default), width=width)
-            + f"<div class='muted' style='margin-top:4px'>{hint}</div></div>")
+                  wide: bool = False, more: str = "") -> str:
+    val = _esc(str(s.get(name, default)))
+    ctl = f"<input type='text' name='{name}' value='{val}' placeholder='{_esc(str(default))}'>"
+    return _set_row(name, label, hint, ctl, s, wide=wide, more=more)
 
 
 def _ai_api_key_present() -> bool:
@@ -971,71 +1086,62 @@ _AI_PROVIDER_TOGGLE_JS = """<script>
 
 
 def _settings_ai_body(s: dict) -> str:
-    provider = s.get("ai_provider", "claude")
-    fmt = s.get("ai_api_format", "anthropic")
+    # provider 的显隐由 _AI_PROVIDER_TOGGLE_JS 在前端做（切后端即时生效，不必回服务端）
+    key_hint = ("已存储（留空 = 不改，填新值 = 覆盖）" if _ai_api_key_present() else "未存储")
 
-    def psel(v: str) -> str:
-        return " selected" if provider == v else ""
+    api_key_ctl = (
+        "<input type='password' name='ai_api_key' value='' autocomplete='new-password' "
+        "placeholder='填入以覆盖'>"
+        "<label class='clearkey'><input type='checkbox' name='ai_api_key_clear' value='1'>"
+        " 清除已存</label>")
 
-    def fsel(v: str) -> str:
-        return " selected" if fmt == v else ""
-
-    key_hint = ("当前：<b>已存储</b>（留空=不改，填新值=覆盖）" if _ai_api_key_present()
-                else "当前：未存储")
-    return _settings_form(
-        _bool_setting("启用 AI 辅助写 SQL", "ai_enabled", s, True,
-                      "启用（默认）", "关闭",
-                      "开启后查询台/流程画布会出现「✨ AI」按钮；产物只回填、绝不自动执行。")
-        + "<div style='margin-bottom:16px'><label>AI 后端</label>"
-        + "<select name='ai_provider' style='width:220px'>"
-        + f"<option value='claude'{psel('claude')}>Claude CLI（claude -p）</option>"
-        + f"<option value='codex'{psel('codex')}>CodeX CLI（codex exec）</option>"
-        + f"<option value='api'{psel('api')}>HTTP API（直连，接入面更广）</option></select>"
-        + "<div class='muted' style='margin-top:4px'>claude/codex 调本机命令行 AI（需已安装登录）；"
-        + "api 直连 HTTP 端点（密钥存钥匙串）。</div></div>"
-        # —— CLI 专属：provider=api 时隐藏
+    backend = _set_section(
+        "AI 后端", "生成 SQL 与流程图的模型从哪来。产物只回填编辑器，绝不自动执行。",
+        _bool_setting("启用 AI 辅助", "ai_enabled", s, True, "启用", "关闭",
+                      "开启后查询台与流程画布上会出现「✨ AI」按钮。")
+        + _select_setting("后端", "ai_provider", s, "claude",
+                          [("claude", "Claude CLI（claude -p）"),
+                           ("codex", "CodeX CLI（codex exec）"),
+                           ("api", "HTTP API（直连）")],
+                          "claude / codex 调本机已登录的命令行 AI；api 直连 HTTP 端点，"
+                          "接入面更广、也更省 token。")
         + "<div class='ai-cli-only'>"
         + _text_setting("CLI 路径", "ai_cli_path", s, "",
-                        "留空则用后端默认二进制名（claude / codex）；如不在 PATH 中可填绝对路径。")
+                        "留空用后端默认的二进制名；不在 PATH 里就填绝对路径。")
         + "</div>"
         + _text_setting("模型", "ai_model", s, "claude-sonnet-5",
-                        "Claude 用 claude-*；CodeX 用其账号支持的模型名；api 用对应厂商模型名。")
-        # —— API 专属：仅 provider=api 时显示
-        + "<div class='ai-api-only'>"
-        + "<div style='margin-bottom:16px'><label>API 格式</label>"
-        + "<select name='ai_api_format' style='width:220px'>"
-        + f"<option value='anthropic'{fsel('anthropic')}>Anthropic Messages</option>"
-        + f"<option value='openai'{fsel('openai')}>OpenAI Chat Completions</option></select>"
-        + "<div class='muted' style='margin-top:4px'>请求/响应格式。</div></div>"
-        + _text_setting("API 根地址", "ai_api_base", s, "https://api.anthropic.com",
+                        "Claude 用 claude-*；CodeX 用其账号支持的模型名；api 用对应厂商模型名。"))
+
+    api = ("<div class='ai-api-only'>" + _set_section(
+        "HTTP API", "直连模型厂商的端点。密钥存进系统钥匙串，绝不写入设置库或日志。",
+        _select_setting("请求格式", "ai_api_format", s, "anthropic",
+                        [("anthropic", "Anthropic Messages"),
+                         ("openai", "OpenAI Chat Completions")],
+                        "按你的端点选一种。")
+        + _text_setting("根地址", "ai_api_base", s, "https://api.anthropic.com",
                         "如 https://api.anthropic.com 或 https://api.openai.com。")
-        + "<div style='margin-bottom:16px'><label>API Key</label>"
-        + "<input type='password' name='ai_api_key' value='' autocomplete='new-password' "
-        + "placeholder='填入以覆盖' style='width:260px'>"
-        + "<label style='margin-left:10px;font-size:12px;color:var(--muted)'>"
-        + "<input type='checkbox' name='ai_api_key_clear' value='1'> 清除已存</label>"
-        + "<div class='muted' style='margin-top:4px'>存入系统钥匙串（keyring），"
-        + f"绝不写入设置库/日志。{key_hint}</div></div>"
+        + _set_row("ai_api_key", "API Key", f"当前：<b>{key_hint}</b>。", api_key_ctl)
         + _text_setting("兜底环境变量名", "ai_api_key_env", s, "DBM_AI_API_KEY",
-                        "钥匙串里没有时，从该环境变量读 key（值不入设置库）。")
-        + "</div>"
-        # —— 高级设置：不常调的参数与系统提示词折叠收起，默认只露核心配置 ——
-        + "<details class='ai-adv' style='margin-top:8px'>"
-        + "<summary style='cursor:pointer;color:var(--muted);margin-bottom:12px'>高级设置"
-        + "（超时 / 表数上限 / 系统提示词）</summary>"
-        + _num_setting("生成超时（秒）", "ai_timeout_s", s, 60,
-                       "单次生成的最长等待时间，10–600 之间。")
+                        "钥匙串里没有时从这个环境变量读，值同样不入设置库。"))
+        + "</div>")
+
+    advanced = _set_section(
+        "提示词与限额", "不常调；改坏了清空并保存即恢复默认。", folded=True, rows=
+        _num_setting("生成超时", "ai_timeout_s", s, 60,
+                     "单次生成最长等多久，10–600。", unit="秒")
         + _num_setting("最大表数", "ai_max_tables", s, 40,
-                       "「整库」模式下最多把多少张表的结构发给 AI，超出会要求你勾选具体表（1–200）。")
-        + "<div style='margin-bottom:16px'><label>SQL 生成系统提示词</label>"
-        + f"<textarea name='ai_sql_prompt' rows='10' style='width:100%'>{_esc(s.get('ai_sql_prompt', ''))}</textarea>"
-        + "<div class='muted' style='margin-top:4px'>生成 SQL 的系统提示（角色设定 + SQL 约束）。"
-        + "清空并保存即恢复默认。</div></div>"
-        + "<div style='margin-bottom:16px'><label>流程生成系统提示词</label>"
-        + f"<textarea name='ai_workflow_prompt' rows='6' style='width:100%'>{_esc(s.get('ai_workflow_prompt', ''))}</textarea>"
-        + "<div class='muted' style='margin-top:4px'>生成可视化流程（DAG 画布）的系统提示。"
-        + "清空并保存即恢复默认。</div></div>"
-        + "</details>") + _AI_PROVIDER_TOGGLE_JS
+                       "「整库」模式下最多把多少张表的结构发给 AI，超出会要求你勾选具体表。",
+                       unit="张")
+        + _set_row("ai_sql_prompt", "SQL 生成提示词",
+                   "生成 SQL 时的系统提示：角色设定与 SQL 约束。",
+                   f"<textarea name='ai_sql_prompt' rows='10'>{_esc(s.get('ai_sql_prompt', ''))}</textarea>",
+                   s, wide=True)
+        + _set_row("ai_workflow_prompt", "流程生成提示词",
+                   "生成可视化流程（DAG 画布）时的系统提示。",
+                   f"<textarea name='ai_workflow_prompt' rows='6'>{_esc(s.get('ai_workflow_prompt', ''))}</textarea>",
+                   s, wide=True))
+
+    return _settings_layout(backend + api + advanced, "ai") + _AI_PROVIDER_TOGGLE_JS
 
 
 # 通知主渠道切换：按选中的 provider 显隐对应字段块
@@ -1056,81 +1162,69 @@ _NOTIFY_PROVIDER_TOGGLE_JS = """<script>
 
 
 def _settings_notify_body(s: dict) -> str:
-    """通知设置：主外部渠道单选（Bark / 企微 / 飞书）+ 可选 macOS 本地。
+    """通知设置：外部主渠道单选（Bark / 企微 / 飞书）+ 可选 macOS 本地通知。
 
-    管理后台内推恒开，不在设置里出现开关；保留 7 天在 housekeep 里自动清。
+    后台内推（铃铛）恒开、不在这里出现开关；保留 7 天由 housekeeping 自动清。
     """
     primary = str(s.get("notify_primary") or "none").lower()
 
-    def radio(v: str, label: str, hint: str = "") -> str:
-        checked = " checked" if primary == v else ""
-        h = f"<span class='muted' style='margin-left:6px;font-size:12px'>{_esc(hint)}</span>" if hint else ""
-        return (f"<label style='display:block;margin:6px 0'>"
-                f"<input type='radio' name='notify_primary' value='{v}'{checked}> "
-                f"{_esc(label)}{h}</label>")
+    def choice(v: str, title: str, hint: str) -> str:
+        return (f"<label><input type='radio' name='notify_primary' value='{v}'"
+                f"{' checked' if primary == v else ''}>"
+                f"<span><span class='t'>{_esc(title)}</span>"
+                f"<span class='h'>{_esc(hint)}</span></span></label>")
 
-    macos_hint = ("仅在 macOS 本地进程模式下有效；Docker/Linux 环境勾选无作用。"
+    macos_hint = ("把提醒发到 macOS 通知中心。仅本机进程模式有效。"
                   if _platform_is_macos() else
-                  "当前非 macOS 环境，勾选不会有效果——建议在下方配置外部渠道。")
+                  "当前不是 macOS 环境，开了也不会有效果——请改用上面的外部渠道。")
 
-    body = (
-        "<div class='card' style='max-width:640px'>"
-        "<div class='muted' style='margin-bottom:12px'>"
-        "管理后台内推（铃铛角标）<b>默认开启不可关</b>，保留 7 天。外部渠道用于把重要提醒推到手机/群里。</div>"
-        "<form class='settings-form'>"
-        + _text_setting("外部可访问基址（deeplink 用）", "admin_base_url", s,
-                        "http://127.0.0.1:8100",
-                        "通知里点击「前往处理」跳转的完整 URL 前缀。Docker/反代场景填反代地址；"
-                        "本机运行保持默认即可。", width="100%")
-        + "<div style='margin-bottom:16px'><label>主外部渠道</label>"
-        + radio("none", "不发外部通知（默认）", "只在管理后台的铃铛里出现")
-        + radio("bark", "Bark", "iOS/macOS 推送，支持自建 server")
-        + radio("wecom", "企业微信 群机器人", "接入企微内部群通知")
-        + radio("feishu", "飞书 群机器人", "接入飞书内部群通知")
-        + "</div>"
-        # Bark 字段
-        + "<div class='notify-bark' style='padding:10px;border:1px dashed var(--border);"
-        + "border-radius:6px;margin-bottom:12px'>"
-        + _text_setting("Bark server URL", "notify_bark_server", s,
-                        "https://api.day.app",
-                        "官方 https://api.day.app 或你的自建 server（不含末尾 /）")
-        + _text_setting("Bark device key", "notify_bark_key", s, "",
-                        "Bark App 首页顶部的 device key。")
-        + "</div>"
-        # 企微字段
-        + "<div class='notify-wecom' style='padding:10px;border:1px dashed var(--border);"
-        + "border-radius:6px;margin-bottom:12px'>"
-        + _text_setting("企微机器人 Webhook", "notify_wecom_webhook", s, "",
-                        "群设置 → 机器人 → 添加/管理 → 复制 webhook 完整 URL。",
-                        width="100%")
-        + "</div>"
-        # 飞书字段
-        + "<div class='notify-feishu' style='padding:10px;border:1px dashed var(--border);"
-        + "border-radius:6px;margin-bottom:12px'>"
-        + _text_setting("飞书机器人 Webhook", "notify_feishu_webhook", s, "",
-                        "群设置 → 机器人 → 添加自定义机器人 → 复制 webhook 完整 URL。",
-                        width="100%")
-        + "</div>"
+    channel = _set_section(
+        "外部渠道",
+        "后台铃铛里的站内通知始终开启、保留 7 天。这里选一个把重要提醒推到手机或群里的渠道。",
+        _set_row("notify_primary", "推到哪里",
+                 "只有审批单创建会触发通知——「安静即正常」，没有消息就是没有事等你处理。",
+                 "", wide=True).replace(
+            "<div class='ctl'></div>",
+            "<div class='ctl'><div class='set-choice'>"
+            + choice("none", "只在后台铃铛里", "不往外发")
+            + choice("bark", "Bark", "iOS / macOS 推送，支持自建 server")
+            + choice("wecom", "企业微信群机器人", "推到内部群")
+            + choice("feishu", "飞书群机器人", "推到内部群")
+            + "</div>"
+            + "<div class='set-fields notify-bark'>"
+            + _text_setting("Server URL", "notify_bark_server", s, "https://api.day.app",
+                            "官方地址或你的自建 server，不含末尾斜杠。")
+            + _text_setting("Device key", "notify_bark_key", s, "",
+                            "Bark App 首页顶部那串 key。")
+            + "</div>"
+            + "<div class='set-fields notify-wecom'>"
+            + _text_setting("Webhook", "notify_wecom_webhook", s, "",
+                            "群设置 → 机器人 → 添加/管理 → 复制完整 URL。", wide=True)
+            + "</div>"
+            + "<div class='set-fields notify-feishu'>"
+            + _text_setting("Webhook", "notify_feishu_webhook", s, "",
+                            "群设置 → 机器人 → 添加自定义机器人 → 复制完整 URL。", wide=True)
+            + "</div></div>")
+        + _text_setting("通知里的跳转地址", "admin_base_url", s, "http://127.0.0.1:8100",
+                        "通知里「前往处理」用的 URL 前缀。走反向代理或 Docker 时填对外地址，"
+                        "本机运行保持默认即可。", wide=True)
         + _bool_setting("macOS 本地通知", "notify_macos_enabled", s, False,
-                        "启用", "关闭（默认）", macos_hint)
-        + "<button class='btn btn-primary' type='submit'>保存</button>"
-        + "<button type='button' class='btn' style='margin-left:8px' id='notify-test'>发送测试通知</button>"
-        + "<span class='settings-msg muted' style='margin-left:12px'></span>"
-        + "</form></div>"
-        + _NOTIFY_PROVIDER_TOGGLE_JS
-        + _SETTINGS_SUBMIT_JS
-        + """<script>
+                        "开启", "关闭", macos_hint))
+
+    test_btn = "<button type='button' class='reset' id='notify-test'>发送测试</button>"
+    return (_settings_layout(channel, "notify", actions=test_btn)
+            + _NOTIFY_PROVIDER_TOGGLE_JS
+            + """<script>
 document.getElementById('notify-test')?.addEventListener('click', async function(){
-  var m=document.querySelector('.settings-msg'); if(m)m.textContent='发送中…';
+  var m=document.querySelector('.set-bar .msg'), bar=document.querySelector('.set-bar');
+  bar?.classList.add('on'); if(m)m.textContent='发送中…';
   try{
     var r=await fetch('/admin/notifications/test', {method:'POST'});
     var d=await r.json();
-    if(m)m.textContent=d.ok?'✓ 已发送，请查看铃铛及所选外部渠道':'失败：'+d.error;
-  }catch(err){ if(m)m.textContent='失败：'+err; }
+    if(m)m.textContent=d.ok?'已发送，看一眼铃铛和你选的渠道':'发送失败：'+d.error;
+  }catch(err){ if(m)m.textContent='发送失败：'+err; }
 });
-</script>"""
-    )
-    return body
+</script>""")
 
 
 def _platform_is_macos() -> bool:
@@ -1140,17 +1234,24 @@ def _platform_is_macos() -> bool:
 
 
 def _settings_redis_body(s: dict) -> str:
-    return _settings_form(
-        _num_setting("Redis 结果每页行数", "redis_page_size", s, 100,
-                     "Redis 键详情（hash/list/set/zset）与命令结果分页大小。")
-        + _num_setting("Redis 键列表加载上限", "redis_key_limit", s, 1000,
-                       "左侧键树 SCAN 一次最多加载的键数量。")
-        + _num_setting("SCAN 每批 COUNT", "redis_scan_count", s, 500,
-                       "SCAN 每轮的批大小，越大越快但单次更阻塞（50–10000）。")
-        + _bool_setting("非 UTF-8 值 msgpack 解码", "redis_msgpack_decode", s, True,
-                        "开启（默认）", "关闭", "非 UTF-8 的值是否尝试用 msgpack 解码为结构展示。")
-        + _num_setting("库切换器最少展示库数", "redis_min_dbs", s, 16,
-                       "底部数据库切换器至少列出多少个逻辑库（1–256）。"))
+    return _settings_layout(
+        _set_section(
+            "键浏览", "左侧键树一次拉多少、拉多快。库大时把上限调小能显著加快首屏。",
+            _num_setting("键列表加载上限", "redis_key_limit", s, 1000,
+                         "键树一次 SCAN 最多加载多少个键。", unit="个")
+            + _num_setting("SCAN 每批大小", "redis_scan_count", s, 500,
+                           "每轮 SCAN 取多少，越大越快但单次更阻塞。50–10000。", unit="个")
+            + _num_setting("库切换器最少列几个", "redis_min_dbs", s, 16,
+                           "底部数据库切换器至少列出多少个逻辑库；有数据的库始终会出现。"
+                           "1–256。", unit="个"))
+        + _set_section(
+            "值的展示", "键详情与命令结果怎么显示。",
+            _num_setting("结果每页行数", "redis_page_size", s, 100,
+                         "hash / list / set / zset 详情与命令结果的分页大小。", unit="行")
+            + _bool_setting("msgpack 解码", "redis_msgpack_decode", s, True,
+                            "开启", "关闭",
+                            "非 UTF-8 的值先试着按 msgpack 解成结构展示，解不出再退回十六进制。")),
+        "redis")
 
 
 def _settings_info_body(service: "DbmService", req: "Request") -> str:
@@ -2554,26 +2655,27 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     async def _settings_page(req: Request) -> HTMLResponse:
         tab = req.query_params.get("tab") or "general"
         s = service.get_settings()
-        if tab == "connections":
-            content = _connections_body(service, req.query_params.get("edit"))
-        elif tab == "ssh":
-            content = _ssh_identities_body(service)
-        elif tab == "db":
-            content = _settings_db_body(s)
-        elif tab == "redis":
-            content = _settings_redis_body(s)
-        elif tab == "ai":
-            content = _settings_ai_body(s)
-        elif tab == "notify":
-            content = _settings_notify_body(s)
-        elif tab == "info":
-            content = _settings_info_body(service, req)
+        # 表单型 tab 自带页头/导航/改动条；非表单型（连接、SSH、系统信息）套同一个外壳
+        forms = {
+            "db": lambda: _settings_db_body(s),
+            "redis": lambda: _settings_redis_body(s),
+            "ai": lambda: _settings_ai_body(s),
+            "notify": lambda: _settings_notify_body(s),
+            "general": lambda: _settings_general_body(s),
+        }
+        plain = {
+            "connections": lambda: _connections_body(service, req.query_params.get("edit")),
+            "ssh": lambda: _ssh_identities_body(service),
+            "info": lambda: _settings_info_body(service, req),
+        }
+        if tab in plain:
+            body = _plain_settings_page(plain[tab](), tab)
         else:
-            tab = "general"
-            content = _settings_general_body(s)
-        body = (_pagehead("Settings", "系统设置", "界面偏好 + 连接管理，服务端保存")
-                + _settings_tabs(tab) + content)
-        return _shell("系统设置", body)
+            tab = tab if tab in forms else "general"
+            body = forms[tab]()
+        head = ('<link rel="stylesheet" href="/admin/static/settings.css">'
+                '<script defer src="/admin/static/settings.js"></script>')
+        return _shell("系统设置", body, extra_head=head)
 
     @mcp.custom_route("/admin/workflows/list", methods=["GET"])
     @guard

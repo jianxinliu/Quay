@@ -183,9 +183,9 @@ class TestNotifySettingsPage:
         r = tc.get("/admin/settings?tab=notify")
         assert r.status_code == 200
         body = r.text
-        assert "主外部渠道" in body
         assert "notify_primary" in body
         assert "Bark" in body and "企业微信" in body and "飞书" in body
+        assert "外部渠道" in body
 
     def test_save_notify_settings_switches_channel(self, client):
         tc, svc = client
