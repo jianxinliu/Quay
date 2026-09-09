@@ -247,6 +247,12 @@ class TestDashboardSnapshot:
         assert snap["connections"]["items"][0]["connection"] == "main"
         assert snap["live"] == {"count": 0, "ops": []}
 
+    def test_sessions_use_fixed_recent_days_not_the_window(self, service):
+        """会话列表不跟随统计窗口：选 1 小时就看不见昨天的会话，选 30 天又会翻出陈年会话。"""
+        for window in ("1h", "30d"):
+            snap = service.dashboard_snapshot(window)
+            assert snap["session_days"] == service.DASHBOARD_SESSION_DAYS
+
     def test_bad_window_rejected(self, service):
         with pytest.raises(ValueError, match="统计窗口"):
             service.dashboard_snapshot("all")
@@ -341,6 +347,13 @@ class TestDashboardHttp:
         assert 'id="dash"' in page
         assert "/admin/static/dashboard.js" in page
         assert "/admin/static/dashboard.css" in page
+
+    def test_echarts_loaded_before_the_page_script(self, client):
+        """echarts 是 UMD 包，必须同步加载且早于用它的脚本，否则 window.echarts 是 undefined。"""
+        page = client.get("/admin/dashboard").text
+        vendor = page.index("/admin/static/echarts.min.js")
+        assert "defer" not in page[vendor - 40:vendor]      # vendor 必须同步加载
+        assert vendor < page.index("/admin/static/dashboard.js")
 
     def test_nav_links_to_dashboard(self, client):
         assert 'href="/admin/dashboard"' in client.get("/admin/audit").text

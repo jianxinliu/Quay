@@ -313,7 +313,8 @@ def _dashboard_body() -> str:
  </div>
  <div class="card"><h2>此刻正在执行</h2><div id="dash-live"></div></div>
  <div class="card"><h2>连接</h2><div id="dash-conns"></div></div>
- <div class="card"><h2>活跃会话</h2><div id="dash-sessions"></div></div>
+ <div class="card"><h2>活跃会话 <span class="cardsub" id="dash-sessions-range"></span></h2>
+  <div id="dash-sessions"></div></div>
  <div class="card"><h2>会话结果配额</h2>
   <div class="muted" style="margin-bottom:10px">agent 把多少数据搬进了自己的上下文。
    撞到上限后它会被拒绝取数，须先问你、你同意后它才能追加额度——「已放行」列即它问过几次。</div>
@@ -1463,7 +1464,10 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
     @mcp.custom_route("/admin/dashboard", methods=["GET"])
     @guard
     async def _dashboard(_req: Request) -> HTMLResponse:
+        # echarts 是 UMD 包，必须在任何 AMD loader 之前加载才会挂 window.echarts；
+        # 本页不加载 Monaco，没有 loader 冲突。它是同步脚本，先于 defer 的 dashboard.js 执行。
         head = ('<link rel="stylesheet" href="/admin/static/dashboard.css">'
+                '<script src="/admin/static/echarts.min.js"></script>'
                 '<script defer src="/admin/static/dashboard.js"></script>')
         return _shell("看板", _dashboard_body(), extra_head=head)
 

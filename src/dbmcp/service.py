@@ -2815,6 +2815,12 @@ class DbmService:
 
     DASHBOARD_WINDOWS = {"1h": 1, "6h": 6, "24h": 24, "7d": 24 * 7, "30d": 24 * 30}
 
+    # 活跃会话列表**不跟随统计窗口**：窗口是给流量图用的（可能只有 1 小时，也可能 30 天），
+    # 而「最近谁在用」问的是这几天的事——窗口选 1 小时就看不见昨天的会话，选 30 天又会
+    # 翻出一个月前的陈年会话，两头都不对。固定成最近几天，列表本身可滚动。
+    DASHBOARD_SESSION_DAYS = 3
+    DASHBOARD_SESSION_LIMIT = 50
+
     def dashboard_snapshot(self, window: str = "24h", live_limit: int = 50) -> dict:
         """看板数据快照。window 为统计窗口（见 DASHBOARD_WINDOWS），非法值报错。"""
         hours = self.DASHBOARD_WINDOWS.get(window)
@@ -2845,10 +2851,14 @@ class DbmService:
                 "tools": self.store.top_groups("tool", since),
                 "agents": self.store.top_groups("agent", since),
             },
-            "sessions": self.store.list_sessions(limit=8, since=since),
+            "session_days": self.DASHBOARD_SESSION_DAYS,
+            "sessions": self.store.list_sessions(
+                limit=self.DASHBOARD_SESSION_LIMIT,
+                since=(now - timedelta(days=self.DASHBOARD_SESSION_DAYS)).isoformat(
+                    timespec="milliseconds")),
             # 会话结果配额是进程内的实时用量，与 audit_log 里的历史会话是两回事：
             # 人要判断「哪个 agent 正在猛拉数据」看的是这个。
-            "budgets": self.result_budget().snapshot()[:8],
+            "budgets": self.result_budget().snapshot()[:self.DASHBOARD_SESSION_LIMIT],
             "approvals": {"pending": self._pending_approvals_count()},
         }
 

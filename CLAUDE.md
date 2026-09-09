@@ -136,6 +136,11 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 - **改完文件记得 write**：用 `python3 - <<PY` 脚本改源码时漏掉最后的 `p.write_text(s)`，改动会静默丢失且测试照样绿（因为那条路径没被测到）。这次 `query` 工具的配额闸门就这样丢过一次，靠 `grep -n _budget_gate` 只有一个调用点才发现。**批量改源码后，用 grep 确认每一处都真的落盘了。**
 - **`fastmcp` 的版本自检会在有 SOCKS 代理的 shell 里把服务拖死**：`dbm serve` 启动时 fastmcp 去 PyPI 查新版本，走 httpx + SOCKS 代理但没装 `socksio`，直接 `ImportError` 让进程起不来。launchd 实例不受影响（它自己从 `scutil --proxy` 读系统代理）。**本机手工起测试实例时要清掉代理环境变量**：`env ALL_PROXY= all_proxy= HTTP_PROXY= HTTPS_PROXY= NO_PROXY='*' uv run dbm serve ...`。
 
+- **看板的图表用 echarts、别自己画 SVG（真实反馈：「操作数那个图表要有 Tooltip」）**：第一版手绘 `<rect>` 柱图能显示形状，但 hover tooltip、坐标轴刻度、图例这些「看板真正要回答的问题」（那根柱子是几点？多少次？其中失败几次？）全都给不了，自己补等于重写半个图表库。`static/echarts.min.js` 早就 vendored 了（查询台图表在用），直接复用。两个坑：① echarts 是 **UMD**，`<script>` 必须**同步**加载且早于用它的脚本（本页不加载 Monaco 所以没有 AMD 冲突，但顺序仍要对，否则 `window.echarts` 是 undefined）；② 容器必须有**确定高度**，`echarts.init` 时量到 0 高就什么都不画——CSS 里给 `#dash-chart-*{height:170px}`。实例只 `init` 一次、之后 `setOption` 更新：每 5s 重建会闪，也会漏 dispose。**堆叠系列必须是能相加的分解**——「成功/失败」相加等于总数，而「写操作」与「失败」会重叠，硬堆起来的柱子高度就不再是总次数了，所以写操作只放进 tooltip 文案。
+- **看板上的表格要固定高度 + 内部滚动，不要平铺（真实反馈）**：连接十几条、会话几十个时，一张表平铺下去能把整页撑到几屏高，下面的卡片全被推出视野——而看板的价值就在「一屏看完」。统一 `.dash-scroll{max-height:300px;overflow:auto}` + `thead th{position:sticky;top:0}`（sticky 表头必须给**不透明背景**，否则滚动时行会从字底下穿过去）。另外**长文本要截断成一行**（SQLite 的绝对路径、带参数的 DSN 会把每行折成三行，一屏只剩三条），`text-overflow:ellipsis` + `title` 悬停看全文。
+- **每 5 秒重画的表格，排序必须稳定、DOM 引用不能留**：① 排序比较相等时要用名字兜底，否则同状态的连接每次刷新顺序都在跳；② 表格是 `innerHTML` 整体重画的，所以点击事件要**委托**到不变的容器上（绑在 `<th>` 上刷新一次就失效），而且**测量前要重新 query 元素**——重画后旧引用指向已脱离文档的节点，`clientHeight` 读出来是 0（排查时差点以为 CSS 没生效）。
+- **「最近活跃会话」不能跟着统计窗口走**：窗口是给流量图用的（可能 1 小时，也可能 30 天），而「最近谁在用」问的是这几天的事——窗口选 1 小时就看不见昨天的会话，选 30 天又会翻出一个月前的陈年会话，两头都不对。固定成最近 N 天（`DASHBOARD_SESSION_DAYS=3`）、列表本身可滚动，并在标题上写明区间。
+
 ## 模块地图（src/dbmcp/）
 
 - `ai.py` AI 辅助生成 SQL（`build_sql_prompt`/`build_followup_prompt` 纯函数拼 prompt + `run_ai` provider 分发 claude/codex CLI + `parse_ai_output` 解析，`generate_sql` 串起来；`AIResult` 带 session_id 支持续接会话）；service `ai_generate_sql`、admin `/admin/sql/ai`、console.js「✨ AI」浮层
@@ -170,8 +175,8 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 ## 当前状态
 
 - [x] 系统使用看板 + 建表语句/结构同步工具 + agent 用法治理（本次，分支 `feat/dashboard-and-ddl-tool`）：
-  - **看板 `/admin/dashboard`**（左侧导航第一项，原生 JS + 手绘 SVG 柱图，5s 自动刷新可关）：
-    指标磁贴（连接数/异常数、此刻占用的物理连接、正在执行数、操作数与失败、读出数据量与行数、写入影响行、待审批）+ 两幅柱图（操作数/传输量，窗口 1h/6h/24h/7d/30d，粒度自动切 分钟/小时/天）+ **此刻正在执行**（在途登记簿，秒表锚定服务端 elapsed_ms）+ 连接健康与占用 + 活跃会话 + **会话结果配额** + 排行。数据源三份：config+health+池 `stats()` / `LiveOps` / `audit_log` 聚合（`traffic_summary`/`traffic_series`/`top_groups`，全下推 SQL）。`audit_log` 新增 `result_bytes` 列（老库自动 ALTER）。
+  - **看板 `/admin/dashboard`**（左侧导航第一项，原生 JS + echarts，5s 自动刷新可关）：
+    指标磁贴（连接数/异常数、此刻占用的物理连接、正在执行数、操作数与失败、读出数据量与行数、写入影响行、待审批）+ 两幅 echarts 图（操作数堆叠柱 成功/失败 + 传输量面积线，都带 hover tooltip；窗口 1h/6h/24h/7d/30d，粒度自动切 分钟/小时/天）+ **此刻正在执行**（在途登记簿，秒表锚定服务端 elapsed_ms）+ 连接健康与占用（**表头可排序、默认异常优先；固定 300px 高度内滚动、表头 sticky**）+ 活跃会话（**固定最近 3 天、不跟随统计窗口**）+ **会话结果配额** + 排行。数据源三份：config+health+池 `stats()` / `LiveOps` / `audit_log` 聚合（`traffic_summary`/`traffic_series`/`top_groups`，全下推 SQL）。`audit_log` 新增 `result_bytes` 列（老库自动 ALTER）。
   - **`table_ddl` MCP 工具**：看建表语句原文，表名逗号分隔可一次多张（单表出错原样报错、批量逐表容错）。
   - **`sync_table_ddl` MCP 工具**：批量只同步结构不带数据（本地照着线上重建空表），复用 `sync_table(data=none)` 的全套红线与审批，只做「按表循环 + 汇总」。
   - **表同步补体积闸门**：原来只有行数上限，行很宽的表照样能搬几个 GB。新增 `sync_max_bytes`（默认 64MB），`fetch_rows_for_copy(max_bytes=)` 到预算即停并区分「撞行数」还是「撞体积」的提示。**注意它保护的是本进程内存与目标库——源库那边已按 LIMIT 把行发过来了（缓冲游标），减轻源库压力只能靠调小 limit / 收窄 where。**

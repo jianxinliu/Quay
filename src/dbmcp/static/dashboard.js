@@ -1,5 +1,5 @@
-/* 看板前端（/admin/dashboard）。原生 JS，无框架——这页只是「拉一份 JSON 再画出来」，
-   没有本地编辑状态，用不上 Vue（查询台/Redis 才需要）。
+/* 看板前端（/admin/dashboard）。原生 JS + echarts，无框架——这页只是「拉一份 JSON
+   再画出来」，没有本地编辑状态，用不上 Vue（查询台/Redis 才需要）。
 
    两个刷新节奏：
    - 每 5s 重新拉一次 /admin/dashboard/data（可关）；
@@ -21,6 +21,23 @@
   let pollTimer = null;
   // op_id -> 客户端秒表起点；ops 每 5s 换一份对象，锚点要按 op_id 记住才不会被重置
   const anchors = new Map();
+
+  /* 连接表排序。默认按状态倒序——**异常的排最前**，看板上先该看见的就是它们；
+     同状态内按名字排，保证顺序稳定（每 5s 重画一次，顺序抖动会很刺眼）。 */
+  const STATE_RANK = { ok: 0, unavailable: 1, exhausted: 2 };
+  const CONN_COLS = [
+    { key: "name", label: "连接", get: (i) => `${i.project}/${i.connection}` },
+    { key: "engine", label: "引擎", get: (i) => i.engine },
+    { key: "environment", label: "环境", get: (i) => i.environment || "" },
+    { key: "state", label: "状态", get: (i) => STATE_RANK[i.state] ?? 0 },
+    { key: "engines", label: "引擎数", get: (i) => i.engines, num: true },
+    { key: "checked_out", label: "占用连接", get: (i) => i.checked_out, num: true },
+  ];
+  let connSort = { key: "state", dir: "desc" };
+  try {
+    const saved = JSON.parse(localStorage.getItem("dbm.dash.connSort") || "null");
+    if (saved && CONN_COLS.some((c) => c.key === saved.key)) connSort = saved;
+  } catch (e) { /* 存坏了就用默认，不值得为它报错 */ }
 
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -127,34 +144,134 @@
     if (auto) pollTimer = setInterval(load, REFRESH_MS);
   }
 
-  // ---------------------------------------------------------------- 画图
-  /* 柱图：只用 <rect> 填充，配 preserveAspectRatio="none" 做横向拉伸——
-     没有描边就不会被非等比缩放拉变形，也就不需要读容器宽度再算坐标。 */
-  function barChart(series, pick, color, fmt) {
-    if (!series.length) return '<div class="chart-empty">这个时间窗内没有操作</div>';
-    const W = 600, H = 100, gap = series.length > 60 ? 0.5 : 2;
-    const bw = W / series.length;
-    const max = Math.max(...series.map((s) => pick(s).total), 1);
-    const bars = series.map((s, i) => {
-      const v = pick(s);
-      const x = (i * bw + gap / 2).toFixed(2);
-      const w = Math.max(bw - gap, 0.6).toFixed(2);
-      const h = (v.total / max) * H;
-      const hb = v.bad ? (v.bad / max) * H : 0;
-      const tip = esc(bucketLabel(s.bucket, data.bucket) + " · " + fmt(v));
-      return (
-        `<rect x="${x}" y="${(H - h).toFixed(2)}" width="${w}" height="${Math.max(h, v.total ? 1 : 0).toFixed(2)}"`
-        + ` fill="${color}"><title>${tip}</title></rect>`
-        + (hb ? `<rect x="${x}" y="${(H - hb).toFixed(2)}" width="${w}" height="${Math.max(hb, 1).toFixed(2)}"`
-                + ` fill="#c0392b"><title>${tip}</title></rect>` : "")
-      );
-    }).join("");
-    const first = bucketLabel(series[0].bucket, data.bucket);
-    const last = bucketLabel(series[series.length - 1].bucket, data.bucket);
-    return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${bars}</svg>`
-      + `<div class="xaxis"><span>${esc(first)}</span><span>峰值 ${esc(fmt({ total: max }))}</span>`
-      + `<span>${esc(last)}</span></div></div>`;
+  // ---------------------------------------------------------------- 图表
+  /* 用 echarts（已 vendored 在 static/echarts.min.js，查询台的图表也用它）而不是手绘 SVG：
+     手绘的版本给不了 hover tooltip、坐标轴与图例，而看板上「那根柱子到底是几点、多少次、
+     其中失败几次」正是要看的东西。
+
+     实例只建一次、之后 setOption 更新——每 5s 重建会闪，也会漏掉 dispose 导致内存泄漏。 */
+  const charts = {};
+
+  function chartOf(id) {
+    if (typeof echarts === "undefined") return null;
+    if (!charts[id]) {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      charts[id] = echarts.init(el, null, { renderer: "canvas" });
+    }
+    return charts[id];
   }
+
+  const AXIS_STYLE = {
+    axisLine: { lineStyle: { color: "#e6e8ec" } },
+    axisTick: { show: false },
+    axisLabel: { color: "#9aa1ac", fontSize: 11 },
+  };
+  const GRID = { left: 8, right: 12, top: 28, bottom: 4, containLabel: true };
+  const TOOLTIP_BASE = {
+    trigger: "axis",
+    axisPointer: { type: "shadow" },
+    backgroundColor: "rgba(20,24,31,.94)",
+    borderWidth: 0,
+    padding: [8, 11],
+    textStyle: { color: "#e6e8ec", fontSize: 12 },
+    extraCssText: "border-radius:8px;box-shadow:0 6px 20px rgba(15,20,27,.22)",
+  };
+
+  // 空窗口不画空坐标轴，直接说「没有操作」——一条平线比一句话更让人犯嘀咕
+  function toggleEmpty(id, isEmpty) {
+    const el = document.getElementById(id);
+    el.classList.toggle("is-empty", isEmpty);
+    el.dataset.emptyText = "这个时间窗内没有操作";
+    return isEmpty;
+  }
+
+  function renderOpsChart(series, bucket) {
+    const labels = series.map((s) => bucketLabel(s.bucket, bucket));
+    const ok = series.map((s) => Math.max(s.ops - s.failed, 0));
+    const failed = series.map((s) => s.failed);
+    const writes = series.map((s) => s.writes);
+    if (toggleEmpty("dash-chart-ops", series.every((s) => !s.ops))) return;
+    const chart = chartOf("dash-chart-ops");
+    if (!chart) return;
+    chart.setOption({
+      grid: GRID,
+      legend: {
+        top: 0, right: 0, itemWidth: 9, itemHeight: 9, itemGap: 14,
+        textStyle: { color: "#6b7280", fontSize: 11 },
+        data: ["成功", "失败"],
+      },
+      tooltip: {
+        ...TOOLTIP_BASE,
+        formatter: (ps) => {
+          const i = ps[0].dataIndex;
+          const total = ok[i] + failed[i];
+          // 「其中写」不进堆叠（写与失败会重叠、堆起来不等于总数），只在 tooltip 里说明
+          return `<b>${labels[i]}</b><br>共 ${num(total)} 次`
+            + `<br>成功 ${num(ok[i])} · 失败 ${num(failed[i])}`
+            + `<br>其中写操作 ${num(writes[i])} 次`;
+        },
+      },
+      xAxis: { type: "category", data: labels, ...AXIS_STYLE },
+      yAxis: {
+        type: "value", minInterval: 1, ...AXIS_STYLE,
+        splitLine: { lineStyle: { color: "#f1f3f5" } },
+      },
+      series: [
+        { name: "成功", type: "bar", stack: "ops", data: ok,
+          itemStyle: { color: "#0d9488", borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: "#0f766e" } } },
+        { name: "失败", type: "bar", stack: "ops", data: failed,
+          itemStyle: { color: "#c0392b", borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: "#a5281c" } } },
+      ],
+    }, { notMerge: true });
+    chart.resize();
+  }
+
+  function renderBytesChart(series, bucket) {
+    const labels = series.map((s) => bucketLabel(s.bucket, bucket));
+    const vals = series.map((s) => s.bytes_read);
+    const rows = series.map((s) => s.rows_total);
+    if (toggleEmpty("dash-chart-bytes", vals.every((v) => !v))) return;
+    const chart = chartOf("dash-chart-bytes");
+    if (!chart) return;
+    chart.setOption({
+      grid: GRID,
+      tooltip: {
+        ...TOOLTIP_BASE,
+        axisPointer: { type: "line" },
+        formatter: (ps) => {
+          const i = ps[0].dataIndex;
+          return `<b>${labels[i]}</b><br>读出 ${bytes(vals[i])}<br>${num(rows[i])} 行`;
+        },
+      },
+      xAxis: { type: "category", boundaryGap: false, data: labels, ...AXIS_STYLE },
+      yAxis: {
+        type: "value", ...AXIS_STYLE,
+        axisLabel: { ...AXIS_STYLE.axisLabel, formatter: (v) => bytes(v) },
+        splitLine: { lineStyle: { color: "#f1f3f5" } },
+      },
+      series: [{
+        name: "读出数据量", type: "line", data: vals, smooth: true,
+        showSymbol: false, symbolSize: 6,
+        lineStyle: { width: 2, color: "#0d9488" },
+        itemStyle: { color: "#0d9488" },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: "rgba(13,148,136,.28)" },
+            { offset: 1, color: "rgba(13,148,136,.02)" },
+          ]),
+        },
+      }],
+    }, { notMerge: true });
+    chart.resize();
+  }
+
+  // 容器宽度随侧栏/窗口变化，echarts 不会自己跟
+  window.addEventListener("resize", () => {
+    Object.values(charts).forEach((c) => c.resize());
+  });
 
   function rankList(items, valueOf, fmt) {
     if (!items.length) return '<div class="dash-empty">暂无数据</div>';
@@ -197,19 +314,15 @@
     ].join("");
 
     const series = fillSeries(d.series, d.bucket, d.window_hours, d.generated_at);
-    document.getElementById("dash-chart-ops").innerHTML =
-      barChart(series, (s) => ({ total: s.ops, bad: s.failed }), "#0d9488",
-               (v) => num(v.total) + " 次" + (v.bad ? "（失败 " + num(v.bad) + "）" : ""));
-    document.getElementById("dash-chart-bytes").innerHTML =
-      barChart(series, (s) => ({ total: s.bytes_read, bad: 0 }), "#5eead4",
-               (v) => bytes(v.total));
+    renderOpsChart(series, d.bucket);
+    renderBytesChart(series, d.bucket);
     document.getElementById("dash-ops-total").textContent =
       num(t.ops) + " 次 · " + num(t.sessions) + " 个会话";
     document.getElementById("dash-bytes-total").textContent = bytes(t.bytes_read);
 
     renderLive();
     renderConnections(c.items);
-    renderSessions(d.sessions);
+    renderSessions(d.sessions, d.session_days);
     renderBudgets(d.budgets || []);
 
     document.getElementById("dash-top-conn").innerHTML =
@@ -240,7 +353,7 @@
       box.innerHTML = '<div class="dash-empty">当前没有正在执行的查询。</div>';
       return;
     }
-    box.innerHTML = '<div class="tablewrap"><table><thead><tr>'
+    box.innerHTML = '<div class="tablewrap dash-scroll"><table><thead><tr>'
       + "<th>已执行</th><th>连接</th><th>工具</th><th>会话 / agent</th><th>SQL</th>"
       + "</tr></thead><tbody>"
       + ops.map((o) => {
@@ -267,6 +380,20 @@
     });
   }
 
+  function sortConnections(items) {
+    const col = CONN_COLS.find((c) => c.key === connSort.key) || CONN_COLS[3];
+    const sign = connSort.dir === "desc" ? -1 : 1;
+    const byName = (a, b) => `${a.project}/${a.connection}`.localeCompare(
+      `${b.project}/${b.connection}`, "zh-CN");
+    return items.slice().sort((a, b) => {
+      const x = col.get(a), y = col.get(b);
+      const cmp = col.num || typeof x === "number"
+        ? (x || 0) - (y || 0)
+        : String(x).localeCompare(String(y), "zh-CN");
+      return cmp ? cmp * sign : byName(a, b);   // 同值时用名字兜底，顺序才稳定
+    });
+  }
+
   function renderConnections(items) {
     const box = document.getElementById("dash-conns");
     if (!items.length) {
@@ -275,11 +402,16 @@
       return;
     }
     const stateText = { ok: "正常", unavailable: "不可用", exhausted: "需人介入" };
-    box.innerHTML = '<div class="tablewrap"><table><thead><tr>'
-      + "<th>连接</th><th>引擎</th><th>环境</th><th>状态</th>"
-      + '<th class="num">引擎数</th><th class="num">占用连接</th><th>最近错误</th>'
-      + "</tr></thead><tbody>"
-      + items.map((i) => {
+    const arrow = (k) => (connSort.key === k
+      ? `<i class="sarrow ${connSort.dir}"></i>` : '<i class="sarrow"></i>');
+    const head = CONN_COLS.map((c) =>
+      `<th class="sortable${c.num ? " num" : ""}" data-sort="${c.key}"`
+      + `${connSort.key === c.key ? ' aria-sort="' + connSort.dir + '"' : ""}>`
+      + `${esc(c.label)}${arrow(c.key)}</th>`).join("");
+
+    box.innerHTML = '<div class="tablewrap dash-scroll"><table><thead><tr>'
+      + head + "<th>最近错误</th></tr></thead><tbody>"
+      + sortConnections(items).map((i) => {
         const state = i.state || "ok";
         let note = "—";
         if (state !== "ok") {
@@ -290,7 +422,8 @@
         const meta = [i.host, i.database, i.tunnel ? "SSH 隧道" : ""].filter(Boolean);
         return "<tr>"
           + `<td><b>${esc(i.project)}/${esc(i.connection)}</b>`
-          + `<br><span class="muted mono">${esc(meta.join(" · ") || "—")}</span></td>`
+          + `<span class="connmeta muted mono" title="${esc(meta.join(" · "))}">`
+          + `${esc(meta.join(" · ") || "—")}</span></td>`
           + `<td>${esc(i.engine)}</td>`
           + `<td>${esc(i.environment || "—")}</td>`
           + `<td><span class="dot dot-${esc(state)}"></span>${esc(stateText[state] || state)}</td>`
@@ -300,13 +433,15 @@
       }).join("") + "</tbody></table></div>";
   }
 
-  function renderSessions(sessions) {
+  function renderSessions(sessions, days) {
     const box = document.getElementById("dash-sessions");
+    document.getElementById("dash-sessions-range").textContent =
+      `最近 ${days} 天 · ${sessions.length} 个`;
     if (!sessions.length) {
-      box.innerHTML = '<div class="dash-empty">这个时间窗内没有会话活动。</div>';
+      box.innerHTML = `<div class="dash-empty">最近 ${days} 天没有会话活动。</div>`;
       return;
     }
-    box.innerHTML = '<div class="tablewrap"><table><thead><tr>'
+    box.innerHTML = '<div class="tablewrap dash-scroll"><table><thead><tr>'
       + '<th>会话</th><th>agent</th><th class="num">操作</th><th class="num">写</th><th>最近活动</th>'
       + "</tr></thead><tbody>"
       + sessions.map((s) => {
@@ -327,7 +462,7 @@
       box.innerHTML = '<div class="dash-empty">本次服务启动以来还没有 agent 取过数。</div>';
       return;
     }
-    box.innerHTML = '<div class="tablewrap"><table><thead><tr>'
+    box.innerHTML = '<div class="tablewrap dash-scroll"><table><thead><tr>'
       + '<th>会话</th><th class="num">已用</th><th class="num">占配额</th>'
       + '<th class="num">取数次数</th><th class="num">已放行</th><th>最近放行理由</th>'
       + "</tr></thead><tbody>"
@@ -354,6 +489,18 @@
     win = btn.dataset.win;
     localStorage.setItem("dbm.dash.window", win);
     load();
+  });
+
+  document.getElementById("dash-conns").addEventListener("click", (e) => {
+    const th = e.target.closest("th[data-sort]");
+    if (!th) return;
+    const key = th.dataset.sort;
+    // 点同一列切换升降序，点新列从升序开始（状态列例外：先看异常，默认降序）
+    connSort = connSort.key === key
+      ? { key, dir: connSort.dir === "asc" ? "desc" : "asc" }
+      : { key, dir: key === "state" ? "desc" : "asc" };
+    localStorage.setItem("dbm.dash.connSort", JSON.stringify(connSort));
+    if (data) renderConnections(data.connections.items);
   });
 
   const autoBox = document.getElementById("dash-auto");
