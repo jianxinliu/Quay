@@ -1542,7 +1542,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
 
         # agent 提交时写下的「改动前是什么值 / 怎么回滚」——审批人判断可回滚性的关键信息
         rollback_row = (
-            f"<dt>回滚参考</dt><dd><pre style='margin:0'>{_esc(c.rollback_note)}</pre></dd>"
+            f"<dt>回滚参考</dt><dd><pre>{_esc(c.rollback_note)}</pre></dd>"
             if c.rollback_note else ""
         )
 

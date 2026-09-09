@@ -87,7 +87,11 @@ label{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-w
 .filters a{padding:3px 10px;border-radius:6px;color:var(--muted)}
 .filters a:hover{background:#eceef1;text-decoration:none;color:var(--text)}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:4px 0;align-items:center;font-size:13.5px}
-.kv dt{color:var(--muted)} .kv dd{margin:0;color:var(--text)}
+.kv dt{color:var(--muted);min-width:0}
+/* min-width:0 必需：grid 子项默认 min-width:auto，dd 里的长单行（回滚参考的 pre）会把
+   整列撑宽、连带整张卡片溢出容器；pre 在这里改为软换行而不是横向滚动，长备注要一眼看全。 */
+.kv dd{margin:0;color:var(--text);min-width:0;overflow-wrap:anywhere}
+.kv dd pre{margin:0;white-space:pre-wrap;word-break:break-word}
 .sec-title{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.8px;
   text-transform:uppercase;margin:18px 0 7px}
 .card h3:first-child,.card .sec-title:first-child{margin-top:0}
