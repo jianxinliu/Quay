@@ -14,8 +14,11 @@ from dbmcp.audit.log import AuditStore
 from dbmcp.budget import (
     ResultBudgetExceeded,
     SessionBudget,
+    count_tokens,
     estimate_tokens,
+    tokenizer_ready,
     usage_note,
+    warm_tokenizer,
 )
 from dbmcp.config import AppConfig
 from dbmcp.guide import USAGE_GUIDE
@@ -115,20 +118,61 @@ class TestSessionBudget:
         b.charge("big", "x" * 90)
         assert [u["session_id"] for u in b.snapshot()] == ["big", "small"]
 
-    def test_token_estimate_is_character_class_aware(self):
-        """同样长度的中英文 token 密度差三倍，用一个固定除数换算会误导人。"""
-        b = SessionBudget(limit_chars=100_000)
-        en = b.charge("en", "a" * 400)["used_tokens"]
-        cn = b.charge("cn", "中" * 400)["used_tokens"]
-        assert en == 100                      # ASCII ≈ 4 字符/token
-        assert cn > en * 3                    # 中文密得多
-        assert estimate_tokens("") == 0
-
     def test_tokens_accumulate_across_calls(self):
         b = SessionBudget(limit_chars=100_000)
-        b.charge("s1", "a" * 400)
+        first = b.charge("s1", "a" * 400)["used_tokens"]
         usage = b.charge("s1", "a" * 400)
-        assert usage["used_tokens"] == 200 and usage["used_chars"] == 800
+        assert usage["used_chars"] == 800
+        assert usage["used_tokens"] == first * 2
+
+    def test_snapshot_says_whether_the_count_is_exact(self):
+        """界面据此决定写「N token」还是「≈N token（粗估）」——
+        不能把估算值伪装成精确计数。"""
+        b = SessionBudget(limit_chars=100)
+        assert b.charge("s1", "abc")["tokens_exact"] is tokenizer_ready()
+
+
+class TestTokenCounting:
+    """token 数是给人看的注解；配额本身按字符强制，不依赖分词器。"""
+
+    def test_heuristic_is_character_class_aware(self):
+        """同样长度的中英文 token 密度差三倍，用一个固定除数换算会误导人。"""
+        assert estimate_tokens("") == 0
+        en = estimate_tokens("a" * 400)
+        cn = estimate_tokens("中" * 400)
+        assert en == 100                      # ASCII ≈ 4 字符/token
+        assert cn > en * 3                    # 中文密得多
+
+    def test_count_falls_back_to_heuristic_without_tokenizer(self, monkeypatch):
+        """装不上 tiktoken、或词表下不来（离线/代理）时，取数路径绝不能因此受影响。"""
+        import dbmcp.budget as bud
+
+        monkeypatch.setattr(bud, "_encoder", None)
+        monkeypatch.setattr(bud, "_encoder_tried", True)
+        assert bud.count_tokens("abcd" * 100) == bud.estimate_tokens("abcd" * 100)
+        assert bud.tokenizer_ready() is False
+
+    def test_broken_tokenizer_does_not_break_counting(self, monkeypatch):
+        import dbmcp.budget as bud
+
+        class Boom:
+            def encode(self, *a, **k):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(bud, "_encoder", Boom())
+        monkeypatch.setattr(bud, "_encoder_tried", True)
+        assert bud.count_tokens("abcd") == bud.estimate_tokens("abcd")
+
+    @pytest.mark.skipif(not tokenizer_ready() and not warm_tokenizer(),
+                        reason="未安装 tiktoken 附加依赖")
+    def test_real_tokenizer_beats_the_heuristic_on_tsv(self):
+        """TSV 结果是本服务最常见的内容，而启发式对它少报近一半——
+        制表符、纯数字 id、短字段各自成 token，密度远高于「4 字符/token」。"""
+        tsv = "id\tname\tamount\n" + "".join(
+            f"{i}\tuser{i}\t{i * 13.5}\n" for i in range(200))
+        real = count_tokens(tsv)
+        assert real > estimate_tokens(tsv) * 1.5
+        assert count_tokens("") == 0
 
     def test_session_table_is_bounded(self):
         """常驻进程不能无限攒会话 id。"""

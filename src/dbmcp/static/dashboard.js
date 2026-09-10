@@ -499,7 +499,10 @@
         return "<tr>"
           + `<td><span class="mono">${esc((b.session_id || "-").slice(0, 12))}</span></td>`
           + `<td class="num">${num(b.used_chars)} 字符<br>`
-          + `<span class="muted">≈${num(b.used_tokens)} token</span></td>`
+          // 装了 tiktoken 就是真实分词的结果，不该再挂个「≈」说成估算
+          + `<span class="muted" title="${b.tokens_exact
+              ? "tiktoken 真实分词（o200k）" : "按字符类别粗估——装上 tokenizer 附加依赖可精确计数"}">`
+          + `${b.tokens_exact ? "" : "≈"}${num(b.used_tokens)} token</span></td>`
           + `<td class="num" style="${color ? "color:" + color + ";font-weight:600" : ""}">`
           + `${b.enabled ? pct + "%" : "不限"}</td>`
           + `<td class="num">${num(b.calls)}</td>`

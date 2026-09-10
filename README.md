@@ -30,7 +30,7 @@
 ## 快速开始
 
 ```bash
-uv sync --extra keyring
+uv sync --extra keyring --extra tokenizer
 cp config/connections.example.yaml config/connections.yaml   # 改成你的库
 
 DBM_ADMIN_TOKEN=一串足够长的随机字符 uv run dbm serve
@@ -258,6 +258,9 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 - **会话第一次调用工具时随结果附一份完整使用说明**（各场景该用哪套工具组合、结果上限、
   错误怎么读）。MCP instructions 各客户端处理不一，实测 agent 常常读不到；说明在它正要
   用工具时送达，一个会话只发一次。可在系统设置里关掉，agent 仍可主动调 `usage_guide()`。
+- **token 计数**：装了可选依赖 `tokenizer`（tiktoken）就用真实分词计数，否则按字符类别
+  估算并在界面上标「粗估」。差别不小——查询结果 TSV 里制表符、数字 id、短字段各自成 token，
+  启发式会少报近一半。词表首次加载后缓存在数据目录，之后全离线。
 - **会话级结果配额**：同一会话累计返回超过上限（默认 400000 字符≈114k token）后拒绝继续
   取数，要求 agent 先问你是否确认继续，你同意后它调 `allow_more_results` 才放行一个额度。
   单次上限管不住「一直查」，这道闸门管的是**整个会话**烧掉多少上下文。用量与放行次数在看板上。
@@ -295,7 +298,7 @@ uv run dbm serve --stdio
 ## 开发
 
 ```bash
-uv sync --extra keyring
+uv sync --extra keyring --extra tokenizer
 uv run pytest          # 全量测试
 uv run ruff check .    # lint
 ```

@@ -14,9 +14,13 @@ agent：去问用户要不要继续；用户同意后调 `allow_more_results` �
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- token 估算
 #
@@ -44,6 +48,78 @@ def estimate_tokens(text: str) -> int:
     wide = sum(1 for ch in text if ord(ch) > 0x7F)
     ascii_n = len(text) - wide
     return int(ascii_n / CHARS_PER_TOKEN_ASCII + wide / CHARS_PER_TOKEN_WIDE)
+
+
+# ---------------------------------------------------------------- 真实分词计数
+#
+# 上面的启发式对**中英文混排**已经够用，但对本服务最常见的内容——查询结果 TSV——
+# 会少报近一半：制表符、纯数字 id、短字段各自成 token，密度远高于「4 字符/token」。
+# 实测一份 43KB 的结果集：真实 16131 token，启发式只估出 8000 上下。
+#
+# 所以装了 tiktoken 就用真实分词（o200k_base）。它是 GPT-4o 的分词器、不是 Claude 的，
+# 但同为现代 BPE、中文处理正确，比启发式接近得多；43KB 编码只要 1.5ms。
+# 装不上或词表下不来（离线/代理）就回退启发式，并在界面上标明是粗估——
+# **绝不能因为一个注解性的数字把取数路径拖住或弄挂**。
+TOKENIZER_ENCODING = "o200k_base"
+
+_encoder: object | None = None
+_encoder_tried = False
+_encoder_lock = threading.Lock()
+
+
+def set_tokenizer_cache_dir(path: str) -> None:
+    """把 tiktoken 的词表缓存钉到给定目录（daemon 传数据目录）。
+
+    默认缓存在 `TMPDIR/data-gym-cache`，而 macOS 会清理 TMPDIR——那意味着
+    每隔一段时间就要重新下一次 3.4MB 词表。必须在首次加载编码器之前调用。
+    """
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", path)
+
+
+def _get_encoder():  # noqa: ANN202
+    """惰性取分词器；取不到就永久回退（不每次调用都重试，免得反复等网络）。"""
+    global _encoder, _encoder_tried
+    if _encoder_tried:
+        return _encoder
+    with _encoder_lock:
+        if _encoder_tried:
+            return _encoder
+        try:
+            import tiktoken  # noqa: PLC0415
+
+            _encoder = tiktoken.get_encoding(TOKENIZER_ENCODING)
+        except Exception:  # noqa: BLE001 - 没装、下不到词表、词表损坏都退回启发式
+            logger.info("tiktoken 不可用，token 数改用字符类别估算", exc_info=True)
+            _encoder = None
+        finally:
+            _encoder_tried = True
+    return _encoder
+
+
+def warm_tokenizer() -> bool:
+    """预热分词器，返回是否可用。daemon 启动时在后台线程调一次——
+
+    首次加载要下 3.4MB 词表，不该让某一次查询替所有人承担这几秒。
+    """
+    return _get_encoder() is not None
+
+
+def tokenizer_ready() -> bool:
+    """分词器是否已就绪（决定界面上写「token」还是「≈token（粗估）」）。"""
+    return _encoder is not None
+
+
+def count_tokens(text: str) -> int:
+    """文本的 token 数：装了 tiktoken 走真实分词，否则回退字符类别估算。"""
+    if not text:
+        return 0
+    enc = _get_encoder()
+    if enc is None:
+        return estimate_tokens(text)
+    try:
+        return len(enc.encode(text, disallowed_special=()))
+    except Exception:  # noqa: BLE001 - 分词失败不能影响取数
+        return estimate_tokens(text)
 
 
 class ResultBudgetExceeded(Exception):
@@ -95,7 +171,8 @@ class SessionBudget:
             return
         raise ResultBudgetExceeded(
             f"本会话累计已返回约 {entry.used_chars:,} 字符"
-            f"（≈{entry.used_tokens:,} token，共 {entry.calls} 次取数），"
+            f"（{'' if tokenizer_ready() else '≈'}{entry.used_tokens:,} token，"
+            f"共 {entry.calls} 次取数），"
             f"达到会话结果配额上限。**请先停下来问用户**：是否确认继续这些会消耗大量 token "
             "的查询？说明你还打算查什么、大概还要多少。用户同意后调 "
             "allow_more_results(reason=\"用户已确认：……\") 再放行一个额度，然后继续。\n"
@@ -114,7 +191,7 @@ class SessionBudget:
         entry = self._entry(session_id)
         with entry._lock:
             entry.used_chars += len(text or "")
-            entry.used_tokens += estimate_tokens(text or "")
+            entry.used_tokens += count_tokens(text or "")
             entry.calls += 1
             return self._snapshot_of(session_id, entry)
 
@@ -152,6 +229,9 @@ class SessionBudget:
             "grants": entry.grants,
             "last_reason": entry.last_reason,
             "enabled": self.limit_chars > 0,
+            # 界面据此决定写「N token」还是「≈N token（粗估）」——
+            # 不能把估算值伪装成精确计数
+            "tokens_exact": tokenizer_ready(),
         }
 
 
@@ -163,6 +243,8 @@ def usage_note(usage: dict) -> str:
     """接近上限时给 agent 的一行提醒；未接近则返回空串。"""
     if not usage.get("enabled") or usage.get("percent", 0) < WARN_AT_PERCENT:
         return ""
+    tilde = "" if usage.get("tokens_exact") else "≈"
     return (f"# budget: 本会话已用 {usage['used_chars']:,} 字符"
-            f"（≈{usage['used_tokens']:,} token，{usage['percent']}% 配额，{usage['calls']} 次取数）。"
+            f"（{tilde}{usage['used_tokens']:,} token，{usage['percent']}% 配额，"
+            f"{usage['calls']} 次取数）。"
             "接近上限后将被拒绝取数——请改用聚合/导出文件/分析工作台收窄结果。")

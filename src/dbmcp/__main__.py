@@ -67,6 +67,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _warm_tokenizer(data_dir: str) -> None:
+    """后台预热 token 分词器（装了 tiktoken 才有效）。
+
+    首次加载要下 3.4MB 词表，不该让某一次查询替所有人承担这几秒；下不到也无所谓，
+    budget 会回退到字符类别估算并在界面上标「粗估」。词表缓存钉在数据目录，
+    否则默认落在 TMPDIR、被 macOS 清理后又要重下一次。
+    """
+    import threading
+
+    from .budget import set_tokenizer_cache_dir, warm_tokenizer
+
+    cache = Path(data_dir) / "tokenizer"
+    cache.mkdir(parents=True, exist_ok=True)
+    set_tokenizer_cache_dir(str(cache))
+    threading.Thread(target=warm_tokenizer, name="dbm-tokenizer",
+                     daemon=True).start()
+
+
 def _open_approvals(data_dir: str) -> ApprovalStore:
     db = Path(data_dir) / "dbm.sqlite3"
     if not db.exists():
@@ -110,6 +128,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     public_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     service.base_url = f"http://{public_host}:{args.port}"
     seed_examples(service.workflows, args.data_dir)  # 首次启动播种示例 workflow
+    _warm_tokenizer(args.data_dir)
     service.start_housekeeping(retention_days=args.retention_days)
     service.start_scheduler(interval_s=30)  # 每 30s tick 一次；对齐下拉最小 1 分钟粒度
     mcp = build_mcp(service)
