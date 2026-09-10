@@ -1472,8 +1472,10 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
                             f"&edit={_esc(pname)}/{_esc(cname)}")
                 body.append(
                     "<tr class='conn-row'>"
-                    f"<td><a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
-                    f"<div class='conn-where mono muted' title='{where}'>{where}</div></td>"
+                    f"<td><div class='conn-line'>"
+                    f"<a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
+                    f"<span class='conn-where mono muted' title='{where}'>{where}</span>"
+                    f"</div></td>"
                     f"<td class='eng'>{_engine_icon(c.engine)}"
                     f"<span class='mono muted'>{_esc(c.engine)}</span></td>"
                     f"<td class='caps'>{''.join(caps)}</td>"

@@ -188,7 +188,7 @@
 /* ================= 连接管理 ================= */
 /* 列表按项目分组，每行给出「这条连接能做什么」——有没有 writer、走不走跳板、
    有没有脱敏。这些原来要点进编辑面板才看得到，而它们恰恰决定了这条连接的风险面。 */
-.conn-sec{padding-bottom:16px}
+.conn-sec{padding-bottom:12px}
 .conn-hd{display:flex;align-items:flex-start;gap:20px}
 .conn-hd>div{flex:1}
 .conn-hd .btn{flex:none;margin-top:2px}
@@ -197,28 +197,29 @@
 .conn-tbl td{vertical-align:middle}
 /* 两级分隔行：环境（最外，决定风险，prod 在最前）→ 项目 → 连接。
    分隔行不是数据行，所以没有边框与 hover，只当标签用。 */
-.conn-tbl tr.env-row td{padding:22px 0 8px;border:none;
+.conn-tbl tr.env-row td{padding:14px 0 6px;border:none;
   border-bottom:2px solid color-mix(in srgb, var(--env) 28%, transparent)}
-.conn-tbl tbody tr:first-child.env-row td{padding-top:8px}
+.conn-tbl tbody tr:first-child.env-row td{padding-top:4px}
 .conn-tbl tr.env-row .n{margin-left:9px;font-size:11.5px;color:var(--faint);
   font-family:var(--mono)}
-.conn-tbl tr.proj-row td{padding:12px 0 4px 2px;border:none;
+.conn-tbl tr.proj-row td{padding:9px 0 2px 2px;border:none;
   font-family:var(--mono);font-size:11.5px;color:var(--faint)}
 .conn-tbl tr.conn-row>td:first-child{padding-left:14px}
-/* 连接行收紧一点：默认 11px 上下 padding + 两行文字，一屏只放得下五六条，
-   而分组本来就是为了让人一眼扫完全部连接 */
-.conn-tbl tr.conn-row td{border-top:1px solid var(--line);border-bottom:none;padding:9px 12px}
+/* 连接名与地址排在同一行：分两行时每条要占 ~50px，十来条连接就滚出一屏，
+   而分组本来就是为了一眼扫完。地址是次要信息，跟在名字后面、超长省略即可。 */
+.conn-tbl tr.conn-row td{border-top:1px solid var(--line);border-bottom:none;padding:6px 12px}
 .conn-tbl tr.proj-row+tr.conn-row td{border-top:none}
+.conn-line{display:flex;align-items:baseline;gap:9px;min-width:0}
+.conn-line .conn-where{margin:0;flex:1;min-width:0}
 .conn-name{font-weight:600;color:var(--text);font-size:14px}
 .conn-name:hover{color:var(--accent-ink)}
 /* 主机/库路径截一行：SQLite 的绝对路径会把行撑成三行，一屏只剩三条连接 */
-.conn-where{font-size:12px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap}
+.conn-where{font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 引擎图标与名字同一行——分成两行读起来像两个字段 */
 .conn-tbl td.eng{white-space:nowrap}
 .conn-tbl td.eng img,.conn-tbl td.eng svg{vertical-align:middle;margin-right:6px}
 /* 能力标签：中性灰是常态，只有「可写」和「跳板」值得着色——它们是风险面 */
-.cap{display:inline-block;padding:1px 8px;margin:2px 5px 2px 0;border-radius:6px;font-size:11.5px;
+.cap{display:inline-block;padding:0 7px;margin:1px 4px 1px 0;border-radius:5px;font-size:11px;
   background:#f1f3f5;color:var(--muted);white-space:nowrap}
 .cap-w{background:#fdf0d8;color:#b45309}
 .cap-ssh{background:var(--accent-soft);color:var(--accent-ink)}
@@ -231,19 +232,28 @@
    改完上面第二项还得一路滚到底才找得到它。 */
 .modalbox.conn-modal{max-width:900px;padding:0;display:flex;flex-direction:column;
   max-height:88vh;overflow:hidden}
-.conn-modal-hd{display:flex;align-items:center;padding:20px 26px 14px;
+.conn-modal-hd{display:flex;align-items:center;padding:15px 22px 11px;
   border-bottom:1px solid var(--border);flex:none}
 .conn-modal-hd h2{margin:0;font-size:18px}
 .conn-modal-hd .mclose{position:static;margin-left:auto}
-.conn-modal-body{overflow-y:auto;padding:18px 26px 0;scrollbar-width:thin}
-.conn-modal-body .set-sec{margin-bottom:14px}
-.conn-modal-body .set-row{grid-template-columns:1fr 280px}
+.conn-modal-body{overflow-y:auto;padding:14px 22px 0;scrollbar-width:thin}
+/* 弹窗里六个分区、二十来个字段，用设置页那套宽松节奏要滚三屏。
+   这里把区头、行距、说明一起收紧——层级不变，只是密一点。 */
+.conn-modal-body .set-sec{margin-bottom:10px;padding:0 18px 2px}
+.conn-modal-body .set-sec>header{padding:13px 0 9px}
+.conn-modal-body .set-sec>header h3{font-size:14px}
+.conn-modal-body .set-sec>header p{margin-top:3px;line-height:1.45}
+.conn-modal-body .set-sec.guard>header h3::before{left:-18px;top:14px;bottom:9px}
+.conn-modal-body .set-row{grid-template-columns:1fr 280px;padding:9px 0;gap:10px 20px}
+.conn-modal-body .set-row .nm{font-size:13.5px}
+.conn-modal-body .set-row .desc{margin-top:3px;line-height:1.45;font-size:12px}
 .conn-modal-body .set-row .ctl{width:280px}
+.conn-modal-body input,.conn-modal-body select{padding:7px 10px;font-size:13px}
 /* 控件填满右列：设置页的 240px 上限是给那一页的窄列定的，弹窗里这列更宽 */
 .conn-modal-body .set-row .ctl input,.conn-modal-body .set-row .ctl select{max-width:none}
 .conn-modal-body .set-row.wide .ctl{width:auto}
 .conn-actions{position:sticky;bottom:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  padding:14px 0 18px;margin-top:4px;background:var(--surface);
+  padding:11px 0 14px;margin-top:2px;background:var(--surface);
   box-shadow:0 -10px 16px -12px rgba(15,20,27,.28)}
 .conn-actions .spacer{flex:1}
 #conn-test-result{margin:0 0 12px;padding:10px 14px;border-radius:9px;font-size:13.5px}
