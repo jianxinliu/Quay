@@ -147,6 +147,11 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 - **JS 里 `const` 的 TDZ 会让整个 IIFE 静默死掉**：设置页第一版把「开关初始化」写在了「脏值追踪声明」之前，开关的 `sync()` 里调 `dirtyCheck()` → `changedFields()` → 访问尚未初始化的 `const fields` → 抛 ReferenceError → 整个立即执行函数当场终止。**表现极具迷惑性**：第一个开关的文字设上了（抛错前那一行）、后面的开关和所有换算读数都没出来，而且错误发生在页面加载时、控制台事后打开根本看不到。**排查特征：脚本「做了一半」——前面几行的效果在、后面的全没有 → 一定是中途抛了错，去看声明顺序而不是去看逻辑。**
 - **`:has()` 写的定宽会把整宽行一起管住**：给 `.ctl` 加 `width:240px` 之后，本该占满一行的「整宽行」（提示词文本框、通知渠道卡片、webhook 输入）全被压成一条 240px，中文折成「只在后台/铃铛里」这种断法。定宽必须在整宽变体里显式撤掉（`width:auto`），别指望 `justify-self:stretch` 能覆盖 `width`。
 
+- **改前端后忘了重启测试服务，会让你在浏览器里追一个已经修好的 bug**：uvicorn 不热重载 Python，`_connections_body` 这类**服务端渲染**的改动必须重启 8201 才生效（静态 css/js 是 no-cache、刷新即生效，所以很容易误以为「代码改了页面没变 = 我改错了」）。这次为此白查了一轮「为什么还是两张表」。**排查特征：改的是 .py 却没效果、改的是 .css/.js 立刻有效果 → 先重启服务再看。**
+- **前端说明文案是 HTML 不是 markdown**：`**数据库自己的**` 会原样把星号显示在页面上。已加回归测试 `test_no_literal_markdown_in_copy`（排除 `***MASKED***` 这个真会显示的字面量）。
+- **`<input>` 不写 `type` 时选不中 `input[type=text]`**：连接名那个框因此比其它字段窄一截。写 CSS 用属性选择器时，对应的 HTML 必须显式带上 type。
+- **重设计一个表单页时，真正要锁住的不是版式而是「接口面」**：保存路由读的每个 `name`、前端按条件显隐用的每个 class 钩子、JS 取的每个元素 id。版式可以随便推倒重来，这三样丢一个就是静默失效（字段保存不上、某引擎该隐藏的行露出来、按钮没反应）。做法是把它们各列成一张表写成回归测试（见 test_settings_page.py::TestConnectionsTab），改版时先跑这三条。
+
 ## 模块地图（src/dbmcp/）
 
 - `ai.py` AI 辅助生成 SQL（`build_sql_prompt`/`build_followup_prompt` 纯函数拼 prompt + `run_ai` provider 分发 claude/codex CLI + `parse_ai_output` 解析，`generate_sql` 串起来；`AIResult` 带 session_id 支持续接会话）；service `ai_generate_sql`、admin `/admin/sql/ai`、console.js「✨ AI」浮层
@@ -180,6 +185,7 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 
 ## 当前状态
 
+- [x] 连接管理与编辑面板重设计（据反馈「连接管理界面，以及编辑面板要优化」）：列表并成**一张表 + 项目分隔行**（分表的话各表列宽各算各的，「引擎」「环境」在不同分组里对不齐），每行加**能力标签**（可写/只读 · N 跳 · 脱敏 N 列）——这些原来要点进编辑面板才看得到，而它们恰恰决定这条连接的风险面；长 host/路径截一行 + 悬停看全文。编辑面板从一条长表单改成六个分区（身份/连到哪/账号/SSH 跳板/取多少数据/给 agent 看多少），账号与脱敏两区走护栏样式，操作条 sticky 在面板底部。**重设计时最容易出事的是字段名与 JS 钩子**：保存接口读的 18 个 name、前端按引擎显隐整行用的 12 个 `cf-*` 类、8 个元素 id 一个都不能丢——已各加一条回归测试锁住。1122 测试全过（+7）+ 浏览器验证四种引擎的字段显隐矩阵、真实新建连接落盘（max_rows/脱敏列都对）。
 - [x] 系统设置页重设计（据反馈「要好看、UE 好、简洁明了」，用 frontend-design 技能做）：账本式两栏行（左：是什么/什么后果，右：控件 + 换算读数）替掉一列同构表单块；护栏区（给 Agent 的护栏、表同步上限）琥珀左边条与偏好项分级；偏离默认标「已改」；有改动才浮出的改动条（N 项改动 / 放弃 / 保存）；二元项换开关；八个 tab 按偏好·能力·资源·系统分组；搜索框过滤当前分区；长说明与提示词折叠。新增 `static/settings.css` + `settings.js`，`admin.py` 的 `_set_row`/`_set_section`/`_settings_layout` 为公共原语。1113 测试全过（+16 test_settings_page）+ 浏览器 e2e（八个 tab、改动条计数、放弃还原并重新联动、保存后「已改」标记、搜索过滤与空态、键盘焦点环、窄栏单列不溢出）。
 - [x] 系统使用看板 + 建表语句/结构同步工具 + agent 用法治理（本次，分支 `feat/dashboard-and-ddl-tool`）：
   - **看板 `/admin/dashboard`**（左侧导航第一项，原生 JS + echarts，5s 自动刷新可关）：
