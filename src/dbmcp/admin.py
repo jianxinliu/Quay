@@ -495,7 +495,12 @@ def _parse_hop_rows(f) -> list[dict]:  # noqa: ANN001
 
 
 def _connection_form(project: str, connection: str, cfg, identities: list[str]) -> str:  # noqa: ANN001
-    """连接增删改表单。编辑时锁定 project/connection，密码留空表示不改。"""
+    """连接增删改表单。编辑时锁定 project/connection，密码留空表示不改。
+
+    按「身份 → 连到哪 → 用什么账号 → 怎么到达 → 取多少/给 agent 看多少」分区，
+    与系统设置同一套账本行。**每个 `cf-*` 类名都是前端按引擎显隐整行的钩子**
+    （sqlite 不要账号与跳板、redis 不要 user 与 writer），改结构时不能丢。
+    """
     is_edit = cfg is not None
     ro = "readonly" if is_edit else ""
     engines_opts = "".join(
@@ -507,8 +512,7 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
         for e in ("local", "dev", "staging", "prod")
     )
     ssh_extra = " ".join(cfg.ssh_options) if cfg and cfg.ssh_options else ""
-    existing_hops = list(cfg.jump_hosts) if cfg else []
-    hop_rows = "".join(_hop_row(h, identities) for h in existing_hops)
+    hop_rows = "".join(_hop_row(h, identities) for h in (cfg.jump_hosts if cfg else []))
     empty_hop = _hop_row(None, identities)
     masks = ", ".join(cfg.policy.mask_columns) if cfg else ""
     mask_mode = "" if not cfg or cfg.policy.mask_default_patterns is None else (
@@ -516,72 +520,119 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     mask_opts = "".join(
         f"<option value='{v}'{' selected' if mask_mode == v else ''}>{_esc(t)}</option>"
         for v, t in (("", "跟随全局设置"), ("1", "开：自动脱敏"), ("0", "关：返回真实值")))
-    pw_ph = "留空表示不修改" if is_edit else "写入系统 keyring，配置只存引用"
+    pw_ph = "留空 = 不修改" if is_edit else "写入系统钥匙串"
     writer_user = cfg.writer.user if cfg and cfg.writer else ""
     is_edit_js = "true" if is_edit else "false"
+
+    def txt(name: str, value: object = "", ph: str = "", typ: str = "text") -> str:
+        return (f"<input type='{typ}' name='{name}' value='{_esc(str(value or ''))}' "
+                f"placeholder='{_esc(ph)}'>")
+
+    basic = _set_section(
+        "身份", "连接在项目下按名字寻址，agent 用 <code>项目/连接名</code> 指定要连哪个库。",
+        _set_row("project", "项目", "同一个业务的连接放一个项目里。",
+                 txt("project", project, "local"))
+        + _set_row("connection", "连接名",
+                   "创建后不可改名。" if is_edit else "如 <code>orders-prod</code>，取个一眼认得出的名字。",
+                   f"<input type='text' name='connection' value='{_esc(connection)}' {ro}>")
+        + _set_row("engine", "引擎", "决定下面要填哪些字段。",
+                   f"<select name='engine'>{engines_opts}</select>")
+        + _set_row("environment", "环境",
+                   "prod 会在查询台整页套红框、写操作强制审批，也不允许作为表同步的目标。",
+                   f"<select name='environment'>{envs_opts}</select>"))
+
+    where = _set_section(
+        "连到哪",
+        "走 SSH 跳板时这里仍填<b>数据库自己的</b>地址，隧道由下面的跳板链负责打通。",
+        _set_row("host", "主机", "", txt("host", cfg.host if cfg else "", "127.0.0.1"),
+                 cls="cf-hostport")
+        + _set_row("port", "端口", "",
+                   txt("port", cfg.port if cfg else "", "3306", "number"), cls="cf-hostport")
+        + _set_row("database", "库",
+                   "<span class='cf-db-mysql'>留空 = 连到实例但不绑定默认库，"
+                   "查询要用「库名.表名」全限定。</span>"
+                   "<span class='cf-db-sqlite'><b>必填</b>：SQLite 文件路径，"
+                   "或 <code>:memory:</code>。</span>"
+                   "<span class='cf-db-redis'>Redis 逻辑库编号，默认 0。</span>",
+                   txt("database", cfg.database if cfg else "")))
+
+    creds = _set_section(
+        "账号",
+        "两个账号是这套系统的地基：日常查询走只读账号，只有审批通过的写操作才切到 writer。",
+        _set_row("user", "只读账号",
+                 "<span class='cf-cred-note'>必须是<b>最小权限的只读账号</b>。"
+                 "保存时会实地校验，发现它有写权限或是超级用户会被拦下。</span>"
+                 "<span class='cf-redis-pw-note'>Redis 没有用户名，密码即 requirepass。</span>",
+                 txt("user", cfg.user if cfg else ""), cls="cf-cred cf-cred-user")
+        + _set_row("password", "只读账号密码", "", txt("password", "", pw_ph, "password"),
+                   cls="cf-cred cf-cred-pw")
+        + _set_row("writer_user", "writer 账号",
+                   "留空 = 这条连接只能读，agent 的写操作会被直接拒绝。",
+                   txt("writer_user", writer_user), cls="cf-writer")
+        + _set_row("writer_password", "writer 密码", "",
+                   txt("writer_password", "", pw_ph, "password"), cls="cf-writer")
+        + _set_row("force_privileged", "允许高权限账号",
+                   "只读账号校验不通过时，勾选它强行保存。"
+                   "<b>意味着日常查询也用着一个能写的账号</b>，只在你清楚后果时用。",
+                   "<label class='sw'><input type='checkbox' name='force_privileged' value='1'>"
+                   "<span class='track'></span><span class='state'>关闭</span></label>"),
+        guard=True)
+
+    ssh = _set_section(
+        "SSH 跳板链",
+        "按顺序打通，最后一跳落地转发到上面填的数据库地址。无跳板 = 直连。"
+        "每跳可引用一条<a href='/admin/settings?tab=ssh'>已保存的 SSH 配置</a>"
+        "（主机/用户/私钥都从配置来，跳板处留空即继承），也可以就地填内联主机与私钥。",
+        f"<div class='set-row wide'><div class='ctl' style='margin-top:0'>"
+        f"<div id='hops'>{hop_rows}</div>"
+        f"<template id='hop-tpl'>{empty_hop}</template>"
+        "<button type='button' id='add-hop' class='btn btn-ghost btn-sm'>＋ 加一跳</button>"
+        "</div></div>"
+        + _set_row("ssh_options_extra", "其它 ssh 选项",
+                   "空格分隔，作用于最终目标。如 <code>-o ConnectTimeout=5</code>。",
+                   txt("ssh_options_extra", ssh_extra, "-o ConnectTimeout=5"), wide=True),
+        cls="cf-ssh")
+
+    policy = _set_section(
+        "取多少数据",
+        "这条连接上的取数上限，比系统设置里的全局值更具体。",
+        _set_row("max_rows", "单次行上限",
+                 "缺 LIMIT 的查询自动兜底到这个行数。",
+                 txt("max_rows", cfg.policy.max_rows if cfg else 500, "500", "number"))
+        + _set_row("statement_timeout_s", "读超时",
+                   "只约束只读查询（SELECT）。",
+                   txt("statement_timeout_s",
+                       cfg.policy.statement_timeout_s if cfg else 30, "30", "number")
+                   + "<span class='unit'>秒</span>", cls="cf-timeouts")
+        + _set_row("write_timeout_s", "写超时",
+                   "给 writer 账号的大 DELETE/UPDATE 留足时间，避免 socket 提前断开报 2013。"
+                   "跑飞的写可以在查询台点「取消」直接 KILL。",
+                   txt("write_timeout_s",
+                       cfg.policy.write_timeout_s if cfg else 600, "600", "number")
+                   + "<span class='unit'>秒</span>", cls="cf-timeouts"))
+
+    mask = _set_section(
+        "给 agent 看多少",
+        "只影响 agent 的 query / sample_rows。你在查询台和导出里看到的一直是真实值。",
+        _set_row("mask_columns", "脱敏列",
+                 "逗号分隔，点名的列<b>始终</b>脱敏，不受下面的开关影响。",
+                 txt("mask_columns", masks, "email, phone"))
+        + _set_row("mask_default_patterns", "敏感列自动脱敏",
+                   "按内置词表（password / token / secret / id_card…）猜哪些列敏感。"
+                   "默认跟随系统设置里的全局开关，这里可以为这条连接单独定。",
+                   f"<select name='mask_default_patterns'>{mask_opts}</select>"),
+        guard=True)
+
     return f"""<div id="conn-err" class="errbar" style="display:none"></div>
 <form id="conn-form" method="post" action="/admin/connections/save">
- <div class="row">
-  <div>{_field("项目", "project", project, ph="local")}</div>
-  <div><label>连接名</label><input name="connection" value="{_esc(connection)}" {ro} style="width:260px"></div>
- </div>
- <div class="row">
-  <div><label>引擎</label><br><select name="engine" style="padding:6px">{engines_opts}</select></div>
-  <div><label>环境</label><br><select name="environment" style="padding:6px">{envs_opts}</select></div>
- </div>
- <div class="row cf-hostport">
-  <div>{_field("host", "host", cfg.host if cfg else "", ph="127.0.0.1")}</div>
-  <div>{_field("port", "port", cfg.port if cfg else "", ph="3306", typ="number", width="120px")}</div>
- </div>
- <div class="row">
-  <div>{_field("database", "database", cfg.database if cfg else "")}</div>
- </div>
- <div class="muted cf-db-mysql" style="margin:-2px 0 6px">留空：连到实例但不绑定默认库，查询需用「库名.表名」全限定。</div>
- <div class="muted cf-db-sqlite" style="margin:-2px 0 6px"><b>必填</b>：SQLite 文件路径（如 /path/to/db.sqlite3）或 <code>:memory:</code>。</div>
- <div class="muted cf-db-redis" style="margin:-2px 0 6px">Redis 逻辑库 db 编号（默认 0）。</div>
- <div class="row cf-cred">
-  <div class="cf-cred-user">{_field("只读账号 user", "user", cfg.user if cfg else "")}</div>
-  <div class="cf-cred-pw">{_field("密码", "password", "", ph=pw_ph, typ="password")}</div>
- </div>
- <div class="muted cf-cred-note" style="margin:-2px 0 6px">主账号应为<b>最小权限的只读账号</b>；保存时会自动校验，检测到写权限/超级用户会被拦截。写操作用下方 writer 账号。</div>
- <div class="muted cf-redis-pw-note" style="margin:-2px 0 6px">Redis 无 user，密码即 requirepass；无认证则留空。</div>
- <div class="row cf-writer">
-  <div>{_field("writer user（可选，写操作用）", "writer_user", writer_user)}</div>
-  <div>{_field("writer password", "writer_password", "", ph=pw_ph, typ="password")}</div>
- </div>
- <div class="cf-ssh">
- <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
- <label>SSH 跳板链（按序，最后一跳落地转发到数据库）</label>
- <div class="muted" style="margin:2px 0 8px">每跳可引用一条已保存的 SSH 配置（主机/用户/私钥都从配置来，跳板处可留空覆盖），或填内联主机+私钥；不同跳板可用不同配置。无跳板＝直连。
- 配置在<a href="/admin/settings?tab=ssh">SSH 配置</a>页维护。</div>
- <div id="hops">{hop_rows}</div>
- <template id="hop-tpl">{empty_hop}</template>
- <button type="button" id="add-hop" class="btn btn-ghost" style="margin:2px 0 10px">＋ 加一跳</button>
- <div class="row">
-  <div>{_field("其它 ssh 选项（空格分隔，作用于最终目标）", "ssh_options_extra", ssh_extra, ph="-o ConnectTimeout=5", width="360px")}</div>
- </div>
- </div>
- <div class="row">
-  <div>{_field("max_rows", "max_rows", cfg.policy.max_rows if cfg else 500, typ="number", width="120px")}</div>
-  <div class="cf-timeouts">{_field("读超时(秒)", "statement_timeout_s", cfg.policy.statement_timeout_s if cfg else 30, typ="number", width="120px")}</div>
-  <div class="cf-timeouts">{_field("写超时(秒)", "write_timeout_s", cfg.policy.write_timeout_s if cfg else 600, typ="number", width="120px")}</div>
- </div>
- <div class="muted" style="margin:-2px 0 6px">读超时限只读查询（SELECT）；写超时给 writer 账号的大 DELETE/UPDATE 留足时间，避免 socket 提前断开报 2013。跑飞的写可在查询台点「取消」KILL。</div>
- <div class="row">
-  <div>{_field("脱敏列（逗号分隔）", "mask_columns", masks, ph="email, phone")}</div>
-  <div><label>敏感列自动脱敏</label>
-   <select name="mask_default_patterns" style="width:200px">{mask_opts}</select></div>
- </div>
- <div class="muted" style="margin:-2px 0 6px">「自动脱敏」按内置词表（password / token / secret / id_card…）猜哪些列敏感，
- <b>只作用于 agent 的 query / sample_rows</b>——你在查询台和导出里看到的一直是真实值。
- 关掉后 agent 也能拿到这些列的明文；上面手动点名的「脱敏列」不受这个开关影响，始终脱敏。</div>
- <label style="margin-top:12px"><input type="checkbox" name="force_privileged" value="1" style="width:auto;margin-right:6px">强制使用高权限账号（该账号是 root/超级用户或拥有写权限，我确认知晓风险）</label>
- <div id="conn-test-result" style="display:none;margin:12px 0"></div>
- <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-  <button class="btn btn-primary" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
+{basic}{where}{creds}{ssh}{policy}{mask}
+ <div id="conn-test-result" style="display:none"></div>
+ <div class="conn-actions">
   <button class="btn btn-ghost" type="button" id="btn-test">测试连接</button>
   <button class="btn btn-ghost" type="button" id="btn-test-ssh">测试 SSH 隧道</button>
-  {"<a href='/admin/settings?tab=connections' style='margin-left:4px'>取消编辑</a>" if is_edit else ""}
+  <span class="spacer"></span>
+  {"<a class='btn btn-ghost' href='/admin/settings?tab=connections'>取消</a>" if is_edit else ""}
+  <button class="btn btn-primary" type="submit">{'保存修改' if is_edit else '创建连接'}</button>
  </div>
 </form>
 <script>
@@ -871,28 +922,34 @@ def _set_changed(name: str, s: dict) -> bool:
 
 
 def _set_row(name: str, label: str, desc: str, control: str, s: dict | None = None,
-             wide: bool = False, more: str = "") -> str:
-    """一条账本行：左边「这是什么」，右边「现在是多少」。"""
+             wide: bool = False, more: str = "", cls: str = "") -> str:
+    """一条账本行：左边「这是什么」，右边「现在是多少」。
+
+    cls：额外类名。连接表单靠它挂 `cf-*` 钩子，让前端按引擎显隐整行
+    （sqlite 不要账号、redis 不要 writer…）。
+    """
     tag = ("<span class='set-tag'>已改</span>"
            if s is not None and _set_changed(name, s) else "")
     extra = (f"<details class='set-more'><summary>展开说明</summary>"
              f"<div class='body'>{more}</div></details>" if more else "")
-    return (f"<div class='set-row{' wide' if wide else ''}'>"
+    classes = " ".join(x for x in ("set-row", "wide" if wide else "", cls) if x)
+    return (f"<div class='{classes}'>"
             f"<div><div class='nm'>{_esc(label)}{tag}</div>"
-            f"<p class='desc'>{desc}</p>{extra}</div>"
+            + (f"<p class='desc'>{desc}</p>" if desc else "")
+            + f"{extra}</div>"
             f"<div class='ctl'>{control}</div></div>")
 
 
 def _set_section(title: str, desc: str, rows: str, guard: bool = False,
-                 folded: bool = False) -> str:
+                 folded: bool = False, cls: str = "") -> str:
     """一个分区。folded=True 时默认收起——留给提示词这类「几十行文本框、平时不看」的内容，
     否则它们会把整页撑长，把真正要调的旋钮挤到屏幕外。"""
     head = (f"<h3>{_esc(title)}</h3>" + (f"<p>{desc}</p>" if desc else ""))
     if folded:
         return (f"<section class='set-sec fold'><details><summary>{head}</summary>"
                 f"{rows}</details></section>")
-    return (f"<section class='set-sec{' guard' if guard else ''}'>"
-            f"<header>{head}</header>{rows}</section>")
+    classes = " ".join(x for x in ("set-sec", "guard" if guard else "", cls) if x)
+    return f"<section class='{classes}'><header>{head}</header>{rows}</section>"
 
 
 def _settings_layout(sections: str, active: str, actions: str = "") -> str:
@@ -903,7 +960,7 @@ def _settings_layout(sections: str, active: str, actions: str = "") -> str:
             + "<div class='set-empty' style='display:none'>没有匹配的设置项。</div>"
             + "<div class='set-bar'><span class='n'></span><span class='spacer'></span>"
             + "<span class='msg'></span>" + actions
-            + "<button type='button' class='reset'>放弃</button>"
+            + "<button type='button' class='reset bar-reset'>放弃</button>"
             + "<button type='button' class='save'>保存改动</button></div>"
             + "</form></div>")
 
@@ -1354,7 +1411,12 @@ def _settings_info_body(service: "DbmService", req: "Request") -> str:
 
 
 def _connections_body(service: "DbmService", editing: str | None) -> str:
-    """连接管理（并入系统设置的『连接管理』tab）：连接列表 + 新增/编辑弹窗表单。"""
+    """连接管理：连接列表 + 新增/编辑面板。
+
+    列表按项目分组，每行给出「这条连接能做什么」——有没有 writer（能不能写）、
+    走不走跳板、有没有脱敏。这些原来要点进编辑面板才看得到，而它们恰恰决定了
+    这条连接的风险面。
+    """
     edit_cfg = None
     e_project = e_conn = ""
     if editing and "/" in editing:
@@ -1362,45 +1424,83 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
         proj = service.config.projects.get(e_project)
         edit_cfg = proj.connections.get(e_conn) if proj else None
 
-    rows = []
+    # 一张表 + 项目分隔行，而不是每个项目一张表：分表的话各表列宽各算各的，
+    # 「引擎」「环境」在不同分组里对不齐，扫视时眼睛没有一条竖线可依。
+    body = []
     for pname, proj in sorted(service.config.projects.items()):
-        for cname, c in sorted(proj.connections.items()):
-            jump = " → ".join(h.label() for h in c.jump_hosts) if c.jump_hosts else "—"
-            stripe = _ENV_COLOR.get(c.environment, "#64748b")
-            db = f"<code>{_esc(c.database)}</code>" if c.database else "<span class='muted'>—</span>"
-            rows.append(
-                f"<tr><td style='border-left:3px solid {stripe};padding-left:13px'>"
-                f"<code>{_esc(pname)}/{_esc(cname)}</code></td>"
-                f"<td class='mono muted'>{_engine_icon(c.engine)}{_esc(c.engine)}</td>"
-                f"<td>{_env_badge(c.environment)}</td><td><code>{_esc(c.host)}:{_esc(c.port)}</code></td>"
-                f"<td>{db}</td><td class='muted mono'>{_esc(jump)}</td>"
-                f"<td style='white-space:nowrap'>"
-                f"<a href='/admin/settings?tab=connections&edit={_esc(pname)}/{_esc(cname)}'>编辑</a> · "
-                f"<form method='post' action='/admin/connections/delete' style='display:inline' "
-                f"onsubmit='return dbmConfirm(this)'>"
+        conns = sorted(proj.connections.items())
+        if not conns:
+            continue
+        body.append(f"<tr class='conn-proj'><td colspan='5'>{_esc(pname)}"
+                    f"<span class='n'>{len(conns)}</span></td></tr>")
+        for cname, c in conns:
+            where = (_esc(c.database) if c.engine == "sqlite"
+                     else f"{_esc(c.host)}:{_esc(c.port)}"
+                          + (f" · {_esc(c.database)}" if c.database else ""))
+            caps = []
+            if c.writer is not None:
+                caps.append("<span class='cap cap-w' title='配了 writer 账号，"
+                            "审批通过的写操作用它执行'>可写</span>")
+            else:
+                caps.append("<span class='cap' title='没有 writer 账号，这条连接只能读'>只读</span>")
+            if c.jump_hosts:
+                hops = " → ".join(h.label() for h in c.jump_hosts)
+                caps.append(f"<span class='cap cap-ssh' title='{_esc(hops)}'>"
+                            f"{len(c.jump_hosts)} 跳</span>")
+            if c.policy.mask_columns:
+                cols = "、".join(c.policy.mask_columns)
+                caps.append(f"<span class='cap' title='{_esc(cols)}'>"
+                            f"脱敏 {len(c.policy.mask_columns)} 列</span>")
+            edit_url = f"/admin/settings?tab=connections&edit={_esc(pname)}/{_esc(cname)}"
+            body.append(
+                "<tr>"
+                f"<td><a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
+                f"<div class='conn-where mono muted' title='{where}'>{where}</div></td>"
+                f"<td class='eng'>{_engine_icon(c.engine)}"
+                f"<span class='mono muted'>{_esc(c.engine)}</span></td>"
+                f"<td>{_env_badge(c.environment)}</td>"
+                f"<td class='caps'>{''.join(caps)}</td>"
+                "<td class='acts'>"
+                f"<a class='btn btn-ghost btn-sm' href='{edit_url}'>编辑</a>"
+                "<form method='post' action='/admin/connections/delete' "
+                "onsubmit='return dbmConfirm(this)'>"
                 f"<input type='hidden' name='project' value='{_esc(pname)}'>"
                 f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
-                f"<button class='btn btn-reject' style='padding:3px 11px;font-size:12.5px'>删除</button></form></td></tr>"
+                "<button class='btn btn-reject btn-sm'>删除</button></form>"
+                "</td></tr>"
             )
-    table = "".join(rows) or '<tr><td colspan="7" class="muted">（无连接）</td></tr>'
+    groups = ["<div class='tablewrap'><table class='conn-tbl'>"
+              "<colgroup><col><col style='width:120px'><col style='width:88px'>"
+              "<col style='width:210px'><col style='width:150px'></colgroup>"
+              "<thead><tr><th>连接</th><th>引擎</th><th>环境</th><th>能力</th><th></th></tr>"
+              f"</thead><tbody>{''.join(body)}</tbody></table></div>"] if body else []
+
+    listing = "".join(groups) or (
+        "<div class='set-empty'>还没有任何连接。点右上角「新增连接」，"
+        "填好后可以先「测试连接」再保存。</div>")
     keyring_note = "" if _keyring_available() else (
-        "<p style='color:#b00020'>⚠️ 未安装 keyring，无法安全存储密码。"
-        "请 <code>pip install 'db-manage-mcp[keyring]'</code> 后重启。</p>"
-    )
+        "<div class='errbar' style='margin-bottom:14px'>未安装 keyring，密码无法安全存储。"
+        "请先 <code>pip install 'db-manage-mcp[keyring]'</code> 再重启服务。</div>")
+
     form = _connection_form(e_project, e_conn, edit_cfg, sorted(service.config.ssh_identities))
     back = "/admin/settings?tab=connections"
     auto_open = "document.getElementById('conn-modal').classList.add('open');" if edit_cfg else ""
+    title = f"编辑 {_esc(e_project)}/{_esc(e_conn)}" if edit_cfg else "新增连接"
     return (
-        "<div class='card'><div style='display:flex;align-items:center;margin-bottom:14px'>"
-        "<h2 style='margin:0'>连接列表</h2>"
-        "<button class='btn btn-primary' style='margin-left:auto' "
-        "onclick=\"document.getElementById('conn-modal').classList.add('open')\">＋ 新增连接</button></div>"
-        f"<div class='tablewrap'><table><tr><th>连接</th><th>引擎</th><th>环境</th><th>地址</th><th>库</th>"
-        f"<th>跳板</th><th>操作</th></tr>{table}</table></div></div>"
-        f"<div class='modalbg' id='conn-modal'><div class='modalbox'>"
-        f"<button class='mclose' onclick=\"document.getElementById('conn-modal').classList.remove('open');"
-        f"if(location.search.indexOf('edit=')>=0)location.href='{back}'\">✕</button>"
-        f"<h2>{'编辑连接' if edit_cfg else '新增连接'}</h2>{keyring_note}{form}</div></div>"
+        f"{keyring_note}"
+        "<section class='set-sec conn-sec'><header class='conn-hd'>"
+        "<div><h3>连接</h3><p>agent 与查询台能连的库都在这里。密码写进系统钥匙串，"
+        "配置文件只存引用。</p></div>"
+        "<button class='btn btn-primary' "
+        "onclick=\"document.getElementById('conn-modal').classList.add('open')\">"
+        "＋ 新增连接</button>"
+        f"</header>{listing}</section>"
+        f"<div class='modalbg' id='conn-modal'><div class='modalbox conn-modal'>"
+        f"<div class='conn-modal-hd'><h2>{title}</h2>"
+        f"<button class='mclose' onclick=\"document.getElementById('conn-modal')"
+        f".classList.remove('open');"
+        f"if(location.search.indexOf('edit=')>=0)location.href='{back}'\">✕</button></div>"
+        f"<div class='conn-modal-body'>{form}</div></div></div>"
         f"<script>{auto_open}"
         "document.getElementById('conn-modal').addEventListener('click',function(e){"
         "if(e.target===this){this.classList.remove('open');"

@@ -71,6 +71,21 @@ class TestShell:
         page = tc.get("/admin/settings?tab=nope").text
         assert "class='on' href='/admin/settings?tab=general'" in page
 
+    def test_reset_button_has_its_own_hook(self, client):
+        """通知 tab 往改动条里插了「发送测试」按钮，它排在「放弃」前面——
+        前端若按 .reset 取第一个，就会把还原逻辑绑到测试按钮上，「放弃」点了没反应。"""
+        tc, _ = client
+        for tab in FORM_TABS:
+            page = tc.get(f"/admin/settings?tab={tab}").text
+            assert page.count("bar-reset") == 1, tab
+
+    def test_no_beforeunload_trap(self, client):
+        """tab 式设置页不能用 beforeunload 拦导航：切 tab 是正常操作，
+        每次弹「离开此网站？」会让页面在弹窗期间真的动不了。"""
+        tc, _ = client
+        js = tc.get("/admin/static/settings.js").text
+        assert 'addEventListener("beforeunload"' not in js
+
     def test_form_tabs_have_a_change_bar(self, client):
         """保存按钮不再钉在长表单最底下，改成有改动才浮出的条。"""
         tc, _ = client
@@ -160,3 +175,76 @@ class TestSaving:
             page = tc.get(f"/admin/settings?tab={tab}").text
             for name in set(re.findall(r"name='([a-z_0-9]+)'", page)):
                 assert name in DEFAULTS or name in extra, f"{tab}: {name}"
+
+
+class TestConnectionsTab:
+    """连接管理：列表结构 + 编辑面板。
+
+    重设计时最容易出事的是**字段名和 JS 钩子**——版式怎么改都行，
+    但保存接口读的每个 name、以及前端按引擎显隐整行用的每个 cf-* 类，一个都不能丢。
+    """
+
+    # /admin/connections/save 实际会读的字段
+    SAVE_FIELDS = (
+        "project", "connection", "engine", "environment", "host", "port", "database",
+        "user", "password", "writer_user", "writer_password", "ssh_options_extra",
+        "max_rows", "mask_columns", "mask_default_patterns", "force_privileged",
+        "statement_timeout_s", "write_timeout_s",
+    )
+    # 前端 applyEngineVisibility() 按引擎显隐用的钩子
+    ENGINE_HOOKS = (
+        "cf-hostport", "cf-cred", "cf-cred-user", "cf-cred-pw", "cf-cred-note",
+        "cf-redis-pw-note", "cf-writer", "cf-ssh", "cf-timeouts",
+        "cf-db-mysql", "cf-db-sqlite", "cf-db-redis",
+    )
+
+    def test_form_keeps_every_save_field(self, client):
+        tc, _ = client
+        page = tc.get("/admin/settings?tab=connections").text
+        for name in self.SAVE_FIELDS:
+            assert f"name='{name}'" in page or f'name="{name}"' in page, name
+
+    def test_form_keeps_every_engine_hook(self, client):
+        tc, _ = client
+        page = tc.get("/admin/settings?tab=connections").text
+        for hook in self.ENGINE_HOOKS:
+            assert hook in page, hook
+
+    def test_form_keeps_js_element_ids(self, client):
+        tc, _ = client
+        page = tc.get("/admin/settings?tab=connections").text
+        for hook in ("conn-form", "conn-err", "hops", "hop-tpl", "add-hop",
+                     "conn-test-result", "btn-test", "btn-test-ssh"):
+            assert f"id=\"{hook}\"" in page or f"id='{hook}'" in page, hook
+
+    def test_list_is_one_table_so_columns_align(self, client):
+        """分表的话各表列宽各算各的，「引擎」「环境」在不同项目分组里对不齐。"""
+        tc, svc = client
+        svc.config.projects["demo"].connections["second"] = (
+            svc.config.projects["demo"].connections["main"])
+        page = tc.get("/admin/settings?tab=connections").text
+        assert page.count("<table") == 1
+        assert "conn-tbl" in page
+
+    def test_list_shows_capabilities(self, client):
+        """有没有 writer、走不走跳板，决定这条连接的风险面，不该藏在编辑面板里。"""
+        tc, _ = client
+        page = tc.get("/admin/settings?tab=connections").text
+        assert "只读" in page and "class='cap" in page
+
+    def test_edit_opens_the_panel_with_the_connection(self, client):
+        tc, _ = client
+        page = tc.get("/admin/settings?tab=connections&edit=demo/main").text
+        assert "编辑 demo/main" in page
+        assert "conn-modal').classList.add('open')" in page   # 自动展开
+        assert "readonly" in page                              # 连接名锁定
+
+    def test_no_literal_markdown_in_copy(self, client):
+        """说明是 HTML 不是 markdown，`**粗体**` 会原样显示出来。"""
+        tc, _ = client
+        for tab in ("connections",) + FORM_TABS:
+            page = tc.get(f"/admin/settings?tab={tab}").text
+            body = page[page.index("<body>"):]
+            # ***MASKED*** 是真会显示给 agent 的字面量，不是 markdown
+            body = body.replace("***MASKED***", "")
+            assert "**" not in body, tab

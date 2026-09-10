@@ -119,7 +119,10 @@
     i.addEventListener("input", () => readout(i));
   });
 
-  bar?.querySelector(".reset")?.addEventListener("click", () => {
+  // 用专属 class 而不是 .reset：通知 tab 往改动条里插了一个「发送测试」按钮，
+  // 它排在「放弃」前面，querySelector(".reset") 会抓到它——结果是测试按钮被绑上还原逻辑，
+  // 而「放弃」点了完全没反应。
+  bar?.querySelector(".bar-reset")?.addEventListener("click", () => {
     acc.forEach((a, i) => a.write(baseline[i]));
     dirtyCheck();
   });
@@ -152,10 +155,10 @@
     }
   });
 
-  // 改了没保存就离开，浏览器给一次确认——设置页最容易发生的丢失
-  window.addEventListener("beforeunload", (e) => {
-    if (changedCount()) { e.preventDefault(); e.returnValue = ""; }
-  });
+  /* 有意**不加** beforeunload 拦截：这是一个 tab 式设置页，点上面的分区就是正常导航，
+     而 beforeunload 会把每一次切 tab 都变成一个「离开此网站？」的模态框——页面在弹窗
+     期间是真的动不了，表现就是「卡住了」。未保存的改动已经由常驻的改动条明示，
+     再拿模态框拦一道是拿一个更烦人的问题换一个小问题。 */
 
   /* ---------------- 搜索 ----------------
      十几个旋钮里找一个，比在四个 tab 之间来回翻快得多。匹配名字与说明，
