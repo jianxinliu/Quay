@@ -152,6 +152,12 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 - **`<input>` 不写 `type` 时选不中 `input[type=text]`**：连接名那个框因此比其它字段窄一截。写 CSS 用属性选择器时，对应的 HTML 必须显式带上 type。
 - **重设计一个表单页时，真正要锁住的不是版式而是「接口面」**：保存路由读的每个 `name`、前端按条件显隐用的每个 class 钩子、JS 取的每个元素 id。版式可以随便推倒重来，这三样丢一个就是静默失效（字段保存不上、某引擎该隐藏的行露出来、按钮没反应）。做法是把它们各列成一张表写成回归测试（见 test_settings_page.py::TestConnectionsTab），改版时先跑这三条。
 
+- **看板把「被挡下」当成「失败」是实质性误报**（自查时发现）：agent 每提交一次写操作都会先落一条 `status=rejected` 的审计记录（生成审批单、没落库），那是审批流的**正常一步**。而看板的「失败」原本算的是 `rejected + error`，于是审批流跑得越顺，看板上的红色越多。修法：`traffic_series` 分别返回 `rejected` / `errors`，磁贴写成「写 N · 被挡下 N · 出错 N」且只有 error 才标警示色，图表改成三段堆叠（成功/被挡下/出错，相加仍等于总操作数）。**教训：把「状态 != ok」笼统当失败，在一个「拒绝是正常路径」的系统里必然误报。**
+- **token 数是估算，字符数才是闸门**：配额以**字符**为单位强制（确定、可复现、不依赖任何分词器），token 只是给人看的注解。原来用一个固定除数 3.5 换算，但真实密度差三倍——纯英文约 4 字符/token，纯中文约 1.2，同样 40 万字符英文约 10 万 token、中文能到 33 万。改法：`budget.estimate_tokens(text)` 按字符类别（ASCII / 非 ASCII）分别估，`charge()` 收**原文**而不是长度；设置页只有上限没有原文，仍用固定除数但标明「粗估」。要精确只能调厂商分词器/计数接口，为在结果末尾显示一行提示去做网络调用不划算。
+- **`COUNT(DISTINCT session_id)` 会把空串算成一个会话**：查询台自身的操作 `session_id=''`，于是「N 个会话」恒多一个。用 `COUNT(DISTINCT NULLIF(session_id,''))`。
+- **SQLAlchemy 的 SQLite 池按 database 分两种**：文件库用 `QueuePool`（有 `checkedout()`），`:memory:` 用 `SingletonThreadPool`（没有）。看板对取不到的指标要显示「—」而不是 0——「这类池不报这个数」和「没占用连接」是两回事。
+- **看板的「及时性」有一条固有边界**：`audit_log` 是操作**结束后**才落库的，所以正在跑的查询不计入「操作数/流量/配额」，只出现在「此刻正在执行」里（那份是进程内的在途登记簿）。实测一条 22 秒的查询：执行期间 live=1、ops 不变、配额 0；结束后 live=0、ops+1、配额记上。这是设计使然，不是延迟。
+
 ## 模块地图（src/dbmcp/）
 
 - `ai.py` AI 辅助生成 SQL（`build_sql_prompt`/`build_followup_prompt` 纯函数拼 prompt + `run_ai` provider 分发 claude/codex CLI + `parse_ai_output` 解析，`generate_sql` 串起来；`AIResult` 带 session_id 支持续接会话）；service `ai_generate_sql`、admin `/admin/sql/ai`、console.js「✨ AI」浮层

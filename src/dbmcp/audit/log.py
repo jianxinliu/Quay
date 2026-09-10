@@ -316,6 +316,10 @@ class AuditStore:
 
         读/写按 _WRITE_TOOLS 区分：写工具的 row_count 是「影响行数」而非「读出行数」，
         两者混在一起加毫无意义，所以分开统计。
+
+        **rejected 与 error 也必须分开**：agent 每提交一次写操作都会先落一条 rejected
+        （生成审批单、没落库），那是审批流的正常一步，不是失败。把两者相加当「失败数」，
+        看板会在一切正常时显示一堆红色。
         """
         marks = ",".join("?" * len(_WRITE_TOOLS))
         clauses, params = ["ts >= ?"], [since]
@@ -337,7 +341,7 @@ class AuditStore:
                                              THEN row_count ELSE 0 END), 0)      AS rows_written,
                            COALESCE(SUM(duration_ms), 0)                         AS total_ms,
                            COALESCE(MAX(duration_ms), 0)                         AS max_ms,
-                           COUNT(DISTINCT session_id)                            AS sessions,
+                           COUNT(DISTINCT NULLIF(session_id, ''))                AS sessions,
                            COUNT(DISTINCT project || '/' || connection)          AS connections
                     FROM audit_log WHERE {where}""",
                 (*_WRITE_TOOLS, *_WRITE_TOOLS, *_WRITE_TOOLS, *params),
@@ -361,7 +365,8 @@ class AuditStore:
             rows = self._conn.execute(
                 f"""SELECT substr(ts, 1, {width})                                 AS bucket,
                            COUNT(*)                                               AS ops,
-                           SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END)          AS failed,
+                           SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END)     AS rejected,
+                           SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)        AS errors,
                            SUM(CASE WHEN tool IN ({marks}) THEN 1 ELSE 0 END)     AS writes,
                            COALESCE(SUM(result_bytes), 0)                         AS bytes_read,
                            COALESCE(SUM(row_count), 0)                            AS rows_total
@@ -379,7 +384,7 @@ class AuditStore:
             rows = self._conn.execute(
                 f"""SELECT {column}                                AS name,
                            COUNT(*)                                AS ops,
-                           SUM(CASE WHEN status<>'ok' THEN 1 ELSE 0 END) AS failed,
+                           SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors,
                            COALESCE(SUM(result_bytes), 0)          AS bytes_read,
                            COALESCE(SUM(row_count), 0)             AS rows_total,
                            MAX(ts)                                 AS last_ts

@@ -12,9 +12,9 @@ import pytest
 from dbmcp.approvals import ApprovalStore
 from dbmcp.audit.log import AuditStore
 from dbmcp.budget import (
-    CHARS_PER_TOKEN,
     ResultBudgetExceeded,
     SessionBudget,
+    estimate_tokens,
     usage_note,
 )
 from dbmcp.config import AppConfig
@@ -52,23 +52,23 @@ class TestSessionBudget:
     def test_allows_until_limit_then_refuses(self):
         b = SessionBudget(limit_chars=100)
         b.check("s1")
-        b.charge("s1", 99)
+        b.charge("s1", "x" * 99)
         b.check("s1")                      # 还没到，放行
-        b.charge("s1", 1)
+        b.charge("s1", "x" * 1)
         with pytest.raises(ResultBudgetExceeded):
             b.check("s1")
 
     def test_sessions_are_independent(self):
         """一个 agent 用超了不该连累另一个会话。"""
         b = SessionBudget(limit_chars=10)
-        b.charge("s1", 100)
+        b.charge("s1", "x" * 100)
         b.check("s2")
         with pytest.raises(ResultBudgetExceeded):
             b.check("s1")
 
     def test_message_tells_agent_to_ask_the_user(self):
         b = SessionBudget(limit_chars=10)
-        b.charge("s1", 50)
+        b.charge("s1", "x" * 50)
         with pytest.raises(ResultBudgetExceeded) as ei:
             b.check("s1")
         msg = str(ei.value)
@@ -78,7 +78,7 @@ class TestSessionBudget:
 
     def test_grant_releases_one_more_allowance(self):
         b = SessionBudget(limit_chars=100)
-        b.charge("s1", 150)               # 已经超了
+        b.charge("s1", "x" * 150)               # 已经超了
         with pytest.raises(ResultBudgetExceeded):
             b.check("s1")
         usage = b.grant("s1", "用户已确认：还要核对 3 张表")
@@ -90,41 +90,51 @@ class TestSessionBudget:
 
     def test_grant_twice_accumulates(self):
         b = SessionBudget(limit_chars=100)
-        b.charge("s1", 100)
+        b.charge("s1", "x" * 100)
         b.grant("s1")
-        b.charge("s1", 100)
+        b.charge("s1", "x" * 100)
         b.grant("s1")
         b.check("s1")
         assert b.usage("s1")["grants"] == 2
 
     def test_zero_limit_disables_the_gate(self):
         b = SessionBudget(limit_chars=0)
-        b.charge("s1", 10_000_000)
+        b.charge("s1", "x" * 10_000)
         b.check("s1")                     # 不限制
         assert b.usage("s1")["enabled"] is False
 
     def test_missing_session_id_shares_one_anonymous_bucket(self):
         b = SessionBudget(limit_chars=100)
-        b.charge("", 150)
+        b.charge("", "x" * 150)
         with pytest.raises(ResultBudgetExceeded):
             b.check("")
 
     def test_snapshot_sorted_by_usage(self):
         b = SessionBudget(limit_chars=100)
-        b.charge("small", 10)
-        b.charge("big", 90)
+        b.charge("small", "x" * 10)
+        b.charge("big", "x" * 90)
         assert [u["session_id"] for u in b.snapshot()] == ["big", "small"]
 
-    def test_token_estimate_reported(self):
-        b = SessionBudget(limit_chars=1000)
-        usage = b.charge("s1", 350)
-        assert usage["used_tokens"] == int(350 / CHARS_PER_TOKEN)
+    def test_token_estimate_is_character_class_aware(self):
+        """同样长度的中英文 token 密度差三倍，用一个固定除数换算会误导人。"""
+        b = SessionBudget(limit_chars=100_000)
+        en = b.charge("en", "a" * 400)["used_tokens"]
+        cn = b.charge("cn", "中" * 400)["used_tokens"]
+        assert en == 100                      # ASCII ≈ 4 字符/token
+        assert cn > en * 3                    # 中文密得多
+        assert estimate_tokens("") == 0
+
+    def test_tokens_accumulate_across_calls(self):
+        b = SessionBudget(limit_chars=100_000)
+        b.charge("s1", "a" * 400)
+        usage = b.charge("s1", "a" * 400)
+        assert usage["used_tokens"] == 200 and usage["used_chars"] == 800
 
     def test_session_table_is_bounded(self):
         """常驻进程不能无限攒会话 id。"""
         b = SessionBudget(limit_chars=100, max_sessions=3)
         for i in range(10):
-            b.charge(f"s{i}", 1)
+            b.charge(f"s{i}", "x")
         assert len(b.snapshot()) == 3
 
 
@@ -156,7 +166,7 @@ class TestBudgetWiring:
         assert service.result_budget().limit_chars > 0
 
     def test_dashboard_reports_budgets(self, service):
-        service.result_budget().charge("sess-gov", 4321)
+        service.result_budget().charge("sess-gov", "x" * 4321)
         budgets = service.dashboard_snapshot()["budgets"]
         assert budgets[0]["session_id"] == "sess-gov"
         assert budgets[0]["used_chars"] == 4321
