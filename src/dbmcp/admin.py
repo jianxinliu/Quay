@@ -1424,55 +1424,68 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
         proj = service.config.projects.get(e_project)
         edit_cfg = proj.connections.get(e_conn) if proj else None
 
-    # 一张表 + 项目分隔行，而不是每个项目一张表：分表的话各表列宽各算各的，
-    # 「引擎」「环境」在不同分组里对不齐，扫视时眼睛没有一条竖线可依。
+    # 环境 → 项目 → 连接三层，同在一张表里（分表的话各表列宽各算各的，扫视时没有一条
+    # 竖线可依）。环境在最外层是因为它决定风险：prod 排最前，你最该先看见的就是它们。
+    # 环境成了分组标题，行里就不必再重复一个环境徽章。
+    ENV_ORDER = ("prod", "staging", "dev", "local")
+    tree: dict[str, dict[str, list]] = {}
+    for pname, proj in service.config.projects.items():
+        for cname, c in proj.connections.items():
+            tree.setdefault(c.environment or "—", {}).setdefault(pname, []).append((cname, c))
+
+    def env_key(env: str) -> tuple:
+        return (ENV_ORDER.index(env), "") if env in ENV_ORDER else (len(ENV_ORDER), env)
+
     body = []
-    for pname, proj in sorted(service.config.projects.items()):
-        conns = sorted(proj.connections.items())
-        if not conns:
-            continue
-        body.append(f"<tr class='conn-proj'><td colspan='5'>{_esc(pname)}"
-                    f"<span class='n'>{len(conns)}</span></td></tr>")
-        for cname, c in conns:
-            where = (_esc(c.database) if c.engine == "sqlite"
-                     else f"{_esc(c.host)}:{_esc(c.port)}"
-                          + (f" · {_esc(c.database)}" if c.database else ""))
-            caps = []
-            if c.writer is not None:
-                caps.append("<span class='cap cap-w' title='配了 writer 账号，"
-                            "审批通过的写操作用它执行'>可写</span>")
-            else:
-                caps.append("<span class='cap' title='没有 writer 账号，这条连接只能读'>只读</span>")
-            if c.jump_hosts:
-                hops = " → ".join(h.label() for h in c.jump_hosts)
-                caps.append(f"<span class='cap cap-ssh' title='{_esc(hops)}'>"
-                            f"{len(c.jump_hosts)} 跳</span>")
-            if c.policy.mask_columns:
-                cols = "、".join(c.policy.mask_columns)
-                caps.append(f"<span class='cap' title='{_esc(cols)}'>"
-                            f"脱敏 {len(c.policy.mask_columns)} 列</span>")
-            edit_url = f"/admin/settings?tab=connections&edit={_esc(pname)}/{_esc(cname)}"
-            body.append(
-                "<tr>"
-                f"<td><a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
-                f"<div class='conn-where mono muted' title='{where}'>{where}</div></td>"
-                f"<td class='eng'>{_engine_icon(c.engine)}"
-                f"<span class='mono muted'>{_esc(c.engine)}</span></td>"
-                f"<td>{_env_badge(c.environment)}</td>"
-                f"<td class='caps'>{''.join(caps)}</td>"
-                "<td class='acts'>"
-                f"<a class='btn btn-ghost btn-sm' href='{edit_url}'>编辑</a>"
-                "<form method='post' action='/admin/connections/delete' "
-                "onsubmit='return dbmConfirm(this)'>"
-                f"<input type='hidden' name='project' value='{_esc(pname)}'>"
-                f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
-                "<button class='btn btn-reject btn-sm'>删除</button></form>"
-                "</td></tr>"
-            )
+    for env in sorted(tree, key=env_key):
+        projects = tree[env]
+        n = sum(len(v) for v in projects.values())
+        body.append(
+            f"<tr class='env-row' style='--env:{_ENV_COLOR.get(env, '#64748b')}'>"
+            f"<td colspan='4'>{_env_badge(env)}<span class='n'>{n} 条连接</span></td></tr>")
+        for pname in sorted(projects):
+            body.append(f"<tr class='proj-row'><td colspan='4'>{_esc(pname)}</td></tr>")
+            for cname, c in sorted(projects[pname]):
+                where = (_esc(c.database) if c.engine == "sqlite"
+                         else f"{_esc(c.host)}:{_esc(c.port)}"
+                              + (f" · {_esc(c.database)}" if c.database else ""))
+                caps = []
+                if c.writer is not None:
+                    caps.append("<span class='cap cap-w' title='配了 writer 账号，"
+                                "审批通过的写操作用它执行'>可写</span>")
+                else:
+                    caps.append("<span class='cap' title='没有 writer 账号，"
+                                "这条连接只能读'>只读</span>")
+                if c.jump_hosts:
+                    hops = " → ".join(h.label() for h in c.jump_hosts)
+                    caps.append(f"<span class='cap cap-ssh' title='{_esc(hops)}'>"
+                                f"{len(c.jump_hosts)} 跳</span>")
+                if c.policy.mask_columns:
+                    cols = "、".join(c.policy.mask_columns)
+                    caps.append(f"<span class='cap' title='{_esc(cols)}'>"
+                                f"脱敏 {len(c.policy.mask_columns)} 列</span>")
+                edit_url = (f"/admin/settings?tab=connections"
+                            f"&edit={_esc(pname)}/{_esc(cname)}")
+                body.append(
+                    "<tr class='conn-row'>"
+                    f"<td><a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
+                    f"<div class='conn-where mono muted' title='{where}'>{where}</div></td>"
+                    f"<td class='eng'>{_engine_icon(c.engine)}"
+                    f"<span class='mono muted'>{_esc(c.engine)}</span></td>"
+                    f"<td class='caps'>{''.join(caps)}</td>"
+                    "<td class='acts'>"
+                    f"<a class='btn btn-ghost btn-sm' href='{edit_url}'>编辑</a>"
+                    "<form method='post' action='/admin/connections/delete' "
+                    "onsubmit='return dbmConfirm(this)'>"
+                    f"<input type='hidden' name='project' value='{_esc(pname)}'>"
+                    f"<input type='hidden' name='connection' value='{_esc(cname)}'>"
+                    "<button class='btn btn-reject btn-sm'>删除</button></form>"
+                    "</td></tr>"
+                )
     groups = ["<div class='tablewrap'><table class='conn-tbl'>"
-              "<colgroup><col><col style='width:120px'><col style='width:88px'>"
+              "<colgroup><col><col style='width:120px'>"
               "<col style='width:210px'><col style='width:150px'></colgroup>"
-              "<thead><tr><th>连接</th><th>引擎</th><th>环境</th><th>能力</th><th></th></tr>"
+              "<thead><tr><th>连接</th><th>引擎</th><th>能力</th><th></th></tr>"
               f"</thead><tbody>{''.join(body)}</tbody></table></div>"] if body else []
 
     listing = "".join(groups) or (

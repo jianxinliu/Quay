@@ -226,6 +226,19 @@ class TestConnectionsTab:
         assert page.count("<table") == 1
         assert "conn-tbl" in page
 
+    def test_grouped_by_environment_then_project(self, client):
+        """环境在最外层：它决定风险，prod 该第一眼看见。行里就不必再重复环境徽章。"""
+        tc, svc = client
+        proj = svc.config.projects["demo"]
+        import copy
+        prod = copy.deepcopy(proj.connections["main"])
+        prod.environment = "prod"
+        proj.connections["orders-prod"] = prod
+        page = tc.get("/admin/settings?tab=connections").text
+        assert "env-row" in page and "proj-row" in page
+        # prod 排在 local 前面
+        assert page.index(">prod<") < page.index(">local<")
+
     def test_list_shows_capabilities(self, client):
         """有没有 writer、走不走跳板，决定这条连接的风险面，不该藏在编辑面板里。"""
         tc, _ = client
