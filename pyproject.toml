@@ -41,6 +41,11 @@ dependencies = [
 
 [project.optional-dependencies]
 keyring = ["keyring>=25.0"]
+# 真实分词计数（看板/配额上的 token 数）。装不上就自动回退到字符类别估算，
+# 功能不受影响——只是那个数字会标成「粗估」。见 budget.py。
+tokenizer = [
+    "tiktoken>=0.7",
+]
 
 [project.urls]
 Homepage = "https://github.com/jianxinliu/Quay"

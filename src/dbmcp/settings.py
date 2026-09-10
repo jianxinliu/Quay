@@ -55,10 +55,12 @@ DEFAULTS: dict[str, object] = {
     # 会话第一次调用工具时，随结果附一份完整使用说明与最佳实践（见 guide.py）。
     # 关掉只影响这份「自动送达」，agent 仍可主动调 usage_guide()。
     "agent_guide_on_first_call": True,
+    # 单次 query/sample_rows 返回给 agent 的字符上限（连接级 Policy 可覆盖）
     "agent_max_result_chars": 40000,
-    # 单个 agent 会话累计能返回多少字符（≈token×3.5）。撞到就拒绝继续取数，要求 agent
-    # 先问用户，用户同意后调 allow_more_results 再放行一个额度。0 = 不限制。
-    "agent_session_budget_chars": 400_000,  # 给 agent 的结果字符预算全局兜底（≈12k token；连接级 Policy 可覆盖）
+    # 单个 agent 会话累计能返回多少字符。撞到就拒绝继续取数，要求 agent 先问用户，
+    # 用户同意后调 allow_more_results 再放行一个额度。0 = 不限制。
+    # 注意配额以**字符**为单位强制（确定、可复现）；token 数只是给人看的估算注解。
+    "agent_session_budget_chars": 400_000,
     # ——AI 辅助写 SQL（查询台「✨ AI」按钮；产物只回填编辑器/画布、不执行）
     "ai_enabled": True,            # 总开关：关则前端按钮不出现、路由直接 403
     "ai_provider": "claude",       # AI 后端：claude / codex（命令行）/ api（直连 HTTP）

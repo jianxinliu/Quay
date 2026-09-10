@@ -82,3 +82,7 @@ th.sortable:hover .sarrow{border-bottom-color:var(--faint)}
 .rank .bar{grid-column:1/3;height:5px;border-radius:3px;background:#eceef1;overflow:hidden}
 .rank .bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
 .dash-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:26px}
+
+/* 引擎列用品牌图标：一列文字全是同一个形状，扫视时分不出哪条是 MySQL */
+.eng-ico{width:17px;height:17px;vertical-align:middle;display:inline-block}
+td.eng{text-align:center}

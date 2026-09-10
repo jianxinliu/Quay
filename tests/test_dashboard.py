@@ -161,9 +161,15 @@ class TestTrafficSeries:
         store.record(_rec())
         assert len(store.traffic_series(EPOCH, bucket="minute")[0]["bucket"]) == 16
 
-    def test_failed_counted_per_bucket(self, store):
+    def test_rejected_and_error_counted_separately(self, store):
+        """「被挡下」不是失败：agent 每提交一次写操作都会先落一条 rejected（生成审批单、
+        没落库），那是审批流的正常一步。两者相加当失败数，看板会在一切正常时显示一片红。"""
         store.record(_rec(status="error"))
-        assert store.traffic_series(EPOCH)[0]["failed"] == 1
+        store.record(_rec(tool="execute", status="rejected"))
+        bucket = store.traffic_series(EPOCH)[0]
+        assert bucket["errors"] == 1
+        assert bucket["rejected"] == 1
+        assert bucket["ops"] == 2
 
     def test_day_buckets_for_long_windows(self, store):
         store.record(_rec())
@@ -175,13 +181,19 @@ class TestTrafficSeries:
 
 
 class TestTopGroups:
+    def test_blank_session_id_is_not_a_session(self, store):
+        """查询台自己的操作 session_id 为空，不该被算成一个 agent 会话。"""
+        store.record(_rec(session_id=""))
+        store.record(_rec(session_id="sess-a"))
+        assert store.traffic_summary(EPOCH)["sessions"] == 1
+
     def test_ranked_by_ops(self, store):
         store.record(_rec(connection="a"))
         store.record(_rec(connection="b"))
         store.record(_rec(connection="b"))
         got = store.top_groups("connection", EPOCH)
         assert [g["name"] for g in got] == ["b", "a"]
-        assert got[0]["ops"] == 2
+        assert got[0]["ops"] == 2 and got[0]["errors"] == 0
 
     def test_column_whitelisted(self, store):
         """列名要拼进 SQL，只能来自白名单。"""

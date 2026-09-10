@@ -1037,13 +1037,17 @@ def _settings_db_body(s: dict) -> str:
             "放松这些值不会有二次确认，改动会标上「已改」。",
             _num_setting("单次结果预算", "agent_max_result_chars", s, 40000,
                          "一次 query / sample_rows 最多返回多少字符，超出即截断并提示收窄。"
-                         "单个连接可在连接管理里覆盖。",
+                         "单个连接可在连接管理里覆盖。旁边的 token 数是按英文密度粗估的，"
+                         "中文结果的实际 token 会明显更多。",
                          unit="字符", read="tokens")
             + _num_setting("会话累计配额", "agent_session_budget_chars", s, 400000,
                            "一个会话累计返回多少字符后停止取数。撞到上限时 agent 必须先问你，"
                            "你同意后它才能追加额度。填 0 = 不限制。",
                            unit="字符", read="tokens",
-                           more="单次预算管不住「一直查」——一次 1 万字符查两百次照样烧掉几十万 token，"
+                           more="<b>配额以字符为单位强制</b>——字符数是确定、可复现的，不依赖任何模型的分词器；"
+                                "旁边那个 token 数只是粗估的注解（按英文密度算，中文会更多）。"
+                                "看板上「已用多少 token」按实际返回文本的字符类别分别估算，比这里准。<br>"
+                                "单次预算管不住「一直查」——一次 1 万字符查两百次照样烧掉几十万 token，"
                                 "而且这种情况多半是 agent 陷进了反复重拉同一份数据的循环。"
                                 "追加额度的次数与理由显示在看板的「会话结果配额」里，"
                                 "你可以核对它到底问没问过你。")
@@ -1468,8 +1472,10 @@ def _connections_body(service: "DbmService", editing: str | None) -> str:
                             f"&edit={_esc(pname)}/{_esc(cname)}")
                 body.append(
                     "<tr class='conn-row'>"
-                    f"<td><a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
-                    f"<div class='conn-where mono muted' title='{where}'>{where}</div></td>"
+                    f"<td><div class='conn-line'>"
+                    f"<a class='conn-name' href='{edit_url}'>{_esc(cname)}</a>"
+                    f"<span class='conn-where mono muted' title='{where}'>{where}</span>"
+                    f"</div></td>"
                     f"<td class='eng'>{_engine_icon(c.engine)}"
                     f"<span class='mono muted'>{_esc(c.engine)}</span></td>"
                     f"<td class='caps'>{''.join(caps)}</td>"

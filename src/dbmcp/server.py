@@ -358,7 +358,7 @@ def _budget_gate(service: DbmService, caller: CallerInfo):  # noqa: ANN201
     budget.check(caller.session_id)
 
     def charge(text: str) -> str:
-        usage = budget.charge(caller.session_id, len(text))
+        usage = budget.charge(caller.session_id, text)
         note = usage_note(usage)
         return f"{text}\n{note}" if note else text
 

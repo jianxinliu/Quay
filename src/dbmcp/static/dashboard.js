@@ -39,6 +39,20 @@
     if (saved && CONN_COLS.some((c) => c.key === saved.key)) connSort = saved;
   } catch (e) { /* 存坏了就用默认，不值得为它报错 */ }
 
+  /* 引擎用品牌图标而不是文字：一列文字全是同一个形状，扫视时分不出哪条是 MySQL；
+     图标一眼就分得开。文件与后台连接列表共用同一套（static/db-icons/）。 */
+  const ENGINE_ICON = {
+    mysql: "mysql", postgres: "postgresql", sqlite: "sqlite",
+    clickhouse: "clickhouse", redis: "redis", duckdb: "duckdb",
+  };
+  function engineCell(engine) {
+    const file = ENGINE_ICON[engine];
+    const label = esc(engine || "—");
+    if (!file) return `<span class="mono muted">${label}</span>`;
+    return `<img class="eng-ico" src="/admin/static/db-icons/${file}.svg" alt="${label}"`
+      + ` title="${label}">`;
+  }
+
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const num = (n) => Number(n || 0).toLocaleString("zh-CN");
@@ -111,7 +125,7 @@
     for (let i = count - 1; i >= 0; i--) {
       const key = new Date(end.getTime() - i * step).toISOString().slice(0, width);
       out.push(byKey.get(key)
-        || { bucket: key, ops: 0, failed: 0, writes: 0, bytes_read: 0, rows_total: 0 });
+        || { bucket: key, ops: 0, rejected: 0, errors: 0, writes: 0, bytes_read: 0, rows_total: 0 });
     }
     return out;
   }
@@ -186,10 +200,14 @@
     return isEmpty;
   }
 
+  /* 三段而不是两段：**「被挡下」不是失败**。agent 每提交一次写操作都会先落一条
+     rejected（生成审批单、没落库），那是审批流的正常一步；把它算进失败，看板会在
+     一切正常的时候显示一片红。三段相加仍等于总操作数，堆叠才有意义。 */
   function renderOpsChart(series, bucket) {
     const labels = series.map((s) => bucketLabel(s.bucket, bucket));
-    const ok = series.map((s) => Math.max(s.ops - s.failed, 0));
-    const failed = series.map((s) => s.failed);
+    const rejected = series.map((s) => s.rejected || 0);
+    const errors = series.map((s) => s.errors || 0);
+    const ok = series.map((s, i) => Math.max(s.ops - rejected[i] - errors[i], 0));
     const writes = series.map((s) => s.writes);
     if (toggleEmpty("dash-chart-ops", series.every((s) => !s.ops))) return;
     const chart = chartOf("dash-chart-ops");
@@ -199,16 +217,16 @@
       legend: {
         top: 0, right: 0, itemWidth: 9, itemHeight: 9, itemGap: 14,
         textStyle: { color: "#6b7280", fontSize: 11 },
-        data: ["成功", "失败"],
+        data: ["成功", "被挡下", "出错"],
       },
       tooltip: {
         ...TOOLTIP_BASE,
         formatter: (ps) => {
           const i = ps[0].dataIndex;
-          const total = ok[i] + failed[i];
+          const total = ok[i] + rejected[i] + errors[i];
           // 「其中写」不进堆叠（写与失败会重叠、堆起来不等于总数），只在 tooltip 里说明
           return `<b>${labels[i]}</b><br>共 ${num(total)} 次`
-            + `<br>成功 ${num(ok[i])} · 失败 ${num(failed[i])}`
+            + `<br>成功 ${num(ok[i])} · 被挡下 ${num(rejected[i])} · 出错 ${num(errors[i])}`
             + `<br>其中写操作 ${num(writes[i])} 次`;
         },
       },
@@ -221,7 +239,10 @@
         { name: "成功", type: "bar", stack: "ops", data: ok,
           itemStyle: { color: "#0d9488", borderRadius: [2, 2, 0, 0] },
           emphasis: { itemStyle: { color: "#0f766e" } } },
-        { name: "失败", type: "bar", stack: "ops", data: failed,
+        { name: "被挡下", type: "bar", stack: "ops", data: rejected,
+          itemStyle: { color: "#d9a441", borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: "#c08e2c" } } },
+        { name: "出错", type: "bar", stack: "ops", data: errors,
           itemStyle: { color: "#c0392b", borderRadius: [2, 2, 0, 0] },
           emphasis: { itemStyle: { color: "#a5281c" } } },
       ],
@@ -288,7 +309,9 @@
     const d = data;
     if (!d) return;
     const t = d.traffic, c = d.connections;
-    const failed = (t.rejected || 0) + (t.error || 0);
+    // 「被挡下」是审批流的正常一步（首提生成审批单），不是失败——只有 error 才该告警
+    const blocked = t.rejected || 0;
+    const errors = t.error || 0;
 
     document.getElementById("dash-win").innerHTML = WINDOWS.map(([k, label]) =>
       `<button data-win="${k}" class="${k === win ? "on" : ""}">${esc(label)}</button>`).join("");
@@ -305,7 +328,8 @@
       tile("正在执行", num(d.live.count),
            d.live.count ? "见下方「此刻正在执行」" : "空闲"),
       tile("操作数", num(t.ops),
-           `写 ${num(t.writes)} · 失败 ${num(failed)}`, failed ? "warn" : ""),
+           `写 ${num(t.writes)} · 被挡下 ${num(blocked)} · 出错 ${num(errors)}`,
+           errors ? "warn" : ""),
       tile("读出数据量", bytes(t.bytes_read), `${num(t.rows_read)} 行`),
       tile("写入影响行", num(t.rows_written), `平均耗时 ${num(t.avg_ms)} ms`),
       tile("待审批", num(d.approvals.pending),
@@ -424,11 +448,13 @@
           + `<td><b>${esc(i.project)}/${esc(i.connection)}</b>`
           + `<span class="connmeta muted mono" title="${esc(meta.join(" · "))}">`
           + `${esc(meta.join(" · ") || "—")}</span></td>`
-          + `<td>${esc(i.engine)}</td>`
+          + `<td class="eng">${engineCell(i.engine)}</td>`
           + `<td>${esc(i.environment || "—")}</td>`
           + `<td><span class="dot dot-${esc(state)}"></span>${esc(stateText[state] || state)}</td>`
           + `<td class="num">${num(i.engines)}</td>`
-          + `<td class="num">${num(i.checked_out)}</td>`
+          + `<td class="num">${i.checked_out == null
+              ? '<span class="muted" title="这类连接池不报占用数">—</span>'
+              : num(i.checked_out)}</td>`
           + `<td>${note}</td></tr>`;
       }).join("") + "</tbody></table></div>";
   }
@@ -473,7 +499,10 @@
         return "<tr>"
           + `<td><span class="mono">${esc((b.session_id || "-").slice(0, 12))}</span></td>`
           + `<td class="num">${num(b.used_chars)} 字符<br>`
-          + `<span class="muted">≈${num(b.used_tokens)} token</span></td>`
+          // 装了 tiktoken 就是真实分词的结果，不该再挂个「≈」说成估算
+          + `<span class="muted" title="${b.tokens_exact
+              ? "tiktoken 真实分词（o200k）" : "按字符类别粗估——装上 tokenizer 附加依赖可精确计数"}">`
+          + `${b.tokens_exact ? "" : "≈"}${num(b.used_tokens)} token</span></td>`
           + `<td class="num" style="${color ? "color:" + color + ";font-weight:600" : ""}">`
           + `${b.enabled ? pct + "%" : "不限"}</td>`
           + `<td class="num">${num(b.calls)}</td>`

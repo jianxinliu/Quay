@@ -94,6 +94,10 @@
   /* ---------------- 读数换算 ----------------
      400000 → ≈114k token、67108864 → 64 MB。让人自己算是设置页最常见的失礼，
      而且改完立刻要看到新读数，不能等保存后刷新才知道自己填了多大。 */
+  /* 这里只有一个字符数上限、没有原文，所以只能用一个固定除数粗估。
+     真实密度差很多：纯英文约 4 字符/token，纯中文能到 1.2 —— 同样 40 万字符，
+     英文约 10 万 token，中文能到 33 万。看板上「已用多少 token」是按实际返回的
+     文本分字符类别算的（budget.estimate_tokens），比这里准。 */
   const CHARS_PER_TOKEN = 3.5;
   function humanBytes(n) {
     n = Number(n);
@@ -110,7 +114,7 @@
     if (el.dataset.kind === "bytes") {
       el.textContent = v > 0 ? "= " + humanBytes(v) : "";
     } else if (el.dataset.kind === "tokens") {
-      el.textContent = v > 0 ? "≈ " + Math.round(v / CHARS_PER_TOKEN / 1000) + "k token"
+      el.textContent = v > 0 ? "≈ " + Math.round(v / CHARS_PER_TOKEN / 1000) + "k token（粗估）"
         : (Number(input.value) === 0 ? "不限制" : "");
     }
   }

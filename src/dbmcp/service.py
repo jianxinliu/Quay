@@ -2912,7 +2912,9 @@ class DbmService:
                     "retry_in_s": (max(int(h.next_retry_at - now), 0)
                                    if h and h.state != "ok" else 0),
                     "engines": len(engs),
-                    "checked_out": sum(outs) if outs else 0,
+                    # None = 这类池根本不报这个数（SQLite 用 SingletonThreadPool，
+                    # 没有 checkedout()）。记 0 会被读成「没占用连接」，那是另一回事。
+                    "checked_out": sum(outs) if outs else (0 if not engs else None),
                     "tunnel": any(e["tunnel"] for e in engs),
                     "idle_s": min((e["idle_s"] for e in engs), default=None),
                 })

@@ -28,7 +28,7 @@
 ## 开发
 
 ```bash
-uv sync --extra keyring    # 安装依赖
+uv sync --extra keyring --extra tokenizer   # 安装依赖
 uv run pytest              # 全量测试（改动后必须全过）
 DBM_MYSQL_PW=... DBM_ADMIN_TOKEN=... uv run dbm serve   # HTTP（127.0.0.1:8100）
 uv run dbm serve --stdio                                # stdio 模式
@@ -151,6 +151,13 @@ bash scripts/install-launchd.sh                         # macOS 常驻（幂等�
 - **前端说明文案是 HTML 不是 markdown**：`**数据库自己的**` 会原样把星号显示在页面上。已加回归测试 `test_no_literal_markdown_in_copy`（排除 `***MASKED***` 这个真会显示的字面量）。
 - **`<input>` 不写 `type` 时选不中 `input[type=text]`**：连接名那个框因此比其它字段窄一截。写 CSS 用属性选择器时，对应的 HTML 必须显式带上 type。
 - **重设计一个表单页时，真正要锁住的不是版式而是「接口面」**：保存路由读的每个 `name`、前端按条件显隐用的每个 class 钩子、JS 取的每个元素 id。版式可以随便推倒重来，这三样丢一个就是静默失效（字段保存不上、某引擎该隐藏的行露出来、按钮没反应）。做法是把它们各列成一张表写成回归测试（见 test_settings_page.py::TestConnectionsTab），改版时先跑这三条。
+
+- **看板把「被挡下」当成「失败」是实质性误报**（自查时发现）：agent 每提交一次写操作都会先落一条 `status=rejected` 的审计记录（生成审批单、没落库），那是审批流的**正常一步**。而看板的「失败」原本算的是 `rejected + error`，于是审批流跑得越顺，看板上的红色越多。修法：`traffic_series` 分别返回 `rejected` / `errors`，磁贴写成「写 N · 被挡下 N · 出错 N」且只有 error 才标警示色，图表改成三段堆叠（成功/被挡下/出错，相加仍等于总操作数）。**教训：把「状态 != ok」笼统当失败，在一个「拒绝是正常路径」的系统里必然误报。**
+- **token 计数：装了 tiktoken 就别再估**（实测数据说话）：对本服务最常见的内容——查询结果 TSV——字符类别启发式**少报 49%**（一份 43KB 结果真实 16131 token，估出 8000 上下）。原因是制表符、纯数字 id、短字段各自成 token，密度远高于「4 字符/token」。改法：可选依赖 `tokenizer`（tiktoken，o200k_base），43KB 编码 1.5ms；**词表 3.4MB 首次加载会下载**，所以 ① 缓存目录钉到数据目录（默认在 TMPDIR，被 macOS 清理后又要重下），② serve 启动时在 daemon 线程预热（别让某一次查询替所有人承担这几秒），③ 装不上/下不到就**永久回退**启发式（记住失败、不每次重试）并在界面标「≈粗估」。o200k 是 GPT-4o 的分词器不是 Claude 的，但同为现代 BPE、中文处理正确，比启发式接近得多。**教训：给「这值多少上下文」这种数字，先量一遍你实际的内容类型再选算法——通用文本的经验值对 TSV 完全不成立。**
+- **token 数是估算，字符数才是闸门**：配额以**字符**为单位强制（确定、可复现、不依赖任何分词器），token 只是给人看的注解。原来用一个固定除数 3.5 换算，但真实密度差三倍——纯英文约 4 字符/token，纯中文约 1.2，同样 40 万字符英文约 10 万 token、中文能到 33 万。改法：`budget.estimate_tokens(text)` 按字符类别（ASCII / 非 ASCII）分别估，`charge()` 收**原文**而不是长度；设置页只有上限没有原文，仍用固定除数但标明「粗估」。要精确只能调厂商分词器/计数接口，为在结果末尾显示一行提示去做网络调用不划算。
+- **`COUNT(DISTINCT session_id)` 会把空串算成一个会话**：查询台自身的操作 `session_id=''`，于是「N 个会话」恒多一个。用 `COUNT(DISTINCT NULLIF(session_id,''))`。
+- **SQLAlchemy 的 SQLite 池按 database 分两种**：文件库用 `QueuePool`（有 `checkedout()`），`:memory:` 用 `SingletonThreadPool`（没有）。看板对取不到的指标要显示「—」而不是 0——「这类池不报这个数」和「没占用连接」是两回事。
+- **看板的「及时性」有一条固有边界**：`audit_log` 是操作**结束后**才落库的，所以正在跑的查询不计入「操作数/流量/配额」，只出现在「此刻正在执行」里（那份是进程内的在途登记簿）。实测一条 22 秒的查询：执行期间 live=1、ops 不变、配额 0；结束后 live=0、ops+1、配额记上。这是设计使然，不是延迟。
 
 ## 模块地图（src/dbmcp/）
 
