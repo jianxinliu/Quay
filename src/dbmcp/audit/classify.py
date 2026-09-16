@@ -32,13 +32,22 @@ _MYSQL_DROP_PARTITION_NOPAREN = re.compile(
 )
 
 
+_PG_COMMENT_IS_NULL = re.compile(
+    r"(\bCOMMENT\s+ON\s+(?:[^;']|'[^']*')+?\bIS\s+)NULL\b", re.IGNORECASE)
+
+
 def normalize_sql_for_parse(sql: str, engine: str) -> str:
     """把「目标 DB 合法但 sqlglot 解析不了」的语法改写成 sqlglot 能解析的等价形式，
     **仅供 classify / risk.assess / 编辑器 lint 的静态解析判定使用**；执行路径永远用原文。
 
-    目前只处理 MySQL `ALTER TABLE ... DROP PARTITION p1, p2`（无括号分区列表）。
-    改写不改变语义分类（仍是 Alter/DDL 写操作），只让 sqlglot 能解析出 AST。
+    目前处理两处：
+    - MySQL `ALTER TABLE ... DROP PARTITION p1, p2`（无括号分区列表）；
+    - PostgreSQL `COMMENT ON ... IS NULL`（清除注释），sqlglot 只认字符串字面量，
+      NULL 会报「Required keyword: 'expression' missing」。换成 `''` 只为解析，分类不变。
+    改写不改变语义分类（仍是写操作），只让 sqlglot 能解析出 AST。
     """
+    if engine == "postgres":
+        return _PG_COMMENT_IS_NULL.sub(r"\1''", sql)
     if engine != "mysql":
         return sql
     return _MYSQL_DROP_PARTITION_NOPAREN.sub(

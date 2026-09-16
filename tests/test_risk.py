@@ -131,3 +131,26 @@ class TestReport:
         meta = {"a": FakeMeta(10, set()), "b": FakeMeta(999, set())}
         r = assess("UPDATE a SET x = (SELECT max(y) FROM b) WHERE a.id = 1", "mysql", provider(meta))
         assert r.row_estimate == 999
+
+
+class TestComment:
+    """COMMENT ON 只改注释文字、不动数据：低风险（写操作仍需确认/审批，等级只影响展示）。"""
+
+    def test_column_comment_is_low(self):
+        r = assess("COMMENT ON COLUMN console.mod_event_trace.gaid IS '广告 ID'",
+                   "postgres", provider({}))
+        assert r.level == "LOW"
+        assert r.tables == ["mod_event_trace"]
+        assert not any("无法识别" in x for x in r.reasons)
+
+    def test_table_comment_is_low(self):
+        r = assess("COMMENT ON TABLE console.t IS 'x'", "postgres", provider({}))
+        assert r.level == "LOW" and r.tables == ["t"]
+
+    def test_clear_comment_is_null_is_low(self):
+        assert assess("COMMENT ON COLUMN t.c IS NULL", "postgres", provider({})).level == "LOW"
+
+    def test_batch_with_ddl_takes_highest(self):
+        r = assess("ALTER TABLE t ADD COLUMN c int; COMMENT ON COLUMN t.c IS 'x'",
+                   "postgres", provider({}))
+        assert r.level == "MEDIUM"

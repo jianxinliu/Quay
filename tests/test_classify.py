@@ -209,3 +209,23 @@ class TestFingerprint:
 
     def test_unparseable_still_fingerprints(self):
         assert fingerprint("garbage ??? sql", "mysql")
+
+
+class TestPgCommentIsNull:
+    """PG 用 `COMMENT ON ... IS NULL` 清除注释是合法语法，sqlglot 只认字符串字面量。"""
+
+    def test_parses_as_write_not_parse_error(self):
+        v = classify("COMMENT ON COLUMN console.t.gaid IS NULL", "postgres")
+        assert v.statement_kind == "Comment" and v.readonly is False
+
+    @pytest.mark.parametrize("sql,expect", [
+        ("comment on table t is null;", "comment on table t is '';"),
+        ("COMMENT ON COLUMN t.c IS 'x IS NULL'", "COMMENT ON COLUMN t.c IS 'x IS NULL'"),
+        ("SELECT 1 WHERE a IS NULL", "SELECT 1 WHERE a IS NULL"),
+    ])
+    def test_normalize_only_touches_comment_target(self, sql, expect):
+        assert normalize_sql_for_parse(sql, "postgres") == expect
+
+    def test_other_engines_untouched(self):
+        sql = "COMMENT ON COLUMN t.c IS NULL"
+        assert normalize_sql_for_parse(sql, "mysql") == sql
