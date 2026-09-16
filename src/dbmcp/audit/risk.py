@@ -145,6 +145,16 @@ def _assess_one(stmt: exp.Expression, meta_provider: MetaProvider) -> RiskReport
             report.warnings.append("大表 DDL 可能长时间锁表，建议低峰期或在线 DDL 工具执行")
         return report
 
+    if isinstance(stmt, exp.Comment):
+        # 只改对象的注释文字：不碰数据，PG 也只在元数据上持很短的锁。等级只影响展示，
+        # 写操作照样要审批 / 人工确认（见 requires_approval）
+        report.level = "LOW"
+        report.reasons.append("只修改注释，不影响数据")
+        target = stmt.this
+        if isinstance(target, exp.Column) and target.table and not report.tables:
+            report.tables = [target.table]
+        return report
+
     if isinstance(stmt, exp.Insert):
         report.reasons.append("插入数据")
         report.level = "MEDIUM"
