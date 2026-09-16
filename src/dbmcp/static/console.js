@@ -678,7 +678,8 @@
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
                     // PG 的执行库：新 tab 取左树当前选中的库；之后每个 tab 各自独立
-                    db: opts.db != null ? opts.db : (this.pgDbSel[_conn] || ""),
+                    db: opts.db != null ? opts.db
+                      : ((_conn === this.lastLoadedConn && this.pgDb) || this.pgDbSel[_conn] || ""),
                     sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, errKind: "", running: false,
                     pinned: false, snippetId: opts.snippetId || null,   // 已保存到服务端片段库的 id（⌘S 覆盖同一条）
                     snipNote: opts.snipNote || "",                     // 片段备注（覆盖保存时保留，不被清空）
@@ -697,7 +698,7 @@
                     colDisplay: opts.colDisplay || {},   // 列显示类型（仅展示，不写库）
                     // 异步任务态：开跑时刻（客户端秒表用）+ 被执行语句的字形状态标记 + 上次结果状态
                     jobRunAt: 0, execMarks: [], execIdx: 0,   // execMarks: [{line,state}]，多语句时每条一个
-                    seq: null,   // 多语句顺序执行状态 {list, i}（瞬时，不持久化）
+                    seq: null,   // 多语句顺序执行状态 {list, i, awaitConfirm}（瞬时，不持久化）
                     results: [], resultIdx: 0, isPaging: false };  // 结果 tab（每次执行新增一个）
         this.tabs.push(tab);
         if (monacoReady) models.set(id, window.monaco.editor.createModel(tab.sql, "sql"));
@@ -923,7 +924,7 @@
                  : (this.connections[0] ? this.connections[0].value : "");
         var schema = db || "";
         // PG 不同 database 里可以有同名表：新开的 tab 会落在左树当前库，判重也按它比
-        var pgdb = this.pgDbSel[conn] || "";
+        var pgdb = (conn === this.lastLoadedConn && this.pgDb) || this.pgDbSel[conn] || "";
         return this.tabs.find(function (t) {
           return t.type === type && t.table === table && (t.schema || "") === schema
                  && t.conn === conn && (t.db || "") === pgdb;
@@ -1064,6 +1065,7 @@
           this.openTf = cached.openTf; this.openTbl = cached.openTbl; this.openSub = cached.openSub;
           this.schemaFilter = cached.schemaFilter || "";
           this.rebuildCompletion();
+          this.adoptPgDb(t.conn, this.pgDb);
           if (t.db && this.serverDbs.indexOf(t.db) >= 0 && t.db !== this.pgDb) this.selectPgDb(t.db);
           return;
         }
@@ -1117,6 +1119,13 @@
       // 切库：清掉 schema 及以下的整棵子树，重新拉这个库的 schema 列表。
       // **不做「再点一次收起」**——库这一层同时只能开一个，收起等于把树清空、还得再点回来；
       // 而且初始化时会用当前库名调一次本方法，做成 toggle 会「刚选中就被自己收起」。
+      // 这个连接下还没有执行库的 tab（升级前存下的、或左树还没加载完时新开的）一律归到左树当前的库。
+      // 空串不能当作「连接默认库」：左树显示的是 X，tab 却在默认库上跑，表视图就会报表不存在。
+      adoptPgDb: function (conn, db) {
+        if (!conn || !db) return;
+        this.pgDbSel[conn] = db;
+        this.tabs.forEach(function (tb) { if (tb.conn === conn && !tb.db) tb.db = db; });
+      },
       selectPgDb: function (db) {
         if (!db) return;
         var t0 = this.activeTab;
@@ -1124,7 +1133,7 @@
         if (t0 && this.pgDb && this.pgDb !== db) delete this.schemaDefault[t0.conn];
         this.pgDb = db;
         var t = this.activeTab;
-        if (t) this.pgDbSel[t.conn] = this.pgDb;
+        if (t) this.adoptPgDb(t.conn, this.pgDb);
         this.databases = []; this.tablesByDb = {}; this.tableMeta = {}; this.tableSizes = {};
         this.openDb = {}; this.openTf = {}; this.openTbl = {}; this.openSub = {};
         this.selected = {};
@@ -1806,6 +1815,10 @@
         if (!t.conn) { this.flash("请先选择连接"); return; }
         // 同一 tab 已有查询在执行 → 直接拒绝（不排队、不并发），提示先取消
         if (t.running) { this.flash("当前查询仍在执行，请先取消或等待完成"); return; }
+        // 多语句序列停在某条写确认上时：确认 = 继续这个序列；其它任何执行都意味着放弃它
+        if (t.seq && t.seq.awaitConfirm) {
+          if (confirm) t.seq.awaitConfirm = false; else t.seq = null;
+        }
         t.isPaging = !!isPage;  // 翻页更新当前结果 tab；否则新执行=新结果 tab
         // 确认执行：捕获确认元数据（指纹 H1），下面 t.confirm 会被清空
         var confData = confirm ? t.confirm : null;
@@ -1818,7 +1831,9 @@
         page = page || 0;
         // 编辑器里选中多条语句 → 拆开按顺序逐条执行（每条一个结果页 + 各自独立的执行状态图标），
         // 不整体当成写操作被拒。递归调用时带 sqlOverride，已是单条、不再进这个分支。
-        if (sqlOverride == null && t.type === "query" && !isPage) {
+        // 确认执行也不进：此时选区往往还在，进来就会从第一条重新开始，第一条又要确认，
+        // 于是「确认」永远在重跑第一条、后面的语句一条也执行不到。
+        if (sqlOverride == null && t.type === "query" && !isPage && !confirm) {
           var items = this.seqItems();
           if (items && items.length > 1) {
             t.seq = { list: items.map(function (x) { return x.sql; }), i: 0 };
@@ -1868,7 +1883,10 @@
             t2.running = true;
             // 客户端秒表锚定到服务端真实耗时（刷新后续接、以及首轮校准都准确，避免走得偏快/偏慢）
             if (!t2.jobRunAt) t2.jobRunAt = Date.now() - (d.elapsed_ms || 0);
-            setTimeout(function () { self.pollJob(tabId, jobId, page); }, 400);
+            // 刚提交的任务多半几十毫秒内就有结果（写确认只是评估风险、不执行），
+            // 前一秒密一点地问，免得每条都白等一个 400ms；跑得久的再放慢
+            var wait = (d.elapsed_ms || 0) < 1000 ? 100 : 400;
+            setTimeout(function () { self.pollJob(tabId, jobId, page); }, wait);
             return;
           }
           t2.running = false; t2.jobId = null;
@@ -1910,7 +1928,8 @@
             t2.confirm = null;
           }
           else if (r.kind === "confirm") {
-            self.setExecGlyph(t2, "");  // 待人工确认，非终态
+            // 待人工确认，非终态：单条执行清掉图标；序列里只把这一条标成待定，前面几条的 ✓ 保留
+            self.setExecGlyph(t2, t2.seq ? "wait" : "");
             // 存下指纹（H1 确认时回传绑定）+ prod 标记（仅用于红色视觉警示）
             t2.confirm = { risk: r.risk || {}, statement_kind: r.statement_kind,
                            fingerprint: r.fingerprint || "", prod: !!r.prod };
@@ -1921,8 +1940,10 @@
             if (t2.type === "data") setTimeout(function () { self.run(false, t2.lastPage); }, 60);
             else self.refreshTree();
           }
-          // 多语句顺序执行：本条读/写成功即跑下一条；confirm（写需人工确认）在此停住等确认
-          self._seqAdvance(t2, r.kind === "read" || r.kind === "write");
+          // 多语句顺序执行：本条读/写成功即跑下一条；需要人工确认的写停在这里，
+          // 确认执行后由那次执行的结果接着推进，取消确认则放弃整个序列
+          if (r.kind === "confirm" && t2.seq) t2.seq.awaitConfirm = true;
+          else self._seqAdvance(t2, r.kind === "read" || r.kind === "write");
           self.persist();
           if (t2.id === self.activeId && t2.view === "chart" && t2.result) self.renderChart();
         }).catch(function () {  // 网络抖动：稍后重试
@@ -1998,7 +2019,7 @@
           }
         }).catch(function (e) { self.reconnecting = false; self.flash("重连失败：" + e); });
       },
-      // 多语句顺序执行的推进：上一条成功(ok=true)则跑下一条；失败/取消/需确认则中止整个序列。
+      // 多语句顺序执行的推进：上一条成功(ok=true)则跑下一条；失败/取消则中止整个序列。
       _seqAdvance: function (t, ok) {
         if (!t || !t.seq) return;
         if (!ok) { t.seq = null; return; }
@@ -3014,7 +3035,11 @@
       openHistory: function (item) {
         this.newTab({ title: item.sql.slice(0, 18), sql: item.sql });
       },
-      cancelConfirm: function () { if (this.activeTab) this.activeTab.confirm = null; },
+      cancelConfirm: function () {
+        var t = this.activeTab; if (!t) return;
+        t.confirm = null;
+        t.seq = null;   // 不执行这条，后面的语句也不再继续
+      },
       formatSql: function () {
         var self = this, t = this.activeTab; if (!t || t.type === "ddl") return;
         var model = models.get(t.id), sel = editor && editor.getSelection();

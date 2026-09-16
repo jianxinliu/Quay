@@ -608,6 +608,7 @@ class DbmService:
         except QueryRejected:
             raise
         except Exception as e:
+            where = rec.detail
             if not cfg.database and _is_no_database_error(e):
                 rec.status = "error"
                 rec.detail = "未选定数据库"
@@ -617,7 +618,7 @@ class DbmService:
                     "（如 SELECT * FROM mydb.users），或先执行 SHOW DATABASES 查看可用库。"
                 ) from e
             rec.status = "error"
-            rec.detail = f"{type(e).__name__}: {e}"
+            rec.detail = (f"{where} " if where else "") + f"{type(e).__name__}: {e}"
             self.store.record(rec)
             raise
 
@@ -747,7 +748,8 @@ class DbmService:
         is_prod = (cfg.environment or "").lower() == "prod"
         fp = fingerprint(sql, cfg.engine)
         if not confirm:
-            report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
+            report = assess(sql, cfg.engine,
+                            self._meta_provider(project, connection, cfg, database=database))
             report_dict = report.to_dict()
             plan = self._try_explain(project, connection, cfg, sql, schema=schema,
                                      database=database)
@@ -2330,6 +2332,8 @@ class DbmService:
         reader 会话可能因只读事务拒绝 EXPLAIN DML（PG 会），失败则退回 writer；
         全部失败返回 None，不阻断审批单生成。行数/单格长度上限见 engines.PLAN_MAX_*。
         """
+        if not engines.explainable(sql, cfg.engine):
+            return None
         for role in ("reader", "writer"):
             if role == "writer" and cfg.writer is None:
                 break

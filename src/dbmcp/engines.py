@@ -748,6 +748,25 @@ PLAN_MAX_CELL_CHARS = 500    # 单格字符上限（MySQL 的 Extra、PG 的计�
 _EXPLAIN_PREFIX = {"mysql": "EXPLAIN FORMAT=TRADITIONAL "}
 
 
+def explainable(sql: str, engine_kind: str) -> bool:
+    """这条语句值不值得去取执行计划：只有单条 DML / 查询才有计划可看。
+
+    DDL、COMMENT、GRANT 之类 EXPLAIN 必然报错，去试只会白白往库上多发请求——
+    写确认要先试 reader 再试 writer，远程生产库上 writer 连接常已被空闲回收，
+    重建连接（可能还要过 SSH 隧道）正是确认框迟迟不出来的主要耗时。
+    """
+    import sqlglot  # noqa: PLC0415
+    from sqlglot import exp  # noqa: PLC0415
+
+    try:
+        trees = [t for t in sqlglot.parse(sql, read=_PAGINATE_DIALECTS.get(engine_kind))
+                 if t is not None]
+    except Exception:
+        return False
+    return len(trees) == 1 and isinstance(
+        trees[0], (exp.Insert, exp.Update, exp.Delete, exp.Merge, exp.Select, exp.Union))
+
+
 def explain(engine: SAEngine, sql: str, engine_kind: str) -> dict | None:
     """取执行计划，返回 {"columns": [...], "rows": [[...]]}；失败返回 None（不阻断主流程）。
 
