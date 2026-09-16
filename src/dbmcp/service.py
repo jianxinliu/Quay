@@ -688,6 +688,56 @@ class DbmService:
 
     # ---------- 管理后台查询台（人已认证，写操作二次确认后直接执行）----------
 
+    def admin_assess_batch(
+        self, project: str, connection: str, statements: list[str], caller: CallerInfo,
+        schema: str | None = None, database: str | None = None,
+    ) -> dict:
+        """查询台选中多条语句执行前的一次性评估：整批只让人确认一次。
+
+        逐条分类，不执行任何语句：
+        - 有语法错误 → kind=error，整批一条都不跑（免得前几条已经写进去才发现后面写错了）；
+        - 全是只读 → kind=read，前端直接按顺序执行；
+        - 含写操作 → kind=confirm，逐条给出风险与指纹。人确认一次后，前端逐条带上
+          confirm 与**各自的**指纹执行，admin_run_sql 的指纹绑定（H1）仍逐条生效——
+          执行的就是确认框里列出的那几条。
+        """
+        from .audit.risk import LEVELS  # noqa: PLC0415
+
+        cfg = self.config.get_connection(project, connection)
+        stmts = [x.strip() for x in statements if x and x.strip()]
+        if not stmts:
+            raise ValueError("没有可执行的语句")
+        provider = self._meta_provider(project, connection, cfg, database=database)
+        writes: list[dict] = []
+        level = LEVELS[0]
+        for i, sql in enumerate(stmts, 1):
+            verdict = classify(sql, cfg.engine)
+            if verdict.statement_kind == "ParseError":
+                rec = self._base_record(project, connection, cfg, "query", sql, caller)
+                rec.status = "rejected"
+                rec.detail = verdict.reason
+                self.store.record(rec)
+                reason = verdict.reason.replace("SQL 解析失败: ", "")
+                return {"kind": "error", "index": i,
+                        "error": f"第 {i} 条 SQL 语法错误：{reason}（整批未执行）"}
+            if verdict.readonly:
+                continue
+            report = assess(sql, cfg.engine, provider).to_dict()
+            if LEVELS.index(report["level"]) > LEVELS.index(level):
+                level = report["level"]
+            writes.append({"index": i, "sql": sql, "statement_kind": verdict.statement_kind,
+                           "fingerprint": fingerprint(sql, cfg.engine), "risk": report})
+        if not writes:
+            return {"kind": "read", "count": len(stmts)}
+        # 只有一条写时执行计划才看得过来；多条逐一 EXPLAIN 会拖慢确认框（见 _try_explain）
+        if len(writes) == 1:
+            plan = self._try_explain(project, connection, cfg, writes[0]["sql"],
+                                     schema=schema, database=database)
+            if plan:
+                writes[0]["risk"]["explain"] = plan
+        return {"kind": "confirm", "count": len(stmts), "level": level, "writes": writes,
+                "prod": (cfg.environment or "").lower() == "prod"}
+
     def admin_run_sql(
         self, project: str, connection: str, sql: str, caller: CallerInfo, confirm: bool = False,
         page: int = 0, page_size: int | None = None, schema: str | None = None,

@@ -3496,6 +3496,30 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return JSONResponse(error_payload(e))
         return JSONResponse(out)
 
+    @mcp.custom_route("/admin/sql/assess_batch", methods=["POST"])
+    @guard
+    async def _sql_assess_batch(req: Request) -> JSONResponse:
+        f = await req.form()
+        try:
+            stmts = json.loads(str(f.get("stmts") or "[]"))
+            if not isinstance(stmts, list) or not all(isinstance(x, str) for x in stmts):
+                raise ValueError("stmts 须为字符串数组")
+        except (ValueError, json.JSONDecodeError) as e:
+            return JSONResponse({"ok": False, "error": f"参数错误：{e}"})
+        # 分析工作区是本地沙箱，语句本来就不需要确认
+        if _analysis_ws(str(f.get("conn") or "")):
+            return JSONResponse({"ok": True, "kind": "read", "count": len(stmts)})
+        schema = str(f.get("schema") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            out = await anyio.to_thread.run_sync(
+                lambda: service.admin_assess_batch(project, connection, stmts, _caller(req),
+                                                   schema=schema, database=db))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, **out})
+
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard
     async def _sql_run(req: Request) -> JSONResponse:
