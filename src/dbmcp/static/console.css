@@ -332,6 +332,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-schema-float:hover { opacity: 1; }
 .dg-schema-float .lb { font-family: var(--dg-mono); font-size: 10px; color: var(--dg-faint); }
 .dg-schema-float .dg-sel { width: 150px; }
+.dg-schema-float .dg-sel.pgdb { width: 120px; }
 .dg-sel-btn {
   display: flex; align-items: center; gap: 6px; width: 100%;
   background: var(--dg-panel); color: var(--dg-text); border: 1px solid var(--dg-border);

@@ -191,6 +191,18 @@ def _decision_of(answer: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+# PG 跨库参数。PG 一条连接只能绑一个 database（服务端不支持跨库引用），要在别的库里
+# 操作只能另开连接——这个参数就是告诉服务端「这次连哪个库」。已有的 `database` 参数
+# 对 PG 指的是 schema，沿用不改，免得已接入的 agent 行为突变。
+PgDatabase = Annotated[
+    str | None,
+    Field(description="仅 PostgreSQL：在服务器上的哪个 database 里操作（PG 一条连接只绑一个库，"
+                      "跨库必须用它切换）；不传用连接绑定的库，可选值见 list_server_databases。"
+                      "注意：database 参数对 PG 指的是 schema"),
+]
+_SCHEMA_DESC = "库/schema（MySQL/ClickHouse 为库，PostgreSQL 为 schema）；不传时使用连接默认库"
+
+
 async def _maybe_elicit_approval(
     service: DbmService,
     ctx: Context | None,
@@ -214,12 +226,13 @@ async def _maybe_elicit_approval(
 
     cid = result["change_id"]
     risk = result.get("risk", {})
+    pg_db = result.get("pg_database")
     message = build_elicit_message(
         change_id=cid,
         risk_level=str(risk.get("level", "?")),
         reasons=list(risk.get("reasons", [])),
         project=project,
-        connection=connection,
+        connection=f"{connection}（库 {pg_db}）" if pg_db else connection,
         environment=cfg.environment,
         statement=statement,
         approval_url=result.get("approval_url", ""),
@@ -389,6 +402,9 @@ def build_mcp(service: DbmService) -> FastMCP:
             "先用 list_projects / list_connections 找到目标连接，"
             "用 list_tables / describe_table / sample_rows 探索 schema。"
             "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
+            "PostgreSQL 一条连接只能在一个 database 里查询：用 list_server_databases 看有哪些库，"
+            "再给 query/execute/list_tables 等工具传 pg_database=库名 即在该库操作"
+            "（database 参数对 PG 指的是 schema）。"
             "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
             "不要读取或把文件内容放入模型上下文。"
             "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
@@ -636,6 +652,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         project: str,
         connection: str,
         sql: Annotated[str, Field(description="单条只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN）")],
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> str:
         """在指定连接上执行只读 SQL，返回紧凑 TSV 文本（比 JSON 省 token）。
@@ -656,7 +673,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         caller = _caller_from_ctx(ctx)
         try:
             _charge = _budget_gate(service, caller)
-            result = service.query(project, connection, sql, caller)
+            result = service.query(project, connection, sql, caller, database=pg_database)
             budget = service.agent_result_budget(project, connection)
             return _charge(render_agent_result(result, budget))
         except Exception as e:  # noqa: BLE001
@@ -685,6 +702,7 @@ def build_mcp(service: DbmService) -> FastMCP:
             Field(description="首次提交生成审批单后，服务端等待人工决策的秒数；"
                               "0=不等待立即返回审批单号，省略=用系统设置的默认值"),
         ] = None,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
         """执行数据变更操作（需人工授权）。
@@ -707,7 +725,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         """
         caller = _caller_from_ctx(ctx)
         run = partial(service.execute, project, connection, sql, caller, reason=reason,
-                      rollback_note=rollback_note)
+                      rollback_note=rollback_note, database=pg_database)
         # 首提、等待期间的批准后执行都在同一个 try 内：批准后真正落库时才暴露的 DB 错误
         # （锁超时、约束冲突等）同样必须走 agent_error 翻译，不能裸奔到传输层。
         try:
@@ -738,10 +756,16 @@ def build_mcp(service: DbmService) -> FastMCP:
             str, Field(description="要同步结构的表名，多张用逗号分隔，如 `orders,order_item,users`")
         ],
         source_database: Annotated[
-            str | None, Field(description="源库/schema；不传时用连接默认库")
+            str | None, Field(description="源库/schema（PG 为 schema）；不传时用连接默认库")
         ] = None,
         target_database: Annotated[
-            str | None, Field(description="目标库/schema；不传时用连接默认库")
+            str | None, Field(description="目标库/schema（PG 为 schema）；不传时用连接默认库")
+        ] = None,
+        source_pg_database: Annotated[
+            str | None, Field(description="仅 PostgreSQL 源：从哪个 database 读（source_database 对 PG 是 schema）")
+        ] = None,
+        target_pg_database: Annotated[
+            str | None, Field(description="仅 PostgreSQL 目标：建到哪个 database（target_database 对 PG 是 schema）")
         ] = None,
         ddl: Annotated[
             Literal["create_if_missing", "recreate"],
@@ -774,6 +798,7 @@ def build_mcp(service: DbmService) -> FastMCP:
                 source_project, source_connection, target_project, target_connection,
                 names, _caller_from_ctx(ctx),
                 source_database=source_database, target_database=target_database,
+                source_pg_database=source_pg_database, target_pg_database=target_pg_database,
                 ddl=ddl, reason=reason, dry_run=dry_run,
             ))
         except Exception as e:  # noqa: BLE001
@@ -792,10 +817,16 @@ def build_mcp(service: DbmService) -> FastMCP:
             str | None, Field(description="目标表名，默认与源表同名")
         ] = None,
         source_database: Annotated[
-            str | None, Field(description="源库/schema；不传时用连接默认库")
+            str | None, Field(description="源库/schema（PG 为 schema）；不传时用连接默认库")
         ] = None,
         target_database: Annotated[
-            str | None, Field(description="目标库/schema；不传时用连接默认库")
+            str | None, Field(description="目标库/schema（PG 为 schema）；不传时用连接默认库")
+        ] = None,
+        source_pg_database: Annotated[
+            str | None, Field(description="仅 PostgreSQL 源：从哪个 database 读（source_database 对 PG 是 schema）")
+        ] = None,
+        target_pg_database: Annotated[
+            str | None, Field(description="仅 PostgreSQL 目标：写到哪个 database（target_database 对 PG 是 schema）")
         ] = None,
         ddl: Annotated[
             Literal["skip", "create_if_missing", "recreate"],
@@ -867,6 +898,8 @@ def build_mcp(service: DbmService) -> FastMCP:
             limit=limit,
             source_database=source_database,
             target_database=target_database,
+            source_pg_database=(source_pg_database or "").strip() or None,
+            target_pg_database=(target_pg_database or "").strip() or None,
         )
         run = partial(service.sync_table, spec, caller, reason=reason)
         try:
@@ -927,12 +960,33 @@ def build_mcp(service: DbmService) -> FastMCP:
         return await _wait_for_decision(service, change_id, wait_s, ctx)
 
     @mcp.tool
-    def list_databases(
+    def list_server_databases(
         project: str, connection: str, ctx: Context | None = None
     ) -> list[str]:
-        """列出连接可选择的库/schema；MySQL/ClickHouse 返回数据库，PostgreSQL 返回 schema。"""
+        """列出服务器上可连接的 database。
+
+        PostgreSQL 的库与 schema 是两层，且一条连接只能在一个库里查询：先用本工具看有哪些库，
+        再把库名作为其它工具的 pg_database 参数传入即可在那个库里操作（list_databases 列的
+        是某个库里的 schema）。MySQL/ClickHouse 没有这一层，结果等同 list_databases。
+        """
         try:
-            return service.list_databases(project, connection, _caller_from_ctx(ctx))
+            return service.list_server_databases(project, connection, _caller_from_ctx(ctx))
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+
+    @mcp.tool
+    def list_databases(
+        project: str, connection: str, pg_database: PgDatabase = None,
+        ctx: Context | None = None,
+    ) -> list[str]:
+        """列出连接可选择的库/schema；MySQL/ClickHouse 返回数据库，PostgreSQL 返回 schema。
+
+        PostgreSQL 列的是 pg_database（不传则连接绑定的库）里的 schema；服务器上有哪些库
+        用 list_server_databases 查。
+        """
+        try:
+            db = service.resolve_pg_database(project, connection, pg_database)
+            return service.list_databases(project, connection, _caller_from_ctx(ctx), database=db)
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
 
@@ -940,15 +994,15 @@ def build_mcp(service: DbmService) -> FastMCP:
     def list_tables(
         project: str,
         connection: str,
-        database: Annotated[
-            str | None, Field(description="库/schema；不传时使用连接默认库")
-        ] = None,
+        database: Annotated[str | None, Field(description=_SCHEMA_DESC)] = None,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> list[str]:
         """列出指定库/schema 中的所有表。"""
         try:
+            db = service.resolve_pg_database(project, connection, pg_database)
             return service.list_tables(
-                project, connection, _caller_from_ctx(ctx), schema=database
+                project, connection, _caller_from_ctx(ctx), schema=database, database=db
             )
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
@@ -958,15 +1012,15 @@ def build_mcp(service: DbmService) -> FastMCP:
         project: str,
         connection: str,
         table: str,
-        database: Annotated[
-            str | None, Field(description="库/schema；不传时使用连接默认库")
-        ] = None,
+        database: Annotated[str | None, Field(description=_SCHEMA_DESC)] = None,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
         """查看表结构：字段（类型/可空/默认值/注释）、索引、主键。"""
         try:
+            db = service.resolve_pg_database(project, connection, pg_database)
             return service.describe_table(
-                project, connection, table, _caller_from_ctx(ctx), schema=database
+                project, connection, table, _caller_from_ctx(ctx), schema=database, database=db
             )
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
@@ -978,9 +1032,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         table: Annotated[
             str, Field(description="表名；一次要多张就用逗号分隔，如 `orders,order_item`")
         ],
-        database: Annotated[
-            str | None, Field(description="库/schema；不传时使用连接默认库")
-        ] = None,
+        database: Annotated[str | None, Field(description=_SCHEMA_DESC)] = None,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> str:
         """查看建表语句（DDL）。比 describe_table 多给出索引定义、字符集、引擎、分区等原文细节。
@@ -997,10 +1050,12 @@ def build_mcp(service: DbmService) -> FastMCP:
         try:
             # 单表走原路径：表名写错/无权限就该原样报错给 agent，而不是回一段
             # 「取失败」的注释文本让它以为调用成功了。批量才需要逐表容错。
+            db = service.resolve_pg_database(project, connection, pg_database)
             if len(names) == 1:
                 return service.get_table_ddl(project, connection, names[0], caller,
-                                             schema=database)
-            items = service.get_table_ddls(project, connection, names, caller, schema=database)
+                                             schema=database, database=db)
+            items = service.get_table_ddls(project, connection, names, caller,
+                                           schema=database, database=db)
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
         # 多表：每段前加表名注释分隔，取失败的那张也如实标出来（不静默跳过）
@@ -1016,6 +1071,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         connection: str,
         table: str,
         limit: Annotated[int, Field(ge=1, le=100)] = 10,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> str:
         """抽样查看表数据（默认 10 行，上限 100 行）。返回紧凑 TSV 文本（格式同 query）。
@@ -1025,7 +1081,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         caller = _caller_from_ctx(ctx)
         try:
             _charge = _budget_gate(service, caller)
-            result = service.sample_rows(project, connection, table, limit, caller)
+            result = service.sample_rows(project, connection, table, limit, caller,
+                                         database=pg_database)
             budget = service.agent_result_budget(project, connection)
             return _charge(render_agent_result(result, budget))
         except Exception as e:  # noqa: BLE001
@@ -1049,8 +1106,9 @@ def build_mcp(service: DbmService) -> FastMCP:
         ] = "csv",
         database: Annotated[
             str | None,
-            Field(description="要导出的库/schema；连接已绑定默认库时可不传"),
+            Field(description="要导出的库/schema（PG 为 schema）；连接已绑定默认库时可不传"),
         ] = None,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
         """按库、表、字段和行数导出数据，返回短期下载链接。
@@ -1063,7 +1121,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         try:
             return await anyio.to_thread.run_sync(
                 lambda: service.export_table(
-                    project, connection, table, fields, limit, format, caller, database
+                    project, connection, table, fields, limit, format, caller, database,
+                    pg_database=pg_database,
                 )
             )
         except Exception as e:  # noqa: BLE001
@@ -1093,6 +1152,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         sql: Annotated[str, Field(description="只读取数 SQL，如 SELECT * FROM t 或聚合查询")],
         limit: Annotated[int | None, Field(description="快照行数上限（默认 20 万，硬上限 50 万）")] = None,
         schema: Annotated[str | None, Field(description="执行 schema（未绑库连接需指定）")] = None,
+        pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
         """从某个连接把查询结果快照进分析工作区（reader 只读拉取，全程审计，带行数上限）。
@@ -1104,7 +1164,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         try:
             return await anyio.to_thread.run_sync(
                 lambda: service.analysis_import(workspace, dataset, project, connection,
-                                                sql, caller, limit, schema))
+                                                sql, caller, limit, schema,
+                                                database=pg_database))
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
 

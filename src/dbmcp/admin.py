@@ -122,6 +122,17 @@ def _esc(v: object) -> str:
     return html.escape(str(v if v is not None else ""))
 
 
+def _db_suffix(c) -> str:  # noqa: ANN001
+    """审批列表里连接名后缀：PG 跨库的审批单标出执行库，免得和默认库上的同名表混淆。"""
+    return f" <code>@{_esc(c.database)}</code>" if getattr(c, "database", "") else ""
+
+
+def _db_row(c) -> str:  # noqa: ANN001
+    if not getattr(c, "database", ""):
+        return ""
+    return f"\n  <dt>执行库</dt><dd><code>{_esc(c.database)}</code>（PostgreSQL database）</dd>"
+
+
 def _fmt_ts(ts: object) -> str:
     """ISO 时间（多为 UTC）→ 本机时区 'YYYY-MM-DD HH:MM:SS'；解析失败原样返回。"""
     if not ts:
@@ -1814,7 +1825,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
                 st = c.effective_status()
                 out.append(
                     f"<tr><td><a href='/admin/approvals/{c.id}'>#{c.id}</a></td>"
-                    f"<td>{_esc(c.project)}/{_esc(c.connection)}<br><span class='muted'>{_esc(c.environment)}</span></td>"
+                    f"<td>{_esc(c.project)}/{_esc(c.connection)}{_db_suffix(c)}<br><span class='muted'>{_esc(c.environment)}</span></td>"
                     f"<td>{_badge(c.risk_level, _LEVEL_COLOR)}</td>"
                     f"<td><code>{_esc(c.sql[:80])}</code></td>"
                     f"<td>{_badge(st, _STATUS_COLOR)}</td>"
@@ -1891,7 +1902,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
 <div class='card'>
  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">{_badge(st, _STATUS_COLOR)} {_badge(c.risk_level, _LEVEL_COLOR)} <span class="tag">{_esc(c.engine)}</span></div>
  <dl class="kv">
-  <dt>连接</dt><dd><code>{_esc(c.project)}/{_esc(c.connection)}</code> · {_env_badge(c.environment)}</dd>
+  <dt>连接</dt><dd><code>{_esc(c.project)}/{_esc(c.connection)}</code> · {_env_badge(c.environment)}</dd>{_db_row(c)}
   <dt>提交 agent</dt><dd>{_esc(c.agent)}</dd>
   <dt>提交时间</dt><dd>{_esc(_fmt_ts(c.created_at))} · 有效期至 {_esc(_fmt_ts(c.expires_at))}</dd>
   <dt>变更原因</dt><dd>{_esc(c.reason) or '—'}</dd>

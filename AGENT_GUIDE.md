@@ -26,7 +26,7 @@ DeepSeek Harness 会把工具注册成 `mcp__<serverName>__<原名>`（例如 `m
 | 回溯自己 | `list_sessions(since?, until?, keyword?, project?, connection?, status?, writes_only?, limit?)` | 查自己过去的工作会话（可按日期/关键词/连接/结果筛选），找到「上次是哪一次」 |
 | 回溯改动 | `session_history(session_id?, writes_only?, status?, fields?, limit?)` | 看某次会话跑过的操作；写操作带审批单号与 `rollback_note`（改动前的值/怎么回滚）。**默认不返回 SQL 原文与错误明细**，要看用 `fields="sql,detail"` |
 | 发现 | `list_projects` / `list_connections` | 找到目标连接（项目 → 连接） |
-| 探索 schema | `list_databases` / `list_tables` / `describe_table` / `sample_rows` | 库 / 表 / 列与索引 / 抽样看数据形状 |
+| 探索 schema | `list_server_databases` / `list_databases` / `list_tables` / `describe_table` / `sample_rows` | PG 的库 / 库或 schema / 表 / 列与索引 / 抽样看数据形状 |
 | 建表语句 | `table_ddl(project, connection, table, database?)` | 看 DDL 原文（索引定义/分区/字符集/注释）；表名逗号分隔可一次多张。只要字段和类型用 `describe_table` 更省 |
 | 只读查询 | `query(project, connection, sql)` | 仅 SELECT/SHOW/DESCRIBE/EXPLAIN；默认注入 LIMIT 与超时 |
 | 数据导出 | `export_table(project, connection, table, fields?, limit?, format?, database?)` | 按库、表、字段和行数导出 CSV/JSON/Markdown/XLSX 文件 |
@@ -66,6 +66,21 @@ list_projects → list_connections(project) → list_tables → describe_table �
 `list_databases`，再把选定的 `database` 传给 `list_tables`、`describe_table` 和
 `export_table`。导出文件使用 reader 账号并应用 agent 敏感字段脱敏，行数不能超过连接
 策略的 `max_rows`。
+
+**PostgreSQL 跨库**：PG 是「database → schema → 表」三层，且一条连接只能在一个 database
+里查询（`SELECT … FROM 别的库.public.t` 会报错）。`database` 参数对 PG 指的是 **schema**；
+要换 database，给工具传 `pg_database`：
+
+```
+list_server_databases → list_databases(pg_database=shop) → list_tables(pg_database=shop, database=sales)
+→ query(pg_database=shop, sql="SELECT … FROM sales.orders")
+```
+
+`query` / `execute` / `sample_rows` / `describe_table` / `table_ddl` / `export_table` /
+`analysis_import` 都接受 `pg_database`；`sync_table` / `sync_table_ddl` 用
+`source_pg_database` / `target_pg_database`。写操作的执行库随审批单存下，批准后就在那个库执行；
+带 change_id 重提时可以不传 `pg_database`，传了却与审批单不一致会被拒。库名写错会直接报错并列出
+可选库。要在两个库之间 JOIN，用分析工作台分别 `analysis_import` 再在 DuckDB 里做。
 
 - `query` 只收只读语句，解析失败/多语句一律拒绝（默认拒绝原则）。
 - **`query`/`sample_rows` 返回紧凑 TSV 文本**（非 JSON，省 token）：顶部 `#` 元信息行

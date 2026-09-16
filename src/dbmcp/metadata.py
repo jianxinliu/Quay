@@ -73,17 +73,25 @@ class MetadataCache:
         table: str,
         *,
         refresh: bool = False,
+        database: str | None = None,
     ) -> TableMeta:
+        """database：仅 PG——同一连接下不同 database 里的同名表是两张表，缓存要分开。"""
         if not refresh:
-            cached = self._read(project, connection, table)
+            cached = self._read(project, connection, table, database)
             if cached is not None and (time.time() - cached.fetched_at) < self._ttl_s:
                 return cached
-        return self._refresh(project, connection, cfg, table)
+        return self._refresh(project, connection, cfg, table, database)
+
+    @staticmethod
+    def _key(table: str, database: str | None) -> str:
+        # 复用 table_name 列存「库::表」，不改表结构；未指定库的键与老数据完全一致
+        return f"{database}::{table}" if database else table
 
     def _refresh(
-        self, project: str, connection: str, cfg: ConnectionConfig, table: str
+        self, project: str, connection: str, cfg: ConnectionConfig, table: str,
+        database: str | None = None,
     ) -> TableMeta:
-        engine = self._pool.get(project, connection, cfg)
+        engine = self._pool.get(project, connection, cfg, database=database)
         payload = engines.collect_table_meta(engine, cfg.engine, table)
         fetched_at = time.time()
         meta = TableMeta(
@@ -94,15 +102,17 @@ class MetadataCache:
             row_estimate=payload.get("row_estimate"),
             fetched_at=fetched_at,
         )
-        self._write(project, connection, table, payload, fetched_at)
+        self._write(project, connection, self._key(table, database), payload, fetched_at)
         return meta
 
-    def _read(self, project: str, connection: str, table: str) -> TableMeta | None:
+    def _read(self, project: str, connection: str, table: str,
+              database: str | None = None) -> TableMeta | None:
+        key = self._key(table, database)
         with self._lock:
             row = self._conn.execute(
                 "SELECT payload, fetched_at FROM table_meta"
                 " WHERE project = ? AND connection = ? AND table_name = ?",
-                (project, connection, table),
+                (project, connection, key),
             ).fetchone()
         if row is None:
             return None

@@ -299,6 +299,9 @@ class DbmService:
         # 上限跟随系统设置：每次取用前同步，改设置即时生效、不必重启。
         self.session_budget = SessionBudget(DEFAULT_SESSION_BUDGET_CHARS)
         self.started_at = time.time()
+        # PG：连接上可切换的 database 清单缓存（(project, connection) → (取数时刻, 库名列表)），
+        # 校验 agent 传入的 pg_database 用，避免每次调用都多打一条 pg_database 查询
+        self._pg_db_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
 
     # ---------- 元信息 ----------
 
@@ -523,6 +526,52 @@ class DbmService:
 
     # ---------- 查询 ----------
 
+    PG_DB_LIST_TTL_S = 60.0
+
+    def resolve_pg_database(self, project: str, connection: str,
+                            database: str | None,
+                            cfg: ConnectionConfig | None = None) -> str | None:
+        """校验并规范化 agent 指定的 PG database（`pg_database` 参数）。
+
+        - 未指定 / 空串 / 恰好是连接本来就连的库 → None（走默认引擎，不多建一条连接）；
+        - 非 PG 连接指定了它 → 报错（MySQL/CH 的「库」走 database/schema 参数）；
+        - 不在服务器可连接的库清单里 → 报错并列出可选项。
+
+        必须先校验再建连接：连一个不存在的库，失败原文带 `connection to server`，
+        一旦被当成断连就会把整条连接的健康位打坏（health 里另有兜底，这里是第一道）。
+        """
+        name = (database or "").strip()
+        if not name:
+            return None
+        cfg = cfg or self.config.get_connection(project, connection)
+        if cfg.engine != "postgres":
+            raise ValueError(
+                f"pg_database 只适用于 PostgreSQL 连接，{project}/{connection} 是 {cfg.engine}；"
+                "MySQL/ClickHouse 的库请用 database 参数指定")
+        if name == engines.pg_database_name(cfg):
+            return None
+        names = self._pg_server_databases(project, connection, cfg)
+        if name not in names:
+            raise ValueError(
+                f"库 {name!r} 不在 {project}/{connection} 可连接的库中"
+                f"（可选：{', '.join(names) or '无'}）。可先调 list_server_databases 查看")
+        return name
+
+    def _pg_server_databases(self, project: str, connection: str,
+                             cfg: ConnectionConfig) -> list[str]:
+        key = (project, connection)
+        hit = self._pg_db_cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < self.PG_DB_LIST_TTL_S:
+            return hit[1]
+
+        def _do() -> list[str]:
+            engine = self.pool.get(project, connection, cfg)
+            return engines.list_server_databases(engine, cfg.engine)
+
+        names = self._run_touching_db(project, connection, _do)
+        self._pg_db_cache[key] = (time.monotonic(), names)
+        return names
+
     def _read(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
         caller: CallerInfo, max_rows: int, schema: str | None = None,
@@ -539,8 +588,7 @@ class DbmService:
         查询台/导出传 mask=False——人就是要看真实数据，脱敏反而碍事。
         """
         rec = self._base_record(project, connection, cfg, "query", sql, caller)
-        if schema:
-            rec.detail = f"schema={schema}"
+        rec.detail = " ".join(f"{k}={v}" for k, v in (("db", database), ("schema", schema)) if v)
 
         def _do() -> "engines.QueryResult":
             engine = self.pool.get(project, connection, cfg, schema=schema, database=database)
@@ -594,13 +642,17 @@ class DbmService:
             out["masked_columns"] = masked
         return out
 
-    def query(self, project: str, connection: str, sql: str, caller: CallerInfo) -> dict:
+    def query(self, project: str, connection: str, sql: str, caller: CallerInfo,
+              database: str | None = None) -> dict:
+        """database：仅 PG，查询在哪个 database 上执行（见 resolve_pg_database）。"""
         cfg = self.config.get_connection(project, connection)
+        database = self.resolve_pg_database(project, connection, database, cfg)
         verdict = classify(sql, cfg.engine)
         if verdict.statement_kind == "ParseError":
             # 解析失败先走语法预检：DB 复核也报语法错就直接给出精确的语法错误，
             # 而不是让 agent 收到误导性的「仅允许只读语句」。
-            self._syntax_precheck(project, connection, cfg, sql, caller, "query")
+            self._syntax_precheck(project, connection, cfg, sql, caller, "query",
+                                  database=database)
             # DB 认这条语法（或无法复核）：仍然不能放行——解析不了就判定不了只读性，
             # 按「默认拒绝」红线拒，但把真实原因说清楚。
             rec = self._base_record(project, connection, cfg, "query", sql, caller)
@@ -623,7 +675,8 @@ class DbmService:
 
         # 兜底：缺 LIMIT 的 SELECT 注入 LIMIT max_rows+1，防大表全量缓冲把 DB/进程拖挂
         run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
-        out = self._read(project, connection, cfg, run_sql, caller, cfg.policy.max_rows)
+        out = self._read(project, connection, cfg, run_sql, caller, cfg.policy.max_rows,
+                         database=database)
         out["statement_kind"] = verdict.statement_kind
         if out["truncated"]:
             out["hint"] = (
@@ -933,6 +986,7 @@ class DbmService:
         fmt: str,
         caller: CallerInfo,
         database: str | None = None,
+        pg_database: str | None = None,
     ) -> dict:
         """供 agent 导出单表数据，文件落服务端，仅返回下载链接及摘要。
 
@@ -943,6 +997,7 @@ class DbmService:
         from .export import SUPPORTED_FORMATS, export_result
 
         cfg = self.config.get_connection(project, connection)
+        pg_database = self.resolve_pg_database(project, connection, pg_database, cfg)
         if fmt not in SUPPORTED_FORMATS:
             raise ValueError(f"不支持的导出格式 {fmt!r}，可选：{', '.join(SUPPORTED_FORMATS)}")
         if limit < 1:
@@ -968,7 +1023,7 @@ class DbmService:
         ):
             raise ValueError("此连接未绑定默认库，请通过 database 参数选择要导出的库（schema）")
 
-        engine = self.pool.get(project, connection, cfg, schema=database)
+        engine = self.pool.get(project, connection, cfg, schema=database, database=pg_database)
         info = engines.describe_table(engine, table, database)
         available = [str(c["name"]) for c in info["columns"]]
         selected = fields or available
@@ -998,6 +1053,7 @@ class DbmService:
             caller,
             limit,
             schema=database,
+            database=pg_database,
             mask=True,
         )
         data, media_type, ext = export_result(result["columns"], result["rows"], fmt)
@@ -1310,6 +1366,7 @@ class DbmService:
     def analysis_import(
         self, workspace: str, dataset: str, project: str, connection: str, source_sql: str,
         caller: CallerInfo, limit: int | None = None, schema: str | None = None,
+        database: str | None = None,
     ) -> dict:
         """从某连接把查询结果快照进工作区（source_sql 也可为 `SELECT * FROM 表`）。
 
@@ -1318,13 +1375,17 @@ class DbmService:
         from .analysis import DEFAULT_SNAPSHOT_ROWS, MAX_SNAPSHOT_ROWS
         store = self._require_analysis()
         cfg = self.config.get_connection(project, connection)
+        database = self.resolve_pg_database(project, connection, database, cfg)
         if not classify(source_sql, cfg.engine).readonly:
             raise QueryRejected("快照导入仅支持只读查询（SELECT/SHOW/...）")
         n = min(limit or DEFAULT_SNAPSHOT_ROWS, MAX_SNAPSHOT_ROWS)
         run_sql, _, _ = engines.paginate_sql(source_sql, cfg.engine, n, 0)
-        result = self._read(project, connection, cfg, run_sql, caller, n, schema=schema)
+        result = self._read(project, connection, cfg, run_sql, caller, n, schema=schema,
+                            database=database)
         spec = {"kind": "connection", "project": project, "connection": connection,
                 "sql": source_sql, "limit": n, "schema": schema}
+        if database:  # 只在指定了才记，老 provenance 与非 PG 源的形状保持不变
+            spec["database"] = database
         imported = store.import_rows(workspace, dataset, result["columns"], result["rows"],
                                      spec=spec)
         rec = self._analysis_record(workspace, "analysis_import", source_sql, caller)
@@ -1477,7 +1538,8 @@ class DbmService:
                 else:
                     self.analysis_import(workspace, dataset, src["project"], src["connection"],
                                          src["sql"], caller,
-                                         limit=src.get("limit"), schema=src.get("schema"))
+                                         limit=src.get("limit"), schema=src.get("schema"),
+                                         database=src.get("database"))
             except Exception as e:  # noqa: BLE001
                 return {"columns": [], "error": f"上游节点「{dataset}」取数失败：{e}"}
         for st in needed["steps"]:
@@ -1528,7 +1590,8 @@ class DbmService:
                 else:
                     out = self.analysis_import(workspace, src["dataset"], src["project"],
                                                src["connection"], src["sql"], caller,
-                                               limit=src.get("limit"), schema=src.get("schema"))
+                                               limit=src.get("limit"), schema=src.get("schema"),
+                                               database=src.get("database"))
                 done.append({"step": label, "node": node, "ok": True, "rows": out["rows"]})
             except Exception as e:  # noqa: BLE001
                 done.append({"step": label, "node": node, "ok": False, "error": str(e)})
@@ -1589,8 +1652,9 @@ class DbmService:
         reason: str = "",
         change_id: int | None = None,
         rollback_note: str = "",
+        database: str | None = None,
     ) -> dict:
-        """写操作统一入口。
+        """写操作统一入口。database 仅 PG：在哪个 database 上执行（随审批单存下）。
 
         - 只读语句：直接执行（等价于 query）；
         - 写操作 + 无 change_id：评估风险、生成审批单、拒绝并返回 change_id；
@@ -1602,19 +1666,26 @@ class DbmService:
 
         # 带 change_id：一律走审批单核销（指纹校验 + 原子核销），不看重新分类结果——
         # 否则可构造「首提判写→生成审批单、重提判读→走 query() 绕开 consume 的指纹与核销」（H5）。
+        resolved = self.resolve_pg_database(project, connection, database, cfg)
         if change_id is not None:
-            return self._execute_approved(project, connection, cfg, sql, change_id, caller)
+            # 明确指定了库（哪怕指定的就是默认库）才参与核对；没指定就按审批单记的库执行
+            db_check = None if database is None else (resolved or "")
+            return self._execute_approved(project, connection, cfg, sql, change_id, caller,
+                                          database=db_check)
+        database = resolved
 
         verdict = classify(sql, cfg.engine)
         if verdict.statement_kind == "ParseError":
             # 语法预检放在建审批单之前：真语法错的 SQL 不该浪费一次人工审批
             # （审批人批了也只会在 DB 上 1064）。DB 复核认这条语法（或无法复核）时
             # 静默返回，继续走原有的「默认拒绝 → 审批流」，保留方言兜底能力。
-            self._syntax_precheck(project, connection, cfg, sql, caller, "execute")
+            self._syntax_precheck(project, connection, cfg, sql, caller, "execute",
+                                  database=database)
         if verdict.readonly:
-            return {"status": "executed", "readonly": True, **self.query(project, connection, sql, caller)}
+            return {"status": "executed", "readonly": True,
+                    **self.query(project, connection, sql, caller, database=database)}
         return self._request_approval(project, connection, cfg, sql, reason, caller,
-                                      rollback_note=rollback_note)
+                                      rollback_note=rollback_note, database=database)
 
     def _request_approval(
         self,
@@ -1625,10 +1696,12 @@ class DbmService:
         reason: str,
         caller: CallerInfo,
         rollback_note: str = "",
+        database: str | None = None,
     ) -> dict:
-        report = assess(sql, cfg.engine, self._meta_provider(project, connection, cfg))
+        report = assess(sql, cfg.engine,
+                        self._meta_provider(project, connection, cfg, database=database))
         report_dict = report.to_dict()
-        plan = self._try_explain(project, connection, cfg, sql)
+        plan = self._try_explain(project, connection, cfg, sql, database=database)
         if plan:
             report_dict["explain"] = plan
         change = self.approvals.create(
@@ -1644,11 +1717,14 @@ class DbmService:
             agent=caller.agent,
             session_id=caller.session_id,
             rollback_note=rollback_note,
+            database=database,
         )
         rec = self._base_record(project, connection, cfg, "execute", sql, caller)
         rec.change_id = change.id
         rec.status = "rejected"
         rec.detail = f"需人工授权，已生成审批单 #{change.id}（风险 {report.level}）"
+        if database:
+            rec.detail += f" db={database}"
         self.store.record(rec)
         # 审批页直达链接：既随通知下发，也回给 agent（agent 把它贴进会话，人点一下就到
         # 审批页，省掉「自己去后台翻审批列表」这一步）
@@ -1661,7 +1737,8 @@ class DbmService:
         try:
             sql_preview = " ".join(sql.split())[:120]
             self.notifier.send(
-                title=f"新审批单 #{change.id} · {project}/{connection}",
+                title=f"新审批单 #{change.id} · {project}/{connection}"
+                      + (f"/{database}" if database else ""),
                 body=f"风险 {report.level} · agent={caller.agent or 'unknown'}\nSQL: {sql_preview}",
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": project, "connection": connection,
@@ -1673,6 +1750,7 @@ class DbmService:
         return {
             "status": "approval_required",
             "change_id": change.id,
+            **({"pg_database": database} if database else {}),
             "approval_url": approval_url,
             "risk": report_dict,
             "message": (
@@ -1691,7 +1769,10 @@ class DbmService:
         sql: str,
         change_id: int,
         caller: CallerInfo,
+        database: str | None = None,
     ) -> dict:
+        """database：重提时声明的执行库（None=未声明）。只用于与审批单核对，
+        实际执行库永远取审批单里存的那个。"""
         rec = self._base_record(project, connection, cfg, "execute", sql, caller)
         rec.change_id = change_id
         # 同步型审批单存的是计划而非可执行 SQL，走这条路会把计划文本当 SQL 发给 DB
@@ -1701,7 +1782,8 @@ class DbmService:
                               f"请用 sync_table(change_id={change_id}, ...) 执行"}
         try:
             change = self.approvals.consume(
-                change_id, fingerprint(sql, cfg.engine), (project, connection)
+                change_id, fingerprint(sql, cfg.engine), (project, connection),
+                database=database,
             )
         except ApprovalError as e:
             rec.status = "rejected"
@@ -1712,7 +1794,8 @@ class DbmService:
         # 执行审批单里存储的 SQL（不是 agent 重提的文本），用 writer 账号
 
         def _do() -> "engines.QueryResult":
-            engine = self.pool.get(project, connection, cfg, role="writer")
+            engine = self.pool.get(project, connection, cfg, role="writer",
+                                   database=change.database or None)
             return engines.run_write(engine, change.sql)
 
         try:
@@ -1730,6 +1813,8 @@ class DbmService:
 
         rec.status = "ok"
         rec.detail = f"审批单 #{change_id} 已核销（审批人 {change.decided_by}）"
+        if change.database:
+            rec.detail += f" db={change.database}"
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
@@ -1805,6 +1890,11 @@ class DbmService:
         """
         src = self.config.get_connection(spec.source_project, spec.source_connection)
         dst = self.config.get_connection(spec.target_project, spec.target_connection)
+        # 指定了 PG 库就先确认它真实存在（也挡住在非 PG 连接上误传），再去建连接
+        self.resolve_pg_database(spec.source_project, spec.source_connection,
+                                 spec.source_pg_database, src)
+        self.resolve_pg_database(spec.target_project, spec.target_connection,
+                                 spec.target_pg_database, dst)
         if src.engine not in sync.SOURCE_ENGINES:
             raise QueryRejected(f"引擎 {src.engine} 不支持作为同步源（支持 "
                                 f"{'/'.join(sync.SOURCE_ENGINES)}）")
@@ -1833,11 +1923,13 @@ class DbmService:
         src, dst = self._sync_endpoints(spec)
 
         src_info = self.describe_table(spec.source_project, spec.source_connection,
-                                       spec.source_table, caller, schema=spec.source_database)
+                                       spec.source_table, caller, schema=spec.source_database,
+                                       database=spec.source_pg_database)
         src_columns = [c["name"] for c in src_info["columns"]]
 
         target_tables = self.list_tables(spec.target_project, spec.target_connection, caller,
-                                         schema=spec.target_database)
+                                         schema=spec.target_database,
+                                         database=spec.target_pg_database)
         target_exists = spec.target_table in target_tables
         if spec.ddl == sync.DDL_SKIP and not target_exists:
             raise QueryRejected(
@@ -1853,7 +1945,8 @@ class DbmService:
         ):
             source_ddl = self.get_table_ddl(spec.source_project, spec.source_connection,
                                             spec.source_table, caller,
-                                            schema=spec.source_database)
+                                            schema=spec.source_database,
+                                            database=spec.source_pg_database)
             ddl_sql, warnings = sync.rewrite_ddl(source_ddl, src.engine, dst.engine,
                                                  spec.source_table, spec.target_table)
 
@@ -1862,7 +1955,8 @@ class DbmService:
         if spec.data != sync.DATA_NONE and target_exists and spec.ddl != sync.DDL_RECREATE:
             dst_info = self.describe_table(spec.target_project, spec.target_connection,
                                            spec.target_table, caller,
-                                           schema=spec.target_database)
+                                           schema=spec.target_database,
+                                           database=spec.target_pg_database)
             dst_columns = {c["name"] for c in dst_info["columns"]}
             columns = [c for c in src_columns if c in dst_columns]
             missing = [c for c in src_columns if c not in dst_columns]
@@ -1877,8 +1971,8 @@ class DbmService:
             columns = []
 
         # 行数量级只用于让审批人有个"全表多大 / 我取多少"的概念，取不到就不显示
-        meta = self._meta_provider(spec.source_project, spec.source_connection,
-                                   src)(spec.source_table)
+        meta = self._meta_provider(spec.source_project, spec.source_connection, src,
+                                   database=spec.source_pg_database)(spec.source_table)
         row_estimate = getattr(meta, "row_estimate", None) if meta is not None else None
         plan_text = sync.render_plan(
             spec, src.environment, src.engine, dst.environment, dst.engine,
@@ -1934,6 +2028,7 @@ class DbmService:
         target_project: str, target_connection: str,
         tables: list[str], caller: CallerInfo, *,
         source_database: str | None = None, target_database: str | None = None,
+        source_pg_database: str | None = None, target_pg_database: str | None = None,
         ddl: str = sync.DDL_CREATE_IF_MISSING, reason: str = "", dry_run: bool = False,
     ) -> dict:
         """批量**只同步结构、不同步数据**（在本地重建线上库的表结构）。
@@ -1965,6 +2060,8 @@ class DbmService:
                 target_table=name,
                 ddl=ddl, data=sync.DATA_NONE, limit=1,
                 source_database=source_database, target_database=target_database,
+                source_pg_database=(source_pg_database or "").strip() or None,
+                target_pg_database=(target_pg_database or "").strip() or None,
             )
             try:
                 out = self.sync_table(spec, caller, reason=reason, dry_run=dry_run)
@@ -2174,7 +2271,8 @@ class DbmService:
                         ddl: str, caller: CallerInfo) -> None:
         def _do() -> "engines.QueryResult":
             engine = self.pool.get(spec.target_project, spec.target_connection, dst_cfg,
-                                   role="writer", schema=spec.target_database)
+                                   role="writer", schema=spec.target_database,
+                                   database=spec.target_pg_database)
             return engines.run_write(engine, ddl)
 
         self._audited(spec.target_project, spec.target_connection, dst_cfg,
@@ -2191,7 +2289,8 @@ class DbmService:
 
         def _do() -> "engines.QueryResult":
             engine = self.pool.get(spec.source_project, spec.source_connection, src_cfg,
-                                   schema=spec.source_database)
+                                   schema=spec.source_database,
+                                   database=spec.source_pg_database)
             cols, rows, truncated = engines.fetch_rows_for_copy(
                 engine, select_sql, spec.limit, max_bytes=self.sync_max_bytes())
             result["rows"] = rows
@@ -2211,7 +2310,8 @@ class DbmService:
 
         def _do() -> "engines.QueryResult":
             engine = self.pool.get(spec.target_project, spec.target_connection, dst_cfg,
-                                   role="writer", schema=spec.target_database)
+                                   role="writer", schema=spec.target_database,
+                                   database=spec.target_pg_database)
             return engines.insert_rows(engine, spec.target_table, columns, rows,
                                        schema=spec.target_database,
                                        delete_first=spec.data == sync.DATA_REPLACE)
@@ -2243,14 +2343,15 @@ class DbmService:
                 return plan
         return None
 
-    def _meta_provider(self, project: str, connection: str, cfg: ConnectionConfig):
+    def _meta_provider(self, project: str, connection: str, cfg: ConnectionConfig,
+                       database: str | None = None):
         """给风险引擎注入"按表取元数据"的能力；无缓存或取不到时返回 None。"""
         if self.metadata is None:
             return lambda _table: None
 
         def provider(table: str):
             try:
-                return self.metadata.get(project, connection, cfg, table)
+                return self.metadata.get(project, connection, cfg, table, database=database)
             except Exception:
                 return None
 
@@ -2739,10 +2840,12 @@ class DbmService:
         except ai.AIError as e:
             raise QueryRejected(str(e)) from e
 
-    def sample_rows(self, project: str, connection: str, table: str, limit: int, caller: CallerInfo) -> dict:
+    def sample_rows(self, project: str, connection: str, table: str, limit: int,
+                    caller: CallerInfo, database: str | None = None) -> dict:
         cfg = self.config.get_connection(project, connection)
+        database = self.resolve_pg_database(project, connection, database, cfg)
         limit = min(limit, cfg.policy.max_rows)
-        engine = self.pool.get(project, connection, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
 
         def _run() -> dict:
             result = engines.sample_rows(engine, table, limit,
@@ -2977,7 +3080,7 @@ class DbmService:
 
     def _syntax_precheck(
         self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
-        caller: CallerInfo, tool: str,
+        caller: CallerInfo, tool: str, database: str | None = None,
     ) -> None:
         """agent 侧 SQL 的语法预检（仅在 sqlglot 解析失败后调用）。
 
@@ -2991,7 +3094,7 @@ class DbmService:
         if cfg.engine == "redis":
             return
         def _do() -> "engines.SyntaxCheck":
-            engine = self.pool.get(project, connection, cfg)
+            engine = self.pool.get(project, connection, cfg, database=database)
             return engines.dry_run_syntax_check(engine, sql, cfg.engine)
 
         try:
