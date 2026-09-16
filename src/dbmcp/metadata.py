@@ -75,7 +75,8 @@ class MetadataCache:
         refresh: bool = False,
         database: str | None = None,
     ) -> TableMeta:
-        """database：仅 PG——同一连接下不同 database 里的同名表是两张表，缓存要分开。"""
+        """table 可带 schema（`schema.表`）。database：仅 PG——同一连接下不同 database
+        里的同名表是两张表，缓存要分开。"""
         if not refresh:
             cached = self._read(project, connection, table, database)
             if cached is not None and (time.time() - cached.fetched_at) < self._ttl_s:
@@ -92,7 +93,8 @@ class MetadataCache:
         database: str | None = None,
     ) -> TableMeta:
         engine = self._pool.get(project, connection, cfg, database=database)
-        payload = engines.collect_table_meta(engine, cfg.engine, table)
+        schema, _, name = table.rpartition(".")
+        payload = engines.collect_table_meta(engine, cfg.engine, name, schema or None)
         fetched_at = time.time()
         meta = TableMeta(
             table=table,

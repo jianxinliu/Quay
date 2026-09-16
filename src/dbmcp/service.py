@@ -707,7 +707,8 @@ class DbmService:
         stmts = [x.strip() for x in statements if x and x.strip()]
         if not stmts:
             raise ValueError("没有可执行的语句")
-        provider = self._meta_provider(project, connection, cfg, database=database)
+        provider = self._meta_provider(project, connection, cfg, database=database,
+                                       schema=schema)
         writes: list[dict] = []
         level = LEVELS[0]
         for i, sql in enumerate(stmts, 1):
@@ -799,7 +800,8 @@ class DbmService:
         fp = fingerprint(sql, cfg.engine)
         if not confirm:
             report = assess(sql, cfg.engine,
-                            self._meta_provider(project, connection, cfg, database=database))
+                            self._meta_provider(project, connection, cfg, database=database,
+                                                schema=schema))
             report_dict = report.to_dict()
             plan = self._try_explain(project, connection, cfg, sql, schema=schema,
                                      database=database)
@@ -2024,7 +2026,8 @@ class DbmService:
 
         # 行数量级只用于让审批人有个"全表多大 / 我取多少"的概念，取不到就不显示
         meta = self._meta_provider(spec.source_project, spec.source_connection, src,
-                                   database=spec.source_pg_database)(spec.source_table)
+                                   database=spec.source_pg_database,
+                                   schema=spec.source_database)(spec.source_table)
         row_estimate = getattr(meta, "row_estimate", None) if meta is not None else None
         plan_text = sync.render_plan(
             spec, src.environment, src.engine, dst.environment, dst.engine,
@@ -2398,14 +2401,19 @@ class DbmService:
         return None
 
     def _meta_provider(self, project: str, connection: str, cfg: ConnectionConfig,
-                       database: str | None = None):
-        """给风险引擎注入"按表取元数据"的能力；无缓存或取不到时返回 None。"""
+                       database: str | None = None, schema: str | None = None):
+        """给风险引擎注入"按表取元数据"的能力；无缓存或取不到时返回 None。
+
+        schema：执行上下文（查询台右上角选的 schema / 库）。语句里没写 schema 的表
+        就在这里找——SQL 实际也是在它下面执行的。
+        """
         if self.metadata is None:
             return lambda _table: None
 
         def provider(table: str):
+            name = f"{schema}.{table}" if schema and "." not in table else table
             try:
-                return self.metadata.get(project, connection, cfg, table, database=database)
+                return self.metadata.get(project, connection, cfg, name, database=database)
             except Exception:
                 return None
 
