@@ -486,9 +486,10 @@
         var m = this.connMeta, t = this.activeTab;
         var hasSchema = !!m && (m.engine === "mysql" || m.engine === "postgres" || m.engine === "clickhouse")
           && t && t.type === "query";
-        // 右缘一律基于 schemaFloatRight（已动态避开 minimap）；有 schema 选择器时再左移让位
+        // 右缘一律基于 schemaFloatRight（已动态避开 minimap）；有 schema / 库选择器时再左移让位
+        var shift = (hasSchema ? 232 : 0) + (hasSchema && this.serverDbs.length ? 158 : 0);
         return { top: "8px", left: "auto",
-                 right: (this.schemaFloatRight + (hasSchema ? 232 : 0)) + "px" };
+                 right: (this.schemaFloatRight + shift) + "px" };
       },
       filteredDatabases: function () {
         var conn = this.activeTab ? this.activeTab.conn : "";
@@ -551,6 +552,10 @@
           });
         });
         return rows;
+      },
+      // 编辑器右上角的「库」下拉（仅 PG）：当前 tab 在哪个 database 上执行
+      pgDbOptions: function () {
+        return this.serverDbs.map(function (d) { return { value: d, label: d }; });
       },
       dbPickOptions: function () {
         return this.databases.map(function (d) { return { value: d, label: d }; });
@@ -672,7 +677,7 @@
         var id = seq++;
         var tab = { id: id, title: opts.title || ("查询 " + id), conn: opts.conn || def,
                     schema: defSchema || "", type: opts.type || "query", table: opts.table || "",
-                    // PG 的执行库：跟着左树当前选中的库（换库时会统一改写同连接的所有 tab）
+                    // PG 的执行库：新 tab 取左树当前选中的库；之后每个 tab 各自独立
                     db: opts.db != null ? opts.db : (this.pgDbSel[_conn] || ""),
                     sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, errKind: "", running: false,
                     pinned: false, snippetId: opts.snippetId || null,   // 已保存到服务端片段库的 id（⌘S 覆盖同一条）
@@ -860,6 +865,7 @@
           this.applyBookmarks(); this.applyExecGlyph(); this.applyStmtBox();
         }
         if (t && t.conn !== this.lastLoadedConn) this.loadTree();
+        else if (t && t.db && this.serverDbs.length && t.db !== this.pgDb) this.selectPgDb(t.db);
         var self = this;
         this.$nextTick(function () { if (editor && t && t.type === "query") editor.focus(); });
         if (t && t.view === "chart" && t.result) this.renderChart(); else this.disposeChart();
@@ -916,9 +922,11 @@
         var conn = this.activeTab ? this.activeTab.conn
                  : (this.connections[0] ? this.connections[0].value : "");
         var schema = db || "";
+        // PG 不同 database 里可以有同名表：新开的 tab 会落在左树当前库，判重也按它比
+        var pgdb = this.pgDbSel[conn] || "";
         return this.tabs.find(function (t) {
           return t.type === type && t.table === table && (t.schema || "") === schema
-                 && t.conn === conn;
+                 && t.conn === conn && (t.db || "") === pgdb;
         });
       },
       // 双击表 / 右键「打开表数据」：data 型 tab，主区直接是数据网格
@@ -1056,6 +1064,7 @@
           this.openTf = cached.openTf; this.openTbl = cached.openTbl; this.openSub = cached.openSub;
           this.schemaFilter = cached.schemaFilter || "";
           this.rebuildCompletion();
+          if (t.db && this.serverDbs.indexOf(t.db) >= 0 && t.db !== this.pgDb) this.selectPgDb(t.db);
           return;
         }
         if (m && m.engine === "postgres") {
@@ -1064,7 +1073,7 @@
           apiGet("/admin/sql/server_databases?conn=" + encodeURIComponent(t.conn)).then(function (d) {
             if (!d || !d.ok) { self.flash((d && d.error) || "无法列出数据库"); return; }
             self.serverDbs = d.databases || [];
-            var want = self.pgDbSel[t.conn] || m.database || "";
+            var want = t.db || self.pgDbSel[t.conn] || m.database || "";
             if (self.serverDbs.indexOf(want) < 0) want = self.serverDbs[0] || "";
             // 已经选好同一个库就别再走一遍 selectPgDb（会把已加载的 schema 子树清掉重拉）
             if (want && want !== self.pgDb) self.selectPgDb(want);
@@ -1110,14 +1119,21 @@
       // 而且初始化时会用当前库名调一次本方法，做成 toggle 会「刚选中就被自己收起」。
       selectPgDb: function (db) {
         if (!db) return;
+        var t0 = this.activeTab;
+        // 记住的「默认执行 schema」属于原来那个库，换库后新开的 tab 不能再继承它
+        if (t0 && this.pgDb && this.pgDb !== db) delete this.schemaDefault[t0.conn];
         this.pgDb = db;
         var t = this.activeTab;
         if (t) this.pgDbSel[t.conn] = this.pgDb;
         this.databases = []; this.tablesByDb = {}; this.tableMeta = {}; this.tableSizes = {};
         this.openDb = {}; this.openTf = {}; this.openTbl = {}; this.openSub = {};
         this.selected = {};
-        // 执行上下文跟着走：这个连接下所有 tab 的 SQL 都在选中的库里跑
-        this.tabs.forEach(function (tb) { if (t && tb.conn === t.conn) tb.db = this.pgDb; }, this);
+        // 执行上下文只跟着当前这个编辑器 tab 走：每个 tab 各有自己的库（同 DataGrip 的 console），
+        // 数据/DDL tab 绑定的是打开时那张表所在的库，切左树不能把它们改到别的库上去。
+        // 换了库，原来选的 schema 属于旧库，一并清掉回到新库的默认 search_path。
+        if (t && t.type === "query" && t.conn === this.lastLoadedConn && t.db !== db) {
+          t.db = db; t.schema = "";
+        }
         if (this.pgDb) this.fetchSchemas();
         this.persist();
       },
@@ -3123,7 +3139,7 @@
           var tabs = this.tabs.map(function (t) {
             // query tab 的 t.result 是「当前结果页」的镜像，与 results[resultIdx].result 同一份数据，
             // 不再重复持久化（避免翻倍占用 + LRU 估算失真）；restore 时从当前结果页派生。data/ddl tab 无 results，照存。
-            return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
+            return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "", db: t.db || "",
                      type: t.type || "query", table: t.table || "", sql: this.sqlOf(t),
                      result: (t.type || "query") === "query" ? null : t.result,
                      ok: t.ok, err: t.err, pinned: !!t.pinned,
@@ -3150,7 +3166,8 @@
           var activeId = this.activeId;
           var data = { v: 2, tabs: tabs, activeId: activeId, treeCache: this.treeCache,
                        leftW: this.leftW, editorH: this.editorH, dataLogH: this.dataLogH,
-                       schemaShow: this.schemaShow, schemaDefault: this.schemaDefault };
+                       schemaShow: this.schemaShow, schemaDefault: this.schemaDefault,
+                       pgDbSel: this.pgDbSel };
           var LIMIT = 3800000;  // localStorage 预算（~5MB 上限留余量）
           var s = JSON.stringify(data);
           if (s.length > LIMIT) {
@@ -3188,7 +3205,9 @@
           this.tabs = rawTabs.map(function (t) {
             var isQuery = (t.type || "query") === "query";
             var cur = isQuery && t.results ? t.results[t.resultIdx || 0] : null;
+            // 执行库（PG）：老存档里没有这个字段，按该连接上次选中的库补上
             return { id: t.id, title: t.title, conn: t.conn, schema: t.schema || "",
+                     db: t.db != null ? t.db : ((d.pgDbSel || {})[t.conn] || ""),
                      type: t.type || "query", table: t.table || "", sql: t.sql || "",
                      // query tab 的当前结果从当前结果页派生（persist 未存顶层镜像）；data/ddl 直接用存的
                      result: isQuery ? ((cur && cur.result) || null) : (t.result || null),
@@ -3220,6 +3239,7 @@
           if (d.dataLogH != null) this.dataLogH = d.dataLogH;
           this.schemaShow = d.schemaShow || {};
           this.schemaDefault = d.schemaDefault || {};
+          this.pgDbSel = d.pgDbSel || {};
           seq = Math.max.apply(null, this.tabs.map(function (t) { return t.id; })) + 1;
           this.tabs.forEach(function (t) {  // LRU 使用序接续到刷新前的最大值之上，保持单调
             (t.results || []).forEach(function (rt) { if ((rt.used || 0) > useSeq) useSeq = rt.used; });
@@ -3866,7 +3886,12 @@
         </div>
         <!-- 执行 schema 选择器浮在编辑器右上角（原顶部栏整条已去掉） -->
         <label v-if="connMeta && (connMeta.engine==='mysql'||connMeta.engine==='postgres'||connMeta.engine==='clickhouse') && activeTab && activeTab.type==='query'"
-               class="dg-schema-float" :style="{right: schemaFloatRight + 'px'}" title="选择语句执行所在的库 / schema">
+               class="dg-schema-float" :style="{right: schemaFloatRight + 'px'}" title="选择语句执行所在的库 / schema（PostgreSQL 每个 tab 可在不同库上执行）">
+          <template v-if="serverDbs.length">
+            <span class="lb">库</span>
+            <dg-select class="pgdb" :model-value="activeTab.db || pgDb" :options="pgDbOptions"
+                       placeholder="库" @update:model-value="selectPgDb"/>
+          </template>
           <span class="lb">schema</span>
           <dg-select :model-value="activeTab?activeTab.schema:''" :options="schemaOptions"
                      placeholder="未指定" @update:model-value="setSchema"/>

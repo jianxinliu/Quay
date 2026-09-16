@@ -80,9 +80,18 @@ class SyncSpec:
     limit: int = DEFAULT_SYNC_ROWS
     source_database: str | None = None
     target_database: str | None = None
+    # 仅 PG：源/目标连接上要连的 database（上面两个对 PG 指的是 schema）
+    source_pg_database: str | None = None
+    target_pg_database: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # 未指定时不出现在字典里：计划指纹由它算出，升级前已批准的审批单（字典里没有这两个键）
+        # 升级后重提仍要算出同一个指纹
+        for k in ("source_pg_database", "target_pg_database"):
+            if not d[k]:
+                del d[k]
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "SyncSpec":
@@ -102,14 +111,17 @@ def validate_spec(spec: SyncSpec) -> None:
         if not _IDENT_RE.match(name or ""):
             raise SyncError(
                 f"{label}名 {name!r} 不是合法标识符（只允许字母、数字、下划线、$）")
-    for label, name in (("源库", spec.source_database), ("目标库", spec.target_database)):
+    for label, name in (("源库", spec.source_database), ("目标库", spec.target_database),
+                        ("源 PG 库", spec.source_pg_database),
+                        ("目标 PG 库", spec.target_pg_database)):
         if name and not _IDENT_RE.match(name):
             raise SyncError(f"{label}名 {name!r} 不是合法标识符")
     if not 1 <= spec.limit <= MAX_SYNC_ROWS:
         raise SyncError(f"limit 必须在 1..{MAX_SYNC_ROWS} 之间，收到 {spec.limit}")
     same_conn = (spec.source_project, spec.source_connection) == (
         spec.target_project, spec.target_connection)
-    same_place = (spec.source_database or "") == (spec.target_database or "")
+    same_place = ((spec.source_database or "") == (spec.target_database or "")
+                  and (spec.source_pg_database or "") == (spec.target_pg_database or ""))
     if same_conn and same_place and spec.source_table == spec.target_table:
         raise SyncError("源表与目标表是同一张表，无需同步")
 
@@ -265,8 +277,8 @@ def render_plan(
     target_exists: bool, source_row_estimate: int | None,
 ) -> str:
     """把计划渲染成审批页/会话里给人看的一段文本（审批单的 sql 字段存的就是它）。"""
-    src_db = f".{spec.source_database}" if spec.source_database else ""
-    tgt_db = f".{spec.target_database}" if spec.target_database else ""
+    src_db = "".join(f".{x}" for x in (spec.source_pg_database, spec.source_database) if x)
+    tgt_db = "".join(f".{x}" for x in (spec.target_pg_database, spec.target_database) if x)
     est = "未知" if source_row_estimate is None else f"约 {source_row_estimate:,} 行"
     lines = [
         "-- 表同步计划（批准后按本计划重新取数执行）",

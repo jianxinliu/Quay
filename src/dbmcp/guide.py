@@ -44,6 +44,8 @@ USAGE_GUIDE = """\
 ### 探索：我不知道有什么
 - 有哪些库和连接 → `list_projects` → `list_connections`
 - 有哪些表 → `list_tables`（未绑定默认库的连接先 `list_databases`）
+- PostgreSQL 的其它 database → `list_server_databases` 列库，之后各工具传 `pg_database=库名`
+  （PG 一条连接只在一个库里查询；`database` 参数对 PG 是 schema）
 - 表结构 → `describe_table`（字段/类型/索引/主键，最省上下文）
 - 索引怎么建的、有没有分区、字符集/默认值/注释原文 → `table_ddl`（可逗号分隔传多张表）
 - 长什么样 → `sample_rows(limit=10)`。**别用 `SELECT *` 去"看看"一张大表。**

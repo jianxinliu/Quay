@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS change_request (
     engine       TEXT,
     sql          TEXT NOT NULL,       -- 审批与执行的唯一真实来源
     fingerprint  TEXT NOT NULL,
+    database     TEXT,                -- 仅 PG：执行所在的 database（空=连接绑定的库）
     kind         TEXT NOT NULL DEFAULT 'sql',  -- sql（单/多语句）| sync（表同步计划）
     payload      TEXT,                -- JSON：kind=sync 时存 SyncSpec + 建表语句
     reason       TEXT,
@@ -82,6 +83,9 @@ class ChangeRequest:
     rollback_note: str = ""
     kind: str = KIND_SQL
     payload: dict | None = None  # kind=sync 的结构化计划（SyncSpec + ddl_sql + columns）
+    # 仅 PG：SQL 在哪个 database 上执行。与 SQL 一样是「批的是什么就执行什么」的一部分——
+    # 在 A 库批准的 DELETE 不能拿到 B 库去跑。空串 = 连接绑定的库。
+    database: str = ""
     decided_by: str = ""
     decided_at: str = ""
     decision_note: str = ""
@@ -124,6 +128,8 @@ class ApprovalStore:
                 self._conn.execute("ALTER TABLE change_request ADD COLUMN payload TEXT")
             if "rollback_note" not in cols:
                 self._conn.execute("ALTER TABLE change_request ADD COLUMN rollback_note TEXT")
+            if "database" not in cols:
+                self._conn.execute("ALTER TABLE change_request ADD COLUMN database TEXT")
             self._conn.commit()
 
     def create(
@@ -143,6 +149,7 @@ class ApprovalStore:
         rollback_note: str = "",
         kind: str = KIND_SQL,
         payload: dict | None = None,
+        database: str | None = None,
     ) -> ChangeRequest:
         now = datetime.now(UTC)
         expires = now + self._ttl
@@ -151,8 +158,8 @@ class ApprovalStore:
                 """INSERT INTO change_request
                    (created_at, expires_at, project, connection, environment, engine,
                     sql, fingerprint, reason, risk_level, risk_report, agent, session_id, status,
-                    rollback_note, kind, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rollback_note, kind, payload, database)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     now.isoformat(timespec="seconds"),
                     expires.isoformat(timespec="seconds"),
@@ -171,6 +178,7 @@ class ApprovalStore:
                     rollback_note,
                     kind,
                     json.dumps(payload, ensure_ascii=False) if payload else None,
+                    database or None,
                 ),
             )
             self._conn.commit()
@@ -235,7 +243,8 @@ class ApprovalStore:
             self._conn.commit()
         return self.get(change_id)
 
-    def consume(self, change_id: int, resubmit_fingerprint: str, connection_key: tuple[str, str]) -> ChangeRequest:
+    def consume(self, change_id: int, resubmit_fingerprint: str, connection_key: tuple[str, str],
+                database: str | None = None) -> ChangeRequest:
         """校验并核销一张已批准的审批单，返回其存储的 SQL 供执行。
 
         校验：状态 approved 且未过期；project/connection 匹配；重提 SQL 指纹与审批单一致。
@@ -255,6 +264,13 @@ class ApprovalStore:
         if (change.project, change.connection) != connection_key:
             raise ApprovalError(
                 f"审批单 #{change_id} 属于连接 {change.project}/{change.connection}，与本次提交不符"
+            )
+        # 重提时没带库名就按审批单里记的库执行；带了但对不上，说明 agent 以为自己在
+        # 另一个库上——宁可拒绝，也不在它没想到的库里落地。
+        if database is not None and (database or "") != change.database:
+            raise ApprovalError(
+                f"审批单 #{change_id} 批准的是在库 {change.database or '（连接默认库）'} 上执行，"
+                f"本次重提指定的是 {database or '（连接默认库）'}，拒绝执行"
             )
         if change.fingerprint != resubmit_fingerprint:
             what = "同步计划" if change.kind == KIND_SYNC else "SQL"
@@ -327,6 +343,7 @@ class ApprovalStore:
             rollback_note=row["rollback_note"] or "",
             kind=row["kind"] or KIND_SQL,
             payload=json.loads(row["payload"]) if row["payload"] else None,
+            database=row["database"] or "",
             decided_by=row["decided_by"] or "",
             decided_at=row["decided_at"] or "",
             decision_note=row["decision_note"] or "",

@@ -236,6 +236,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 | `begin_session(title, note?)` | 声明本次会话名字/背景；之后本会话的 SQL 在审计页按会话归类 |
 | `list_projects` / `list_connections` | 浏览可用连接（不含账密；Redis 连接不出现在列表里） |
 | `list_databases` | 列库 / schema（连接未绑默认库时先调这个） |
+| `list_server_databases` | PostgreSQL：列服务器上的 database；其它工具传 `pg_database` 即在该库操作 |
 | `query(project, connection, sql)` | 只读 SQL；非只读一律拒绝并审计；缺 LIMIT 自动注入 |
 | `export_table(...)` | 按表导出 CSV / JSON / Markdown / xlsx，返回短期下载链接（正文不进上下文） |
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 写操作：生成审批单并等待批准，批准即自动执行 |

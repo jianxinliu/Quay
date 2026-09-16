@@ -361,6 +361,14 @@ def is_connection_error(exc: BaseException) -> bool:
     if state.startswith("08") or state in _PG_CONNECTION_SQLSTATES:
         return True
 
+    # PG「库不存在」（3D000）：连接时报出的原文是
+    # `connection to server at ... failed: FATAL: database "x" does not exist`，
+    # 恰好命中上面的 "connection to server" 片段。它是参数错误、重连也不会好，
+    # 若判为连接级会把**整条连接**的健康位打成 unavailable、连累其它库上的查询。
+    low = str(exc).lower()
+    if state == "3D000" or ('database "' in low and "does not exist" in low):
+        return False
+
     # 遍历异常继承链：
     # - 严格连接级类名 → True
     # - 名字重叠类（OperationalError 等）→ 必须叠加消息片段才算
