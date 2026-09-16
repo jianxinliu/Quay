@@ -17,6 +17,7 @@ from dbmcp.engines import (
     _col_categories,
     _jsonable,
     _value_category,
+    explainable,
     make_canceller,
     mysql_read_timeout,
     mysql_session_statements,
@@ -391,3 +392,32 @@ class TestPoolDatabaseDimension:
         b = pool.get("p", "c", cfg, database="other")
         assert a is b and len(pool._entries) == 1
         pool.dispose()
+
+
+class TestExplainable:
+    """只有单条 DML / 查询才去取执行计划；DDL 等 EXPLAIN 必然失败，不该往库上白发请求。"""
+
+    @pytest.mark.parametrize("sql", [
+        "UPDATE t SET a = 1 WHERE id = 1",
+        "DELETE FROM t WHERE id = 1",
+        "INSERT INTO t (a) VALUES (1)",
+        "WITH x AS (SELECT 1) UPDATE t SET a = 1",
+        "SELECT * FROM t",
+    ])
+    def test_dml_is_explainable(self, sql):
+        assert explainable(sql, "postgres") is True
+
+    @pytest.mark.parametrize("sql", [
+        "ALTER TABLE console.t ADD COLUMN IF NOT EXISTS gaid VARCHAR(64) NOT NULL DEFAULT ''",
+        "COMMENT ON COLUMN console.t.gaid IS 'x'",
+        "CREATE INDEX idx ON t (a)",
+        "DROP TABLE t",
+        "GRANT SELECT ON t TO u",
+        "UPDATE t SET a = 1; DELETE FROM t",
+        "UPDTE t SET",
+    ])
+    def test_others_are_not(self, sql):
+        assert explainable(sql, "postgres") is False
+
+    def test_mysql_unparenthesized_drop_partition(self):
+        assert explainable("ALTER TABLE t DROP PARTITION p1, p2", "mysql") is False

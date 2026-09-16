@@ -665,6 +665,25 @@ class TestSqlConsole:
         finally:
             svc.pool.get = orig
 
+    def test_ddl_confirm_skips_explain(self, client):
+        """DDL 的写确认不去取执行计划：EXPLAIN 必然失败，还会为此先后连 reader、writer。"""
+        tc, svc = client
+        explained = []
+        import dbmcp.engines as eng
+        orig = eng.explain
+        eng.explain = lambda engine, sql, kind: explained.append(sql) or orig(engine, sql, kind)
+        try:
+            d = tc.post("/admin/sql/run", data={
+                "conn": "demo/main", "sql": "ALTER TABLE users ADD COLUMN extra TEXT"}).json()
+            assert d["ok"] and d["kind"] == "confirm", d
+            assert explained == []
+            d = tc.post("/admin/sql/run", data={
+                "conn": "demo/main", "sql": "DELETE FROM users WHERE id=1"}).json()
+            assert d["kind"] == "confirm" and d["risk"].get("explain"), d
+            assert explained == ["DELETE FROM users WHERE id=1"]
+        finally:
+            eng.explain = orig
+
     def test_format_endpoint(self, client):
         tc, _ = client
         d = tc.post("/admin/sql/format",
