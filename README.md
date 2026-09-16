@@ -293,7 +293,7 @@ uv run dbm serve --stdio
 |---|---|
 | 用后台的人 | **[USER_GUIDE.md](USER_GUIDE.md)** —— 查询台 / Redis / 分析 / 审批操作手册 |
 | 接入的 agent（或写 agent 提示词的人） | 本文 [接入 Agent](#接入-agent)（Claude Code / Codex / Cursor / DeepSeek Harness 等）· **[AGENT_GUIDE.md](AGENT_GUIDE.md)** 工具地图与审批套路 |
-| 想改代码的人 | **[DESIGN.md](DESIGN.md)** 架构与安全设计 · **[ANALYSIS.md](ANALYSIS.md)** 分析工作台 · **[CONTRIBUTING.md](CONTRIBUTING.md)** 开发约定 |
+| 想改代码的人 | **[DESIGN.md](DESIGN.md)** 架构与安全设计 · **[ANALYSIS.md](ANALYSIS.md)** 分析工作台 · **[CONTRIBUTING.md](CONTRIBUTING.md)** 开发约定 · **[LEARN_FROM_DBX.md](LEARN_FROM_DBX.md)** 对照 DBX 的产品化笔记 |
 | 发现安全漏洞 | **[SECURITY.md](SECURITY.md)** —— 请勿开公开 issue |
 
 ## 开发
