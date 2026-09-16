@@ -37,6 +37,7 @@ class TableMetaLike(Protocol):
     indexed_columns: set[str]
 
 
+# 入参是表名；语句里写了 schema/库 时为「schema.表」，否则是裸表名
 MetaProvider = Callable[[str], TableMetaLike | None]
 
 
@@ -120,8 +121,11 @@ def _assess_batch(statements: list[exp.Expression], meta_provider: MetaProvider)
 def _assess_one(stmt: exp.Expression, meta_provider: MetaProvider) -> RiskReport:
     """评估单条已解析语句。"""
     kind = type(stmt).__name__
-    tables = sorted({t.name for t in stmt.find_all(exp.Table) if t.name})
-    report = RiskReport(level="MEDIUM", statement_kind=kind, tables=tables)
+    found = [t for t in stmt.find_all(exp.Table) if t.name]
+    report = RiskReport(level="MEDIUM", statement_kind=kind,
+                        tables=sorted({t.name for t in found}))
+    # 查元数据要带上 schema：只给表名会到默认 schema 里找，`console.t` 这类永远查不到
+    tables = sorted({f"{t.db}.{t.name}" if t.db else t.name for t in found})
 
     if isinstance(stmt, (exp.Drop, exp.TruncateTable)):
         report.level = "CRITICAL"

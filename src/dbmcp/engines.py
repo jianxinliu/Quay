@@ -571,13 +571,15 @@ def truncate_cell(value: Any, max_chars: int) -> Any:
     return value
 
 
-def estimate_row_count(engine: SAEngine, engine_kind: str, table: str) -> int | None:
+def estimate_row_count(engine: SAEngine, engine_kind: str, table: str,
+                       schema: str | None = None) -> int | None:
     """表行数量级估算。优先用引擎统计（避免大表全表 count），取不到再退回精确 count。
 
     - MySQL:    information_schema.tables.table_rows（引擎维护的近似值）
     - Postgres: pg_class.reltuples（analyze 后的近似值，-1 表示未统计）
     - SQLite:   无统计表，直接 count(*)
     调用方必须已校验 table 存在。返回 None 表示无法估算。
+    schema：MySQL/ClickHouse 为库名，PG 为 schema；不传用连接当前的库 / schema。
     """
     try:
         with engine.connect() as conn:
@@ -585,28 +587,32 @@ def estimate_row_count(engine: SAEngine, engine_kind: str, table: str) -> int | 
                 row = conn.execute(
                     text(
                         "SELECT table_rows FROM information_schema.tables"
-                        " WHERE table_schema = DATABASE() AND table_name = :t"
+                        " WHERE table_schema = COALESCE(:s, DATABASE()) AND table_name = :t"
                     ),
-                    {"t": table},
+                    {"t": table, "s": schema},
                 ).fetchone()
                 return int(row[0]) if row and row[0] is not None else None
             if engine_kind == "postgres":
                 row = conn.execute(
-                    text("SELECT reltuples::bigint FROM pg_class WHERE relname = :t"),
-                    {"t": table},
+                    # 必须限定 schema：不同 schema 下的同名表都叫这个 relname
+                    text("SELECT c.reltuples::bigint FROM pg_class c"
+                         " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                         " WHERE c.relname = :t AND n.nspname = COALESCE(:s, current_schema())"),
+                    {"t": table, "s": schema},
                 ).fetchone()
                 if not row or row[0] is None or row[0] < 0:
                     return None
                 return int(row[0])
             if engine_kind == "sqlite":
                 preparer = engine.dialect.identifier_preparer
-                row = conn.execute(text(f"SELECT count(*) FROM {preparer.quote(table)}")).fetchone()
+                qualified = (f"{preparer.quote(schema)}." if schema else "") + preparer.quote(table)
+                row = conn.execute(text(f"SELECT count(*) FROM {qualified}")).fetchone()
                 return int(row[0]) if row else None
             if engine_kind == "clickhouse":
                 row = conn.execute(
                     text("SELECT total_rows FROM system.tables"
-                         " WHERE database = currentDatabase() AND name = :t"),
-                    {"t": table},
+                         " WHERE database = coalesce(:s, currentDatabase()) AND name = :t"),
+                    {"t": table, "s": schema},
                 ).fetchone()
                 return int(row[0]) if row and row[0] is not None else None
     except Exception:
@@ -614,10 +620,11 @@ def estimate_row_count(engine: SAEngine, engine_kind: str, table: str) -> int | 
     return None
 
 
-def collect_table_meta(engine: SAEngine, engine_kind: str, table: str) -> dict:
+def collect_table_meta(engine: SAEngine, engine_kind: str, table: str,
+                       schema: str | None = None) -> dict:
     """采集单表的结构 + 索引 + 行数估算，供元数据缓存与风险评估使用。"""
-    info = describe_table(engine, table)
-    info["row_estimate"] = estimate_row_count(engine, engine_kind, table)
+    info = describe_table(engine, table, schema)
+    info["row_estimate"] = estimate_row_count(engine, engine_kind, table, schema)
     return info
 
 
@@ -752,8 +759,8 @@ def explainable(sql: str, engine_kind: str) -> bool:
     """这条语句值不值得去取执行计划：只有单条 DML / 查询才有计划可看。
 
     DDL、COMMENT、GRANT 之类 EXPLAIN 必然报错，去试只会白白往库上多发请求——
-    写确认要先试 reader 再试 writer，远程生产库上 writer 连接常已被空闲回收，
-    重建连接（可能还要过 SSH 隧道）正是确认框迟迟不出来的主要耗时。
+    取计划要先试 reader 再试 writer，远程库上 writer 连接常已被空闲回收，
+    为一次注定失败的 EXPLAIN 重建连接（可能还要过 SSH 隧道）会明显拖慢写确认。
     """
     import sqlglot  # noqa: PLC0415
     from sqlglot import exp  # noqa: PLC0415
