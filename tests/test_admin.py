@@ -1,5 +1,6 @@
 """管理后台端到端测试：用 Starlette TestClient 打真实 HTTP 路由，跑通审批闭环。"""
 
+import json
 import sqlite3
 
 import pytest
@@ -664,6 +665,67 @@ class TestSqlConsole:
             assert seen == ["reader"]
         finally:
             svc.pool.get = orig
+
+    def test_assess_batch_reads_only(self, client):
+        tc, _ = client
+        d = tc.post("/admin/sql/assess_batch", data={
+            "conn": "demo/main",
+            "stmts": json.dumps(["SELECT 1", "SELECT * FROM users"])}).json()
+        assert d == {"ok": True, "kind": "read", "count": 2}
+
+    def test_assess_batch_single_confirmation_then_runs(self, client):
+        """含写操作：一次性给出每条写的风险与指纹；逐条带各自指纹确认执行即可落库。"""
+        tc, svc = client
+        stmts = ["SELECT count(*) FROM users",
+                 "UPDATE users SET name = 'x' WHERE id = 1",
+                 "DELETE FROM users WHERE id = 2"]
+        d = tc.post("/admin/sql/assess_batch",
+                    data={"conn": "demo/main", "stmts": json.dumps(stmts)}).json()
+        assert d["ok"] and d["kind"] == "confirm" and d["count"] == 3
+        assert [w["index"] for w in d["writes"]] == [2, 3]
+        assert all(w["fingerprint"] and w["risk"]["level"] for w in d["writes"])
+        assert "explain" not in d["writes"][0]["risk"]  # 多条写不逐条取计划
+        for w in d["writes"]:
+            r = tc.post("/admin/sql/run", data={
+                "conn": "demo/main", "sql": w["sql"], "confirm": "1",
+                "expect_fingerprint": w["fingerprint"]}).json()
+            assert r["ok"] and r["kind"] == "write", r
+        rows = tc.post("/admin/sql/run", data={
+            "conn": "demo/main", "sql": "SELECT id, name FROM users ORDER BY id"}).json()["rows"]
+        assert [1, "x"] in rows and all(row[0] != 2 for row in rows)
+
+    def test_assess_batch_fingerprint_still_bound(self, client):
+        """整批确认后若某条 SQL 被改过，带着原指纹执行会被拒。"""
+        tc, _ = client
+        d = tc.post("/admin/sql/assess_batch", data={
+            "conn": "demo/main",
+            "stmts": json.dumps(["SELECT 1", "DELETE FROM users WHERE id = 1"])}).json()
+        fp = d["writes"][0]["fingerprint"]
+        r = tc.post("/admin/sql/run", data={
+            "conn": "demo/main", "sql": "DELETE FROM users", "confirm": "1",
+            "expect_fingerprint": fp}).json()
+        assert not (r.get("ok") and r.get("kind") == "write"), r
+
+    def test_assess_batch_syntax_error_stops_whole_batch(self, client):
+        tc, _ = client
+        d = tc.post("/admin/sql/assess_batch", data={
+            "conn": "demo/main",
+            "stmts": json.dumps(["DELETE FROM users WHERE id = 1", "SELCT oops FRM"])}).json()
+        assert d["ok"] and d["kind"] == "error" and d["index"] == 2
+        assert "整批未执行" in d["error"]
+
+    def test_assess_batch_single_write_has_plan(self, client):
+        tc, _ = client
+        d = tc.post("/admin/sql/assess_batch", data={
+            "conn": "demo/main",
+            "stmts": json.dumps(["SELECT 1", "DELETE FROM users WHERE id = 1"])}).json()
+        assert d["writes"][0]["risk"].get("explain")
+
+    def test_assess_batch_bad_payload(self, client):
+        tc, _ = client
+        d = tc.post("/admin/sql/assess_batch",
+                    data={"conn": "demo/main", "stmts": "not json"}).json()
+        assert d["ok"] is False and "参数错误" in d["error"]
 
     def test_ddl_confirm_skips_explain(self, client):
         """DDL 的写确认不去取执行计划：EXPLAIN 必然失败，还会为此先后连 reader、writer。"""

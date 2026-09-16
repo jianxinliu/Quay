@@ -1067,6 +1067,7 @@
           this.rebuildCompletion();
           this.adoptPgDb(t.conn, this.pgDb);
           if (t.db && this.serverDbs.indexOf(t.db) >= 0 && t.db !== this.pgDb) this.selectPgDb(t.db);
+          if (m && m.engine === "postgres") this.recheckPgDbs(t.conn);
           return;
         }
         if (m && m.engine === "postgres") {
@@ -1075,8 +1076,10 @@
           apiGet("/admin/sql/server_databases?conn=" + encodeURIComponent(t.conn)).then(function (d) {
             if (!d || !d.ok) { self.flash((d && d.error) || "无法列出数据库"); return; }
             self.serverDbs = d.databases || [];
-            var want = t.db || self.pgDbSel[t.conn] || m.database || "";
-            if (self.serverDbs.indexOf(want) < 0) want = self.serverDbs[0] || "";
+            var dbs = self.serverDbs;
+            var want = [t.db, self.pgDbSel[t.conn], m.database].filter(function (x) {
+              return x && dbs.indexOf(x) >= 0;
+            })[0] || dbs[0] || "";
             // 已经选好同一个库就别再走一遍 selectPgDb（会把已加载的 schema 子树清掉重拉）
             if (want && want !== self.pgDb) self.selectPgDb(want);
             else if (want && !self.databases.length) self.fetchSchemas();
@@ -1121,10 +1124,32 @@
       // 而且初始化时会用当前库名调一次本方法，做成 toggle 会「刚选中就被自己收起」。
       // 这个连接下还没有执行库的 tab（升级前存下的、或左树还没加载完时新开的）一律归到左树当前的库。
       // 空串不能当作「连接默认库」：左树显示的是 X，tab 却在默认库上跑，表视图就会报表不存在。
+      // 记着的库已经不在服务器清单里（被删/改名、换了连接配置）同样视为未指定，否则每次执行都报库不存在。
+      // 缓存里的库清单可能早已过时（缓存存在浏览器里，库会被删、被改名）：恢复缓存后
+      // 在后台重拉一次，当前库已不存在就切回一个还在的库，并把指向旧库的 tab 一起改过来
+      recheckPgDbs: function (conn) {
+        var self = this, m = this.connMeta;
+        apiGet("/admin/sql/server_databases?conn=" + encodeURIComponent(conn)).then(function (d) {
+          if (!d || !d.ok || self.lastLoadedConn !== conn) return;
+          var dbs = d.databases || [];
+          self.serverDbs = dbs;
+          if (dbs.indexOf(self.pgDb) >= 0) { self.adoptPgDb(conn, self.pgDb); return; }
+          var t = self.activeTab;
+          var want = [t && t.conn === conn ? t.db : "", m && m.database].filter(function (x) {
+            return x && dbs.indexOf(x) >= 0;
+          })[0] || dbs[0] || "";
+          if (want) self.selectPgDb(want);
+        });
+      },
       adoptPgDb: function (conn, db) {
         if (!conn || !db) return;
         this.pgDbSel[conn] = db;
-        this.tabs.forEach(function (tb) { if (tb.conn === conn && !tb.db) tb.db = db; });
+        var known = this.serverDbs;
+        this.tabs.forEach(function (tb) {
+          if (tb.conn !== conn) return;
+          if (!tb.db) tb.db = db;
+          else if (known.length && known.indexOf(tb.db) < 0) { tb.db = db; tb.schema = ""; }  // schema 属于那个已不存在的库
+        });
       },
       selectPgDb: function (db) {
         if (!db) return;
@@ -1836,10 +1861,7 @@
         if (sqlOverride == null && t.type === "query" && !isPage && !confirm) {
           var items = this.seqItems();
           if (items && items.length > 1) {
-            t.seq = { list: items.map(function (x) { return x.sql; }), i: 0 };
-            t.execMarks = items.map(function (x) { return { line: x.line, state: "" }; });
-            t.execIdx = 0;
-            this.run(false, 0, items[0].sql);
+            this.startBatch(t, items);
             return;
           }
           t.seq = null;
@@ -1859,10 +1881,12 @@
         if (page === 0) t.result = null;
         // 异步任务：查询在服务端执行，切页/刷新不中断；job_id 持久化，回来续接轮询。
         // 数据 tab（双击表名打开）用 parallel=1 → 服务端独立 key 并行，不占用连接串行名额。
-        apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: confirm ? "1" : null,
+        // 整批已确认过的写语句：带 confirm 与这一条自己的指纹（后端逐条核对，改过的 SQL 会被拒）
+        var batchFp = (sqlOverride != null && t.seq && t.seq.fps) ? (t.seq.fps[t.seq.i] || null) : null;
+        apiPost("/admin/sql/run_async", { conn: t.conn, sql: sql, confirm: (confirm || batchFp) ? "1" : null,
                                           page: page, schema: t.schema || null, db: t.db || null,
                                           parallel: t.type === "data" ? "1" : null,
-                                          expect_fingerprint: confData ? (confData.fingerprint || null) : null })
+                                          expect_fingerprint: confData ? (confData.fingerprint || null) : batchFp })
           .then(function (d) {
             // 连接忙被拒绝 / 其它提交错误 → 作为一个「出错结果页」呈现（不是顶部横幅）
             if (!d.ok) { t.running = false; self.setExecGlyph(t, "err"); self.pushOutcome(t, sql, { err: d.error, errKind: d.error_kind }); self.persist(); return; }
@@ -2019,6 +2043,37 @@
           }
         }).catch(function (e) { self.reconnecting = false; self.flash("重连失败：" + e); });
       },
+      // 选中多条执行：先整批评估，含写操作就只确认一次，确认后逐条执行不再询问。
+      // 语法错误在这一步整批拦下——不能前几条已经写进去了才发现后面有一条写错。
+      startBatch: function (t, items) {
+        var self = this, list = items.map(function (x) { return x.sql; });
+        t.seq = null; t.confirm = null; t.err = null; t.ok = null;
+        t.execMarks = items.map(function (x) { return { line: x.line, state: "" }; });
+        t.execIdx = 0;
+        t.running = true; t.jobRunAt = Date.now();   // 评估期间挡住重复触发
+        this.applyExecGlyph();
+        apiPost("/admin/sql/assess_batch", { conn: t.conn, stmts: JSON.stringify(list),
+                                             schema: t.schema || null, db: t.db || null })
+          .then(function (d) {
+            t.running = false;
+            if (!d.ok) { self.pushOutcome(t, list.join(";\n"), { err: d.error, errKind: d.error_kind }); self.persist(); return; }
+            if (d.kind === "error") {
+              t.execIdx = d.index - 1; self.setExecGlyph(t, "err");
+              self.pushOutcome(t, list[d.index - 1], { err: d.error }); self.persist(); return;
+            }
+            t.seq = { list: list, i: 0, fps: {} };
+            if (d.kind === "confirm") {
+              t.seq.batchWrites = d.writes;
+              t.seq.awaitConfirm = true;
+              t.confirm = { batch: { count: d.count, writes: d.writes },
+                            risk: { level: d.level }, prod: !!d.prod, fingerprint: "",
+                            statement_kind: d.count + " 条语句，其中 " + d.writes.length + " 条写操作" };
+              self.persist();
+              return;
+            }
+            self.run(false, 0, list[0]);
+          }).catch(function (e) { t.running = false; self.pushOutcome(t, list.join(";\n"), { err: "" + e }); });
+      },
       // 多语句顺序执行的推进：上一条成功(ok=true)则跑下一条；失败/取消则中止整个序列。
       _seqAdvance: function (t, ok) {
         if (!t || !t.seq) return;
@@ -2099,6 +2154,14 @@
       },
       confirmRun: function () {
         var t = this.activeTab; if (!t || !t.confirm) return;
+        if (t.confirm.batch && t.seq) {
+          // 整批确认：记下每条写语句的指纹，之后逐条带 confirm 执行，不再逐条询问
+          t.seq.batchWrites.forEach(function (w) { t.seq.fps[w.index - 1] = w.fingerprint; });
+          t.seq.awaitConfirm = false;
+          t.confirm = null;
+          this.run(false, 0, t.seq.list[0]);
+          return;
+        }
         this.run(true);  // run() 会捕获 t.confirm 后再清空，指纹随请求带出
       },
       // data tab：WHERE 条应用 / 列头点击循环排序（走 SQL 重查第 0 页）
@@ -4005,7 +4068,18 @@
         <div v-if="activeTab.confirm" class="dg-confirm">
           <h4>确认执行写操作 <span class="lv" :style="{background: lvColor(activeTab.confirm.risk.level)}">{{ activeTab.confirm.risk.level }}</span> <span style="color:var(--dg-muted);font-weight:normal">{{ activeTab.confirm.statement_kind }}</span></h4>
           <div style="font-size:12px;color:var(--dg-muted)">将用 writer 账号<b>直接执行</b>并记入审计（后台旁路，不进审批单）。</div>
-          <div class="kv"><span>影响表：{{ (activeTab.confirm.risk.tables||[]).join(", ")||"—" }}</span><span>表行量级：{{ numOr(activeTab.confirm.risk.row_estimate) }}</span><span>含 WHERE：{{ boolText(activeTab.confirm.risk.has_where) }}</span><span>命中索引：{{ boolText(activeTab.confirm.risk.uses_index) }}</span></div>
+          <div v-if="activeTab.confirm.batch" class="dg-batch">
+            <div v-for="w in activeTab.confirm.batch.writes" :key="w.index" class="dg-batch-item">
+              <div class="hd"><span class="no">#{{ w.index }}</span>
+                <span class="lv" :style="{background: lvColor(w.risk.level)}">{{ w.risk.level }}</span>
+                <span class="kind">{{ w.statement_kind }}</span>
+                <span class="tb">{{ (w.risk.tables||[]).join(", ") }}</span></div>
+              <code class="sql">{{ w.sql }}</code>
+              <div class="reasons" v-for="r in (w.risk.reasons||[])" :key="r">• {{ r }}</div>
+            </div>
+            <div class="note">确认后按顺序执行全部 {{ activeTab.confirm.batch.count }} 条，中途不再询问；任一条出错即停止，已执行的不会回滚。</div>
+          </div>
+          <div v-else class="kv"><span>影响表：{{ (activeTab.confirm.risk.tables||[]).join(", ")||"—" }}</span><span>表行量级：{{ numOr(activeTab.confirm.risk.row_estimate) }}</span><span>含 WHERE：{{ boolText(activeTab.confirm.risk.has_where) }}</span><span>命中索引：{{ boolText(activeTab.confirm.risk.uses_index) }}</span></div>
           <div class="reasons" v-for="r in (activeTab.confirm.risk.reasons||[])" :key="r">• {{ r }}</div>
           <div v-if="activeTab.confirm.prod" class="dg-prod-warn">⚠ 生产环境写操作 —— 将直接影响线上数据，请确认无误。</div>
           <div class="acts"><button class="dg-btn ok"

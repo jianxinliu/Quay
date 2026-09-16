@@ -422,6 +422,16 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-confirm .lv { padding: 1px 8px; border-radius: 5px; font-size: 11px; font-family: var(--dg-mono); color: #fff; }
 .dg-confirm .kv { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: var(--dg-muted); margin: 4px 0; }
 .dg-confirm .reasons { font-size: 12px; color: var(--dg-text); margin: 4px 0; }
+.dg-batch { max-height: 260px; overflow: auto; margin: 6px 0; }
+.dg-batch-item { padding: 6px 0; border-top: 1px solid var(--dg-border); }
+.dg-batch-item:first-child { border-top: 0; }
+.dg-batch-item .hd { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.dg-batch-item .no { font-family: var(--dg-mono); color: var(--dg-faint); }
+.dg-batch-item .kind { color: var(--dg-muted); }
+.dg-batch-item .tb { font-family: var(--dg-mono); color: var(--dg-text); }
+.dg-batch-item .sql { display: block; margin: 3px 0; font-family: var(--dg-mono); font-size: 11.5px;
+  color: var(--dg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dg-batch .note { font-size: 12px; color: var(--dg-muted); margin-top: 6px; }
 .dg-confirm .acts { margin-top: 8px; display: flex; gap: 8px; }
 .dg-confirm .acts .ok { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
 /* 浅色主题：确认框原用深色琥珀底，在白底上刺眼且文字看不清 → 换浅琥珀底 + 深色文字 */
