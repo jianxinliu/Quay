@@ -1432,3 +1432,47 @@ def test_workflows_js_openschedule_ignores_event_object():
         "openSchedule 必须先判 nameOverride 是字符串再用，否则详情页 @click 传"
         "的 MouseEvent 会被当成 workflow name 送到后端。"
     )
+
+
+# ==================== 数据库体检：管理后台接口 ====================
+
+def test_checkup_route_returns_report(client):
+    """GET /admin/sql/checkup 与 agent 的 db_checkup 同一套逻辑，查询台「体检」按钮调它。"""
+    tc, _ = client
+    r = tc.get("/admin/sql/checkup", params={"conn": "demo/main"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["ok"] is True
+    rep = d["report"]
+    assert rep["engine"] == "sqlite"
+    assert rep["overall"] in ("ok", "info", "warn", "critical", "unknown")
+    assert rep["checks"] and all("status" in c and "message" in c for c in rep["checks"])
+
+
+def test_checkup_route_passes_db_param(client):
+    """db 查询参数（仅 PG）要透传到服务层，不传时为 None——前端 PG 体检带当前 database。"""
+    tc, svc = client
+    seen = {}
+    orig = svc.db_checkup
+
+    def spy(project, connection, caller, schema=None, database=None):
+        seen["database"] = database
+        seen["schema"] = schema
+        return orig(project, connection, caller, schema=schema, database=database)
+
+    svc.db_checkup = spy
+    try:
+        r = tc.get("/admin/sql/checkup",
+                   params={"conn": "demo/main", "schema": "myschema", "db": "mydb"})
+        assert r.status_code == 200, r.text
+    finally:
+        svc.db_checkup = orig
+    assert seen["schema"] == "myschema"
+    assert seen["database"] == "mydb"
+
+
+def test_checkup_route_rejects_unknown_conn(client):
+    tc, _ = client
+    r = tc.get("/admin/sql/checkup", params={"conn": "demo/nope"})
+    assert r.status_code == 400
+    assert r.json()["ok"] is False

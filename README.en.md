@@ -241,6 +241,7 @@ Whichever of the three channels is used, the change request keeps a complete rec
 | `wait_for_change(change_id)` / `get_change_status(change_id)` | Keep waiting after a timeout / inspect the change request immediately |
 | `sync_table(...)` | Copy a table from one database to another (typically production → local): structure plus a bounded slice of rows; same approval flow as `execute`; the target cannot be prod |
 | `list_tables` / `describe_table` / `sample_rows` | Explore schema |
+| `db_checkup(project, connection, database?, pg_database?)` | Database health check: returns a structured diagnostic report in one call (connections / cache hit ratio / long queries / locks / replication lag / biggest tables…). Each check degrades gracefully — an item that can't be measured is marked `unknown` with the reason instead of failing the report. |
 | `test_connection` | Connectivity check |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB cross-source analysis (fetches audited and row-capped, computation free in the sandbox) |
 | `save_workflow` / `run_workflow` | Persist an analysis as a re-runnable workflow (script or DAG canvas) |

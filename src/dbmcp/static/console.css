@@ -86,7 +86,10 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 
 /* ---------- 左栏：连接 / 表 / 片段 ---------- */
 .dg-left { display: flex; flex-direction: column; border-right: 1px solid var(--dg-border); overflow: hidden; flex: none; }
-.dg-conn { padding: 10px; border-bottom: 1px solid var(--dg-border); }
+.dg-conn { padding: 10px; border-bottom: 1px solid var(--dg-border);
+  display: flex; align-items: center; gap: 6px; }
+.dg-conn .dg-sel { flex: 1; min-width: 0; }
+.dg-conn .ck-btn { flex: none; padding: 5px 10px; font-size: 12px; }
 /* ==================== 左栏 ====================
    重做前的问题（用户反馈「不够清晰，不够美观」）：
    ① 区标题（表/书签/工作流/历史/片段）是 10.5px 的 --dg-faint 等宽字，还套了对中文无效的
@@ -1080,3 +1083,113 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-ai-turns { color: var(--dg-muted); margin: 4px 0; border-left: 2px solid var(--dg-border);
   padding-left: 8px; max-height: 68px; overflow-y: auto; }
 .dg-ai-turns .row { padding: 1px 0; color: var(--dg-text); }
+
+
+/* ---------- 数据库体检报告浮层 ----------
+   深色 UI 不整块翻亮色：状态靠「圆点 + 描边徽章 + 淡底」传达，文字提亮为主。
+   五态配色只用一套：ok 绿 / info 蓝 / warn 琥珀 / critical 红 / unknown 灰。 */
+.dg-checkup { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.45);
+  display: flex; justify-content: center; align-items: flex-start; padding-top: 8vh; }
+.dg-checkup .box { width: 620px; max-width: 94vw; max-height: 84vh; display: flex; flex-direction: column;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.5); overflow: hidden; }
+.dg-checkup .hd { display: flex; align-items: baseline; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--dg-border); }
+.dg-checkup .hd .t { font-weight: 600; color: var(--dg-text); font-size: 13px; }
+.dg-checkup .hd .sub { color: var(--dg-muted); font-size: 11.5px; font-family: var(--dg-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dg-checkup .hd .x { margin-left: auto; cursor: pointer; color: var(--dg-muted); padding: 0 4px; }
+.dg-checkup .hd .x:hover { color: var(--dg-red); }
+.dg-checkup .ck-loading { padding: 26px 14px; color: var(--dg-muted); display: flex; align-items: center;
+  justify-content: center; gap: 8px; }
+.dg-checkup .spin { width: 13px; height: 13px; border: 2px solid var(--dg-border);
+  border-top-color: var(--dg-accent); border-radius: 50%; animation: dg-spin 0.8s linear infinite; }
+@keyframes dg-spin { to { transform: rotate(360deg); } }
+.dg-checkup .ck-err { padding: 20px 14px; color: var(--dg-red); font-family: var(--dg-mono);
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.dg-checkup .ck-sum { display: flex; align-items: center; gap: 9px; padding: 9px 14px;
+  border-bottom: 1px solid var(--dg-border); background: var(--dg-bg); flex-wrap: wrap; }
+.dg-checkup .ck-sum .txt { color: var(--dg-text); font-size: 12.5px; }
+.dg-checkup .ck-sum .meta { color: var(--dg-faint); font-size: 11px; font-family: var(--dg-mono); }
+.dg-checkup .ck-sum .dots { display: flex; gap: 9px; margin-left: auto; align-items: center; }
+.dg-checkup .dotcount { display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; font-family: var(--dg-mono); color: var(--dg-faint); }
+.dg-checkup .dotcount .dot { width: 6px; height: 6px; border-radius: 50%; }
+/* 权限缺口横幅：不整块翻亮，淡琥珀底 + 描边 + 可复制的 GRANT 块 */
+.dg-checkup .ck-priv { margin: 8px 14px 2px; padding: 8px 10px; border-radius: 6px;
+  border: 1px solid rgba(217,163,67,.4); background: rgba(217,163,67,.06); }
+.dg-checkup .ck-priv-hd { color: var(--dg-amber); font-size: 11.5px; font-weight: 600; margin-bottom: 6px; }
+.dg-checkup .ck-priv-t { color: var(--dg-muted); font-size: 11px; }
+.dg-checkup .ck-priv-t b { color: var(--dg-text); font-family: var(--dg-mono); font-weight: 600; }
+.dg-checkup .ck-priv-grant { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.dg-checkup .ck-priv-grant { font-family: var(--dg-mono); font-size: 11px; color: var(--dg-text);
+  background: var(--dg-panel-2); border: 1px solid var(--dg-border); border-radius: 4px;
+  padding: 4px 8px; }
+.dg-checkup .ck-priv-grant button { margin-left: auto; flex: none; }
+/* 操作栏的小按钮 */
+.dg-checkup .ft { display: flex; align-items: center; gap: 8px; }
+.dg-checkup .ck-mini { flex: none; font-size: 11px; color: var(--dg-muted); border: 1px solid var(--dg-border);
+  background: var(--dg-panel-2); border-radius: 4px; padding: 2px 9px; cursor: pointer; }
+.dg-checkup .ck-mini:hover:not(:disabled) { color: var(--dg-text); border-color: var(--dg-accent); }
+.dg-checkup .ck-mini:disabled { opacity: .5; cursor: default; }
+.dg-checkup .ft-note { color: var(--dg-faint); font-size: 11px; }
+/* 维度组头里的圆点复用五态配色 */
+.dg-checkup .ck-dim-hd .dot.st-ok { background: var(--dg-green); }
+.dg-checkup .ck-dim-hd .dot.st-info { background: var(--dg-accent); }
+.dg-checkup .ck-dim-hd .dot.st-warn { background: var(--dg-amber); }
+.dg-checkup .ck-dim-hd .dot.st-critical { background: var(--dg-red); }
+.dg-checkup .ck-dim-hd .dot.st-unknown { background: var(--dg-faint); }
+.dg-checkup .dotcount .dot.st-ok { background: var(--dg-green); }
+.dg-checkup .dotcount .dot.st-info { background: var(--dg-accent); }
+.dg-checkup .dotcount .dot.st-warn { background: var(--dg-amber); }
+.dg-checkup .dotcount .dot.st-critical { background: var(--dg-red); }
+.dg-checkup .dotcount .dot.st-unknown { background: var(--dg-faint); }
+.dg-checkup .ck-badge { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 1px 8px;
+  border: 1px solid; flex: none; }
+.dg-checkup .ck-list { flex: 1; min-height: 0; overflow: auto; }
+/* 维度分组：组头是小标题不是普通行（中文层级靠字重/字号/分界线，不用 uppercase） */
+.dg-checkup .ck-dim { border-bottom: 1px solid var(--dg-border); }
+.dg-checkup .ck-dim:last-child { border-bottom: none; }
+.dg-checkup .ck-dim-hd { display: flex; align-items: center; gap: 7px;
+  padding: 7px 14px 4px; color: var(--dg-text); font-weight: 600; font-size: 11.5px;
+  background: rgba(255,255,255,.02); }
+.dg-checkup .ck-dim-t { letter-spacing: .3px; }
+.dg-checkup .ck-dim-cnt { margin-left: auto; font-size: 10.5px; font-weight: 500;
+  color: var(--dg-amber); border: 1px solid rgba(217,163,67,.45); background: rgba(217,163,67,.1);
+  border-radius: 3px; padding: 0 6px; }
+.dg-checkup .ck-dim-cnt.muted { color: var(--dg-faint); border-color: var(--dg-border); background: var(--dg-panel-2); }
+.dg-checkup .ck-dim-hd .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dg-checkup .ck-row { padding: 8px 14px 8px 22px; border-bottom: 1px solid var(--dg-border); }
+.dg-checkup .ck-dim .ck-row:last-child { border-bottom: none; }
+.dg-checkup .ck-row .r1 { display: flex; align-items: center; gap: 7px; }
+.dg-checkup .ck-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dg-checkup .ck-row .ti { color: var(--dg-text); font-size: 12.5px; }
+.dg-checkup .ck-row .val { color: var(--dg-text); font-family: var(--dg-mono); font-size: 11.5px;
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dg-checkup .ck-row .lab { margin-left: auto; flex: none; font-size: 10.5px; border-radius: 3px;
+  padding: 0 6px; border: 1px solid; }
+.dg-checkup .ck-row .msg { color: var(--dg-muted); font-size: 11.5px; padding: 3px 0 0 14px;
+  white-space: normal; word-break: break-word; }
+.dg-checkup .ck-row .det { padding: 3px 0 0 14px; color: var(--dg-faint); font-size: 11px;
+  font-family: var(--dg-mono); line-height: 1.55; }
+.dg-checkup .ft { padding: 7px 14px; border-top: 1px solid var(--dg-border); color: var(--dg-faint);
+  font-size: 11px; }
+/* 五态：底色极淡，靠圆点/徽章描边与文字色拉开层级（深色 UI 不整块翻亮） */
+.dg-checkup .st-ok { color: var(--dg-green); }
+.dg-checkup .st-info { color: var(--dg-accent); }
+.dg-checkup .st-warn { color: var(--dg-amber); }
+.dg-checkup .st-critical { color: var(--dg-red); }
+.dg-checkup .st-unknown { color: var(--dg-faint); }
+.dg-checkup .ck-badge.st-ok, .dg-checkup .lab.st-ok { background: rgba(87,150,92,.14); border-color: rgba(87,150,92,.5); }
+.dg-checkup .ck-badge.st-info, .dg-checkup .lab.st-info { background: var(--dg-accent-soft); border-color: rgba(90,130,240,.5); }
+.dg-checkup .ck-badge.st-warn, .dg-checkup .lab.st-warn { background: rgba(217,163,67,.13); border-color: rgba(217,163,67,.5); }
+.dg-checkup .ck-badge.st-critical, .dg-checkup .lab.st-critical { background: rgba(217,83,79,.14); border-color: rgba(217,83,79,.55); }
+.dg-checkup .ck-badge.st-unknown, .dg-checkup .lab.st-unknown { background: var(--dg-panel-2); border-color: var(--dg-border); }
+.dg-checkup .ck-row.st-critical { background: rgba(217,83,79,.06); }
+.dg-checkup .ck-row.st-warn { background: rgba(217,163,67,.05); }
+.dg-checkup .ck-row .dot.st-ok { background: var(--dg-green); }
+.dg-checkup .ck-row .dot.st-info { background: var(--dg-accent); }
+.dg-checkup .ck-row .dot.st-warn { background: var(--dg-amber); }
+.dg-checkup .ck-row .dot.st-critical { background: var(--dg-red); }
+.dg-checkup .ck-row .dot.st-unknown { background: var(--dg-faint); }
+.theme-light .dg-checkup .box { box-shadow: 0 10px 32px rgba(0,0,0,.18); }

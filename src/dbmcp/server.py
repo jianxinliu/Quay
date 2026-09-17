@@ -401,6 +401,10 @@ def build_mcp(service: DbmService) -> FastMCP:
             "只看真正落地的改动加 writes_only=True, status=\"ok\"。"
             "先用 list_projects / list_connections 找到目标连接，"
             "用 list_tables / describe_table / sample_rows 探索 schema。"
+            "想知道「这台 DB 健康吗」用 db_checkup：一次返回结构化诊断报告"
+            "（连接占用/缓存命中率/长查询/锁等待/复制延迟/大表等，按引擎提供不同项），"
+            "不必自己多轮 SQL 摸底；逐项容错，取不到数据的项标 unknown 并写明原因"
+            "（如只读账号无 pg_monitor 权限），overall 是最严重项的状态。"
             "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
             "PostgreSQL 一条连接只能在一个 database 里查询：用 list_server_databases 看有哪些库，"
             "再给 query/execute/list_tables 等工具传 pg_database=库名 即在该库操作"
@@ -1021,6 +1025,47 @@ def build_mcp(service: DbmService) -> FastMCP:
             db = service.resolve_pg_database(project, connection, pg_database)
             return service.describe_table(
                 project, connection, table, _caller_from_ctx(ctx), schema=database, database=db
+            )
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+
+    @mcp.tool
+    def db_checkup(
+        project: str,
+        connection: str,
+        database: Annotated[
+            str | None,
+            Field(description="体检的库/schema（MySQL/ClickHouse 为库，PostgreSQL 为 schema）；"
+                              "不传时用连接默认库"),
+        ] = None,
+        pg_database: PgDatabase = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """数据库体检：一次调用拿到结构化诊断报告，不必为「这台 DB 健康吗」多轮 SQL 摸底。
+
+        按引擎提供一组只读诊断项（逐项容错，某项取不到数据只会标成 unknown 并说明原因，
+        不会让整份报告失败）：
+
+        - **MySQL**（16 项）：连接占用（含被 max_connections 拒绝的次数）、活跃线程、
+          InnoDB 缓冲池命中率与压力、缓冲池 vs 数据量、慢查询、全表扫描 JOIN、临时表落盘、
+          异常断连、死锁、长查询、行锁等待、无主键表、大事务落盘、复制延迟、大表 TOP5
+        - **PostgreSQL**（16 项）：连接占用、空闲事务、长查询、等待事件、缓存命中率、
+          临时文件落盘、死锁、死元组膨胀、统计信息过期、未使用索引、复制延迟、复制槽健康度
+          （wal_status）、WAL 归档失败、事务 ID 回卷风险、库与大表大小
+        - **ClickHouse**（8 项）：磁盘健康（is_broken/只读/剩余空间）、核心指标、失败查询、
+          副本同步队列（会话过期/log_pointer 落后）、活跃 part 数、未完成 mutation、大表 TOP5
+        - **SQLite**：完整性检查、空闲页碎片、日志模式、表行数
+
+        每项含 status（ok / info / warn / critical / unknown）、归属维度、人可读的 value
+        与解读建议；overall 是其中最严重的状态。**status=unknown 表示「没测到」而非「正常」**
+        ——视图选型已尽量避开权限门槛（MySQL 长查询/锁等待走 performance_schema，无需 PROCESS；
+        PG 连接占用/复制槽/统计类视图只读可见），真正缺权限的项会在报告的 privileges 里
+        汇总成可复制的 GRANT 语句（如 `GRANT pg_monitor TO ...`）。
+        """
+        try:
+            db = service.resolve_pg_database(project, connection, pg_database)
+            return service.db_checkup(
+                project, connection, _caller_from_ctx(ctx), schema=database, database=db
             )
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e

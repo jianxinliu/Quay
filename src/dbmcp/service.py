@@ -26,7 +26,7 @@ from .metadata import MetadataCache
 from .budget import SessionBudget
 from .metrics import LiveOps
 from .notify import NoopNotifier, Notifier
-from . import engines, privileges, redis_engine, sync
+from . import checkup, engines, privileges, redis_engine, sync
 
 if TYPE_CHECKING:
     from .snippets import SnippetStore
@@ -2702,6 +2702,30 @@ class DbmService:
         engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "search_tables", q, caller,
                              lambda: engines.search_tables(engine, cfg.engine, q))
+
+    def db_checkup(
+        self, project: str, connection: str, caller: CallerInfo,
+        schema: str | None = None, database: str | None = None,
+    ) -> dict:
+        """数据库体检：一次调用拿到结构化诊断报告。
+
+        覆盖连接占用、缓存命中率、长查询、锁等待、空闲事务、死锁、复制延迟、大表等
+        常见健康指标（按引擎提供不同项），逐项容错——取不到数据的指标标 unknown
+        并说明原因（如权限不足），不影响其它项。agent 不必再为此多轮 SQL 摸底。
+
+        schema 为 MySQL/ClickHouse 的库名、PG 的 schema（不传用连接默认库）；
+        database 仅 PG，指定在哪个 database 上体检。
+        """
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine == "redis":
+            raise ValueError(
+                "Redis 连接不支持体检（Redis 不对 agent 开放，请在管理后台的 Redis 控制台操作）")
+        engine = self.pool.get(project, connection, cfg, database=database)
+        scope = schema or cfg.database
+        return self._audited(
+            project, connection, cfg, "checkup", scope or "", caller,
+            lambda: checkup.run_checkup(engine, cfg.engine, scope).to_dict(),
+        )
 
     def admin_table_sizes(
         self, project: str, connection: str, caller: CallerInfo, schema: str | None = None,

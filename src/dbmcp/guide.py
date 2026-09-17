@@ -50,6 +50,21 @@ USAGE_GUIDE = """\
 - 索引怎么建的、有没有分区、字符集/默认值/注释原文 → `table_ddl`（可逗号分隔传多张表）
 - 长什么样 → `sample_rows(limit=10)`。**别用 `SELECT *` 去"看看"一张大表。**
 
+### 体检：这台 DB 健康吗
+→ `db_checkup`。一次返回结构化诊断报告，**不要**自己一轮轮 `query` 去摸底（每轮都耗一次
+往返 + 上下文，还容易漏掉不知道该查的指标）。
+- 覆盖：连接占用、缓存命中率、慢查询/长查询、锁等待与死锁、空闲事务、复制延迟、大表 TOP5
+  （按引擎不同：MySQL 16 项 / PostgreSQL 16 项 / ClickHouse 8 项 / SQLite 5 项）。
+- 视图选型已避开多数权限门槛：MySQL 长查询/锁等待走 performance_schema（无需 PROCESS），
+  PG 连接占用/复制槽/统计类视图对只读账号可见；真缺权限的项会在报告 privileges 里汇总成
+  可复制的 GRANT 语句——把 unknown 当「待确认」而非「正常」，需要时把 GRANT 给用户即可。
+- 每项给 `status`（ok / info / warn / critical / unknown）+ 人可读的 `value` + 解读建议，
+  `overall` 是其中最严重的状态——**先看 overall 与 summary，再挑 warn/critical 的项看详情**。
+- **`unknown` 是「没测到」，不是「正常」**：常见原因是只读账号权限不足（如 PG 无
+  `pg_monitor` 看不到其它会话、MySQL 看不全 PROCESSLIST），报告里会写清原因。这时不要把
+  unknown 当成健康证据，也不必自己补查——把结论告诉用户、让他决定要不要给账号提权即可。
+- 只读、免审批。PG 传 `pg_database` 指定在哪个库上体检。
+
 ### 查询：我要拿数
 - 普通查询 → `query`。大表**必须**带 WHERE 或 LIMIT。
 - 统计/汇总 → 聚合写进 SQL（GROUP BY / SUM / COUNT），别把明细拉回来自己数。

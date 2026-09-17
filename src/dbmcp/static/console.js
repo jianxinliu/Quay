@@ -403,6 +403,7 @@
         schemaFloatRight: 16,   // schema 浮层距编辑器右缘距离（动态避开 minimap）
         aiEnabled: false,       // 系统设置：AI 辅助写 SQL 是否开启（决定「✨ AI」按钮是否出现）
         aiPanel: null,          // AI 生成面板：{question, explain, samples, tables, picked, filter, loading, running, error}
+        checkup: null,          // 数据库体检浮层：{status:'loading'|'report'|'error', report, error, connLabel}
       };
     },
     computed: {
@@ -611,6 +612,28 @@
         var t = this.activeTab;
         if (!t || !t.result) return [];
         return t.result.columns.map(function (c) { return { value: c, label: c }; });
+      },
+      // 体检报告按维度分组、组内按严重度排序（平铺列表扫起来没结构，有问题的项也不突出）。
+      // 维度顺序沿用后端 report.dimensions，后端加维度时前端自动跟上。
+      checkupGroups: function () {
+        var rep = this.checkup && this.checkup.report;
+        if (!rep || !rep.checks) return [];
+        var dims = rep.dimensions || [],
+            order = dims.map(function (d) { return d.name; }),
+            titles = {};
+        dims.forEach(function (d) { titles[d.name] = d.title; });
+        var buckets = {};
+        rep.checks.forEach(function (c) {
+          var dim = order.indexOf(c.dimension) >= 0 ? c.dimension : "maintenance";
+          (buckets[dim] = buckets[dim] || []).push(c);
+        });
+        var RANK = { critical: 0, warn: 1, unknown: 2, ok: 3, info: 4 };
+        return order.filter(function (k) { return buckets[k] && buckets[k].length; })
+          .map(function (k) {
+            var cs = buckets[k].slice().sort(function (a, b) { return RANK[a.status] - RANK[b.status]; });
+            var problems = cs.filter(function (c) { return c.status === "critical" || c.status === "warn"; }).length;
+            return { name: k, title: titles[k] || k, checks: cs, worst: cs[0].status, problems: problems };
+          });
       },
     },
     methods: {
@@ -2042,6 +2065,81 @@
             self.loadHealth();   // 失败也刷新：告警条上给出下一次自动重试的倒计时
           }
         }).catch(function (e) { self.reconnecting = false; self.flash("重连失败：" + e); });
+      },
+      // ---------- 数据库体检 ----------
+      // 连接栏「体检」：一次拉回结构化诊断报告（连接/缓存/长查询/锁/复制/大表…），
+      // 免去用户自己一轮轮写诊断 SQL。逐项只读，权限不足的指标服务端标 unknown 而非报错。
+      runCheckup: function () {
+        var t = this.activeTab;
+        if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        if (this.checkup && this.checkup.status === "loading") return;  // 防重复点击
+        var label = t.conn + (this.pgDb ? " · " + this.pgDb : (t.schema ? " · " + t.schema : ""));
+        this.checkup = { status: "loading", report: null, error: "", connLabel: label };
+        var self = this, u = "/admin/sql/checkup?conn=" + encodeURIComponent(t.conn);
+        if (t.schema) u += "&schema=" + encodeURIComponent(t.schema);
+        u += this.dbQs();   // PG 的 database（不传用连接默认库）
+        apiGet(u).then(function (d) {
+          if (d && d.ok) self.checkup = { status: "report", report: d.report, error: "", connLabel: label };
+          else self.checkup = { status: "error", report: null, error: (d && d.error) || "体检失败", connLabel: label };
+        }).catch(function (e) {
+          self.checkup = { status: "error", report: null, error: String(e), connLabel: label };
+        });
+      },
+      // 顶部摘要的状态计数（按状态聚合，不是逐项罗列）
+      checkupCount: function (st) {
+        var rep = this.checkup && this.checkup.report;
+        if (!rep || !rep.checks) return 0;
+        var n = 0;
+        rep.checks.forEach(function (c) { if (c.status === st) n++; });
+        return n;
+      },
+      closeCheckup: function () { this.checkup = null; },
+      checkupStatusLabel: function (s) {
+        return ({ ok: "正常", info: "参考", warn: "需关注", critical: "严重", unknown: "无法测量" })[s] || s;
+      },
+      // 复制单段文本（GRANT 语句等）：剪贴板不可用时退回 flash 让用户手动复制
+      copyCheckupText: function (text, ok_msg) {
+        var self = this;
+        (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
+          .then(function () { self.flash(ok_msg || "已复制"); })
+          .catch(function () { self.flash("剪贴板不可用：" + text); });
+      },
+      // 整份报告导出为 Markdown：给工单/agent/同事贴用，比截图完整、比 JSON 可读
+      copyCheckupReport: function () {
+        var rep = this.checkup && this.checkup.report;
+        if (!rep) return;
+        var self = this, out = [];
+        out.push("# 数据库体检 · " + (this.checkup.connLabel || rep.engine));
+        out.push("");
+        out.push("- 引擎：" + rep.engine + (rep.version ? " " + rep.version : "")
+                 + (rep.scope ? " · 范围：" + rep.scope : "")
+                 + " · 耗时 " + rep.elapsed_ms + "ms");
+        out.push("- 结论：" + rep.summary);
+        var gaps = rep.privileges || [];
+        if (gaps.length) {
+          out.push("- 权限缺口：" + gaps.map(function (g) { return g.privilege; }).join("、"));
+        }
+        out.push("");
+        (this.checkupGroups || []).forEach(function (g) {
+          out.push("## " + g.title);
+          g.checks.forEach(function (c) {
+            out.push("- [" + self.checkupStatusLabel(c.status) + "] **" + c.title + "**"
+                     + (c.value ? " — " + c.value : ""));
+            if (c.message) out.push("  - " + c.message);
+            (c.details || []).forEach(function (d) { out.push("  - " + d); });
+          });
+          out.push("");
+        });
+        if (gaps.length) {
+          out.push("## 补齐权限可测量的指标");
+          gaps.forEach(function (g) {
+            out.push("- 缺 " + g.privilege + "（影响：" + g.affects.join("、") + "）");
+            out.push("  ```sql");
+            out.push("  " + g.grant_sql);
+            out.push("  ```");
+          });
+        }
+        this.copyCheckupText(out.join("\n"), "报告已复制为 Markdown");
       },
       // 选中多条执行：先整批评估，含写操作就只确认一次，确认后逐条执行不再询问。
       // 语法错误在这一步整批拦下——不能前几条已经写进去了才发现后面有一条写错。
@@ -3666,6 +3764,7 @@
         if ((e.metaKey || e.ctrlKey) && e.key === "s" && (!editor || !editor.hasTextFocus())) {
           e.preventDefault(); self.saveCurrent();
         }
+        if (e.key === "Escape" && self.checkup) { e.preventDefault(); self.closeCheckup(); }
       });
       window.addEventListener("resize", function () { if (chartInst) chartInst.resize(); });
       // 恢复的活动 tab 若在图表视图，重画
@@ -3678,6 +3777,8 @@
     <div class="dg-conn" :class="{'env-prod': isProd, 'env-staging': isStaging}">
       <dg-select :model-value="activeTab ? activeTab.conn : ''" :options="connOptions"
                  placeholder="选择连接…" @update:model-value="setConn"/>
+      <button class="dg-btn ck-btn" :disabled="!activeTab || !activeTab.conn"
+              @click="runCheckup" title="数据库体检：一次返回连接占用/缓存/长查询/锁等结构化诊断">体检</button>
     </div>
     <div class="dg-acc">
       <div class="dg-sec-hd acc-hd" @click="toggleAcc('tree')"><span class="caret" :class="{open: acc.tree}">{{ acc.tree ? "▾" : "▸" }}</span><span>{{ treeHeadLabel }}</span>
@@ -4379,6 +4480,72 @@
         </div>
       </div>
       <div class="ft">↑↓ 选择 · Enter 打开表数据 · Esc 关闭</div>
+    </div>
+  </div>
+  <!-- 数据库体检报告浮层：逐项 status + 值 + 解读，失败项标「无法测量」而非隐藏 -->
+  <div v-if="checkup" class="dg-checkup" @click.self="closeCheckup">
+    <div class="box">
+      <div class="hd">
+        <span class="t">数据库体检</span>
+        <span class="sub" v-if="checkup.connLabel">{{ checkup.connLabel }}</span>
+        <span class="x" @click="closeCheckup" title="关闭（Esc）">✕</span>
+      </div>
+      <div v-if="checkup.status === 'loading'" class="ck-loading">
+        <span class="spin"></span> 正在体检（执行一组只读诊断查询，稍候）…
+      </div>
+      <div v-else-if="checkup.status === 'error'" class="ck-err">{{ checkup.error }}</div>
+      <template v-else>
+        <div class="ck-sum">
+          <span class="ck-badge" :class="'st-' + checkup.report.overall">{{ checkupStatusLabel(checkup.report.overall) }}</span>
+          <span class="txt">{{ checkup.report.summary }}</span>
+          <span class="dots">
+            <template v-for="st in ['critical','warn','unknown','ok','info']" :key="st">
+              <span v-if="checkupCount(st)" class="dotcount" :class="'st-' + st"
+                    :title="checkupStatusLabel(st) + ' ' + checkupCount(st) + ' 项'">
+                <span class="dot" :class="'st-' + st"></span>{{ checkupCount(st) }}</span>
+            </template>
+          </span>
+          <span class="meta">{{ checkup.report.engine }}<template v-if="checkup.report.version"> {{ checkup.report.version }}</template></span>
+          <span class="meta">{{ checkup.report.elapsed_ms }} ms</span>
+        </div>
+        <!-- 权限缺口：缺权限的项不藏着，直接告诉用户缺什么、怎么补（可复制的 GRANT 模板） -->
+        <div v-if="checkup.report.privileges && checkup.report.privileges.length" class="ck-priv">
+          <div class="ck-priv-hd">⚠ 有指标因账号权限不足无法测量——补权限后即可测量</div>
+          <div v-for="(g, gi) in checkup.report.privileges" :key="gi" class="ck-priv-row">
+            <div class="ck-priv-t">缺 <b>{{ g.privilege }}</b> 权限，影响：{{ g.affects.join("、") }}</div>
+            <div class="ck-priv-grant">{{ g.grant_sql }}
+              <button class="ck-mini" @click="copyCheckupText(g.grant_sql, 'GRANT 语句已复制')">复制</button>
+            </div>
+          </div>
+        </div>
+        <div class="ck-list">
+          <div v-for="g in checkupGroups" :key="g.name" class="ck-dim">
+            <div class="ck-dim-hd">
+              <span class="dot" :class="'st-' + g.worst"></span>
+              <span class="ck-dim-t">{{ g.title }}</span>
+              <span v-if="g.problems" class="ck-dim-cnt">{{ g.problems }} 项需处理</span>
+              <span v-else-if="g.worst === 'unknown'" class="ck-dim-cnt muted">部分无法测量</span>
+            </div>
+            <div v-for="c in g.checks" :key="c.name" class="ck-row" :class="'st-' + c.status">
+              <div class="r1">
+                <span class="dot" :class="'st-' + c.status"></span>
+                <span class="ti">{{ c.title }}</span>
+                <span class="val" v-if="c.value">{{ c.value }}</span>
+                <span class="lab" :class="'st-' + c.status">{{ checkupStatusLabel(c.status) }}</span>
+              </div>
+              <div v-if="c.message" class="msg">{{ c.message }}</div>
+              <div v-if="c.details && c.details.length" class="det">
+                <div v-for="(d,i) in c.details" :key="i">{{ d }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div class="ft">
+        <button class="ck-mini" @click="copyCheckupReport">复制报告</button>
+        <button class="ck-mini" @click="runCheckup" :disabled="checkup.status === 'loading'">重新体检</button>
+        <span class="ft-note">逐项只读诊断 · 权限不足的指标自动标「无法测量」 · Esc 关闭</span>
+      </div>
     </div>
   </div>
   <div v-if="isProd" class="dg-prod-frame"></div>

@@ -11,6 +11,38 @@
   折叠的会自动展开，避免「切过去了但看不见」。
 
 ### Added
+- **数据库体检（`db_checkup` MCP 工具 + 查询台「体检」按钮）**：一次调用拿到结构化诊断报告，
+  agent 不必再为「这台 DB 健康吗」多轮 SQL 摸底。指标按六个维度组织（可用性 / 容量与连接 /
+  查询性能 / 锁与并发 / 复制与高可用 / 存储与维护），逐项容错：
+  - **MySQL（16 项）**：服务器信息、连接占用（含被 `max_connections` 拒绝的次数）、活跃线程、
+    InnoDB 缓冲池命中率与压力（wait_free）、缓冲池 vs 数据量、慢查询、全表扫描 JOIN、
+    临时表落盘比例、异常断连、死锁、长查询、行锁等待、无主键表、大事务落盘（binlog_cache）、
+    复制延迟、大表 TOP5
+  - **PostgreSQL（16 项）**：服务器信息、连接占用、空闲事务、长查询、等待事件、缓存命中率、
+    临时文件落盘、死锁、死元组膨胀、统计信息过期、未使用索引、复制延迟、复制槽健康度
+    （`wal_status`）、WAL 归档失败、事务 ID 回卷风险、库大小与大表 TOP5
+  - **ClickHouse（8 项）**：磁盘健康（`is_broken` / 只读 / 剩余空间）、核心指标、失败查询、
+    副本同步队列（会话过期 / log_pointer 落后）、活跃 part 数、未完成 mutation、大表 TOP5
+  - **SQLite（5 项）**：完整性检查、空闲页碎片、日志模式、表行数
+  每项给 status（ok / info / warn / critical / unknown）、人可读的 value 与解读建议，
+  `overall` 取最严重项。**整库不可达时探活先行**：先跑一条 `SELECT 1`，连不上就直接给一条
+  critical 的「数据库不可达：<真实原因>」（如 `Connection refused`），不再让十几项各自刷一遍
+  `OperationalError` 噪音；库恢复后点「重新体检」即测全部指标。**`unknown` 是「没测到」而非「正常」**——视图选型已尽量避开权限门槛
+  （见下条），真正缺权限的项会在报告 `privileges` 里汇总成**可复制的 GRANT 语句**
+  （如 `GRANT pg_monitor TO probe_reader;`），缺权限项从「大面积 unknown」降到个别项。
+  管理后台查询台连接栏新增「体检」按钮，走同一套逻辑（`GET /admin/sql/checkup`）；
+  报告浮层按维度分组、组内按严重度排序，顶部摘要带状态计数，缺权限时顶部横幅列出影响项与 GRANT，
+  底部支持「复制报告」（导出 Markdown）与「重新体检」，Esc / 点遮罩关闭。
+- **体检的权限模型重设计**：让受限只读账号也能测出大部分指标，而不是一片 unknown。
+  - PG：连接占用改用 `pg_stat_activity` 的行级可见性（`count(*)`，无需 `pg_monitor`），
+    复制槽用官方 `wal_status` 枚举做确定性判定，统计类视图（`pg_stat_database` /
+    `pg_stat_user_tables` / `pg_stat_user_indexes` / `pg_stat_archiver`）对只读账号无限制；
+    只有需要 `state` / `query` / `wait_event` 列的项（空闲事务、长查询、等待事件、复制延迟）
+    才在缺 `pg_monitor` 时标 unknown 并给出 GRANT 建议。
+  - MySQL：长查询与锁等待改走 `performance_schema.threads` / `data_lock_waits`，
+    不再依赖 `PROCESS` 权限（该视图对任何 SELECT 用户显示全部线程）；
+    `SHOW GLOBAL STATUS` 本就零权限。
+  - 累计计数器（死锁、临时文件、归档失败等）先按 uptime 折算成速率再判阈值，避免「累计值看起来大」的误报。
 - **MCP 工具 `sync_table`：跨连接表同步（典型场景 线上库 → 本地库）**。可同步表结构
   （同引擎用源库建表语句原文；跨引擎用 sqlglot 转写成近似 DDL，被剥掉的二级索引/自增/字符集
   在返回值 `warnings` 里列明）与数据（按 `where` / `order_by` / `limit` 取一小撮，参数化批量写入）。

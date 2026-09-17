@@ -3474,6 +3474,28 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         }
         return JSONResponse({"ok": True, "conns": conns})
 
+    @mcp.custom_route("/admin/sql/checkup", methods=["GET"])
+    @guard
+    async def _sql_checkup(req: Request) -> JSONResponse:
+        """数据库体检：一次返回结构化诊断报告（连接/缓存/长查询/锁/复制/大表…）。
+
+        和 agent 的 db_checkup 工具同一套逻辑（service.db_checkup），只是走后台鉴权，
+        供查询台连接栏的「体检」按钮调用。schema 为 MySQL/ClickHouse 的库、PG 的 schema。
+        """
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        schema = req.query_params.get("schema", "").strip() or None
+        database = req.query_params.get("db", "").strip() or None  # 仅 PG：在哪个 database 上体检
+        try:
+            report = await anyio.to_thread.run_sync(
+                partial(service.db_checkup, project, connection, _caller(req),
+                        schema=schema, database=database))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e), status_code=400)
+        return JSONResponse({"ok": True, "report": report})
+
     @mcp.custom_route("/admin/sql/reconnect", methods=["POST"])
     @guard
     async def _sql_reconnect(req: Request) -> JSONResponse:

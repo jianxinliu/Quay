@@ -244,6 +244,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 | `sync_table(...)` | 把表从一个库同步到另一个库（典型：线上 → 本地）：结构 + 按条件取的少量数据。目标是 local/dev 连接直接执行（仍审计），staging 才走 execute 那套审批；目标不能是 prod |
 | `sync_table_ddl(...)` | 批量只同步表结构、不带数据（在本地照着线上重建一套空表），表名逗号分隔 |
 | `list_tables` / `describe_table` / `sample_rows` | 探索 schema |
+| `db_checkup(project, connection, database?, pg_database?)` | 数据库体检：一次返回结构化诊断报告（连接占用 / 缓存命中率 / 长查询 / 锁 / 复制延迟 / 大表…，逐项容错，权限不足的项标 unknown 并写明原因） |
 | `table_ddl(project, connection, table, database?)` | 看建表语句原文（索引/分区/字符集/注释）；表名逗号分隔可一次多张 |
 | `test_connection` | 连通性检查 |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 跨源分析（取数受审计和行数上限约束，沙箱内自由计算） |
