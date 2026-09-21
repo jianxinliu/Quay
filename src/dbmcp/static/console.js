@@ -2237,19 +2237,32 @@
         var t = this.activeTab;
         if (!t || !t.conn) { this.flash("请先选择连接"); return; }
         if (this.checkup && this.checkup.status === "loading") return;  // 防重复点击
+        // 选了具体库/schema 只检它；没选就是实例级体检——慢查询、大表在哪个库都可能
+        // 发生，诊断要针对全体库而不是当前这一个。单库引擎（sqlite）服务端自动回落。
+        var all = !t.schema;
         var label = t.conn + (this.pgDb ? " · " + this.pgDb : (t.schema ? " · " + t.schema : ""));
-        this.checkup = { status: "loading", report: null, error: "", connLabel: label };
+        this.checkup = { status: "loading", report: null, error: "", connLabel: label, all: all };
         var self = this, u = "/admin/sql/checkup?conn=" + encodeURIComponent(t.conn);
         if (t.schema) u += "&schema=" + encodeURIComponent(t.schema);
         u += this.dbQs();   // PG 的 database（不传用连接默认库）
+        if (all) u += "&all=1";
         apiGet(u).then(function (d) {
-          if (d && d.ok) self.checkup = { status: "report", report: d.report, error: "", connLabel: label };
-          else self.checkup = { status: "error", report: null, error: (d && d.error) || "体检失败", connLabel: label };
+          if (d && d.ok) self.checkup = { status: "report", report: d.report, error: "",
+                                          connLabel: label, all: all };
+          else self.checkup = { status: "error", report: null, error: (d && d.error) || "体检失败",
+                               connLabel: label, all: all };
         }).catch(function (e) {
-          self.checkup = { status: "error", report: null, error: String(e), connLabel: label };
+          self.checkup = { status: "error", report: null, error: String(e),
+                          connLabel: label, all: all };
         });
       },
       // 顶部摘要的状态计数（按状态聚合，不是逐项罗列）
+      checkupLoadingHint: function () {
+        // 实例级体检要逐库跑，比单库久——文案得说清在干什么，不然以为卡住了
+        if (this.checkup && this.checkup.all)
+          return "正在体检（逐库执行只读诊断查询，库多时会久一些，稍候）…";
+        return "正在体检（执行一组只读诊断查询，稍候）…";
+      },
       checkupCount: function (st) {
         var rep = this.checkup && this.checkup.report;
         if (!rep || !rep.checks) return 0;
@@ -2316,6 +2329,11 @@
         var t = this.activeTab, self = this;
         if (!t || !t.conn) { this.flash("请先选择连接"); return; }
         if (this.checkupDiag && this.checkupDiag.status === "loading") return;  // 防重复点击
+        // 已有诊断且收起中：这是"展开"，不是重跑——省一次 AI 调用
+        if (this.checkupDiag && this.checkupDiag.collapsed
+            && this.checkupDiag.status !== "loading") {
+          this.expandCheckupDiag(); return;
+        }
         var sid = (this.checkupDiag && this.checkupDiag.sessionId) || "";
         var q = this.diagQuestion.trim();
         if (!sid && !q) q = "";   // 首轮可以为空（服务端给默认诊断要求）；追问必须有问题
@@ -2323,22 +2341,38 @@
         var body = { conn: t.conn, question: q };
         if (t.schema) body.schema = t.schema;
         if (this.pgDb) body.db = this.pgDb;
+        if (this.checkup && this.checkup.all) body.all = "1";
         if (sid) body.session_id = sid;
         if (this.checkup && this.checkup.report) body.report = JSON.stringify(this.checkup.report);
-        this.checkupDiag = { status: "loading", text: "", error: "", sessionId: sid };
+        // 响应回来时用户可能已经把诊断区收起了——收起状态要保留，否则慢响应
+        // 会把新对象（collapsed:false）盖上去，用户点过的「收起」被悄悄撤销
+        var keepCollapsed = !!(this.checkupDiag && this.checkupDiag.collapsed);
+        this.checkupDiag = { status: "loading", text: "", error: "", sessionId: sid,
+                            collapsed: keepCollapsed };
         apiPost("/admin/sql/checkup/ai", body).then(function (d) {
+          var folded = !!(self.checkupDiag && self.checkupDiag.collapsed);
           if (d && d.ok) {
             self.checkupDiag = { status: "done", text: d.diagnosis || "",
-                                error: "", sessionId: d.session_id || sid };
+                                error: "", sessionId: d.session_id || sid, collapsed: folded };
             self.diagQuestion = "";
           } else {
-            self.checkupDiag = { status: "error", text: "", error: (d && d.error) || "诊断失败", sessionId: sid };
+            self.checkupDiag = { status: "error", text: "", error: (d && d.error) || "诊断失败",
+                                sessionId: sid, collapsed: folded };
           }
         }).catch(function (e) {
-          self.checkupDiag = { status: "error", text: "", error: String(e), sessionId: sid };
+          var folded = !!(self.checkupDiag && self.checkupDiag.collapsed);
+          self.checkupDiag = { status: "error", text: "", error: String(e),
+                              sessionId: sid, collapsed: folded };
         });
       },
-      closeCheckupDiag: function () { this.checkupDiag = null; this.diagQuestion = ""; },
+      // 收起诊断区：保留已生成的诊断与 session，只折叠——再点「✦ AI 诊断」是展开，不是重跑。
+      // 跑到一半也能折：响应回来时会带上用户已经收起的状态（见 aiDiagnose 里的 folded）。
+      collapseCheckupDiag: function () {
+        if (this.checkupDiag) this.checkupDiag.collapsed = true;
+      },
+      expandCheckupDiag: function () {
+        if (this.checkupDiag) this.checkupDiag.collapsed = false;
+      },
       copyDiagnosis: function () {
         var d = this.checkupDiag;
         if (d && d.text) this.copyCheckupText(d.text, "诊断已复制");
@@ -4840,10 +4874,11 @@
       <div class="hd">
         <span class="t">数据库体检</span>
         <span class="sub" v-if="checkup.connLabel">{{ checkup.connLabel }}</span>
+        <span class="sub scope" v-if="checkup.report && checkup.report.scope">{{ checkup.report.scope }}</span>
         <span class="x" @click="closeCheckup" title="关闭（Esc）">✕</span>
       </div>
       <div v-if="checkup.status === 'loading'" class="ck-loading">
-        <span class="spin"></span> 正在体检（执行一组只读诊断查询，稍候）…
+        <span class="spin"></span> {{ checkupLoadingHint }}
       </div>
       <div v-else-if="checkup.status === 'error'" class="ck-err">{{ checkup.error }}</div>
       <template v-else>
@@ -4872,14 +4907,27 @@
         </div>
         <!-- AI 诊断：把上面的报告 + 连接信息丢给 AI，拿回「该优先处理什么、为什么、怎么办」。
              只在 aiEnabled 时出现；诊断进行中/出错/完成都在这块区域内展示，不遮挡报告。 -->
-        <div v-if="checkupDiag" class="ck-ai">
-          <div class="ck-ai-hd">
+        <div v-if="checkupDiag" class="ck-ai" :class="{collapsed: checkupDiag.collapsed}">
+          <div class="ck-ai-hd" :class="{clickable: checkupDiag.collapsed}"
+               @click="checkupDiag.collapsed ? expandCheckupDiag() : null"
+               :title="checkupDiag.collapsed ? '点击展开诊断' : ''">
             <span class="t">✦ AI 诊断</span>
-            <span class="acts">
-              <button v-if="checkupDiag.status === 'done'" class="ck-mini" @click="copyDiagnosis">复制</button>
-              <button class="ck-mini" @click="closeCheckupDiag">收起</button>
+            <span v-if="checkupDiag.collapsed && checkupDiag.status === 'done'" class="ck-ai-folded">
+              已生成 · 点击展开</span>
+            <span v-if="checkupDiag.collapsed && checkupDiag.status === 'error'" class="ck-ai-folded err">
+              诊断失败 · 点击展开</span>
+            <span class="acts" v-if="!checkupDiag.collapsed">
+              <button v-if="checkupDiag.status === 'done'" class="ck-mini" @click.stop="copyDiagnosis">复制</button>
+              <button class="ck-mini" @click.stop="collapseCheckupDiag">收起</button>
+            </span>
+            <span class="acts" v-else>
+              <button v-if="checkupDiag.status === 'done'" class="ck-mini" @click.stop="copyDiagnosis">复制</button>
             </span>
           </div>
+          <div v-if="checkupDiag.collapsed" class="ck-ai-folded-hint">
+            诊断内容已保留{{ checkupDiag.sessionId ? "，可继续追问" : "" }}
+          </div>
+          <template v-else>
           <div v-if="checkupDiag.status === 'loading'" class="ck-ai-loading">
             <span class="spin"></span> AI 正在分析体检报告…
           </div>
@@ -4896,6 +4944,7 @@
             <button class="ck-mini" :disabled="checkupDiag.status === 'loading'"
                     @click="aiDiagnose">{{ checkupDiag.sessionId ? "追问" : "诊断" }}</button>
           </div>
+          </template>
         </div>
         <div class="ck-list">
           <div v-for="g in checkupGroups" :key="g.name" class="ck-dim">
@@ -4923,7 +4972,8 @@
       <div class="ft">
         <button v-if="aiEnabled" class="ck-mini ai" @click="aiDiagnose"
                 :disabled="checkup.status !== 'report' || (checkupDiag && checkupDiag.status === 'loading')"
-                title="把体检报告和连接信息交给 AI，给出优先处理项与建议">✦ AI 诊断</button>
+                :title="checkupDiag && checkupDiag.collapsed ? '展开已生成的诊断' : '把体检报告和连接信息交给 AI，给出优先处理项与建议'"
+                >{{ (checkupDiag && checkupDiag.collapsed) ? "✦ 展开诊断" : "✦ AI 诊断" }}</button>
         <button class="ck-mini" @click="copyCheckupReport">复制报告</button>
         <button class="ck-mini" @click="runCheckup" :disabled="checkup.status === 'loading'">重新体检</button>
         <span class="ft-note">逐项只读诊断 · 权限不足的指标自动标「无法测量」 · Esc 关闭</span>

@@ -962,3 +962,88 @@ def test_report_to_markdown_does_not_escape_backticks_in_grant_block():
     """GRANT 块要保留 ``` 围栏，AI 才知道那是 SQL。"""
     md = checkup.report_to_markdown(_sample_report_dict())
     assert "```sql" in md
+
+
+# ---------------------------------------------------------------------------
+# 实例级体检合并（merge_reports）
+# ---------------------------------------------------------------------------
+
+def _rep(*checks: checkup.Check, engine: str = "mysql") -> checkup.CheckupReport:
+    r = checkup.CheckupReport(engine=engine)
+    r.checks = list(checks)
+    return r
+
+
+class TestMergeReports:
+    def test_empty_reports_gives_unknown_report(self):
+        m = checkup.merge_reports("mysql", [])
+        assert m.overall == "unknown"
+        assert m.scope == ""
+        assert len(m.checks) == 1 and m.checks[0].name == "no_databases"
+
+    def test_scope_says_all_databases(self):
+        m = checkup.merge_reports("mysql", [("a", _rep()), ("b", _rep())])
+        assert m.scope == "全体 2 个库"
+
+    def test_instance_scope_checks_collapse_to_one_without_prefix(self):
+        """连接占用这类全局计数器在哪个库查都一样——并成一条，不加 [库名]。"""
+        a = _rep(checkup.Check("connections", "连接占用", "warn", "10 / 100",
+                               instance_scope=True))
+        b = _rep(checkup.Check("connections", "连接占用", "warn", "12 / 100",
+                               instance_scope=True))
+        m = checkup.merge_reports("mysql", [("db1", a), ("db2", b)])
+        assert len(m.checks) == 1
+        assert not m.checks[0].title.startswith("[")
+        assert m.checks[0].title == "连接占用"
+
+    def test_per_db_check_keeps_the_worst_with_db_prefix(self):
+        a = _rep(checkup.Check("big_tables", "大表 TOP5", "ok", "db1"))
+        b = _rep(checkup.Check("big_tables", "大表 TOP5", "critical", "db2"))
+        m = checkup.merge_reports("mysql", [("db1", a), ("db2", b)])
+        assert len(m.checks) == 1
+        assert m.checks[0].title == "[db2] 大表 TOP5"
+        assert m.checks[0].status == "critical"
+        assert m.overall == "critical"
+
+    def test_identical_unmarked_checks_also_collapse(self):
+        """没标 instance_scope 但各库值完全相同（如单库引擎的检查）也并成一条。"""
+        a = _rep(checkup.Check("big_tables", "大表 TOP5", "ok", "1 MB"))
+        b = _rep(checkup.Check("big_tables", "大表 TOP5", "ok", "1 MB"))
+        m = checkup.merge_reports("mysql", [("db1", a), ("db2", b)])
+        assert len(m.checks) == 1 and not m.checks[0].title.startswith("[")
+
+    def test_mixed_report_is_compact(self):
+        """21 个库的实例不应该把连接占用复制 21 遍（真实 MySQL e2e 的回归点）。"""
+        reps = []
+        for i in range(21):
+            reps.append((f"db{i}", _rep(
+                checkup.Check("connections", "连接占用", "ok", "1 / 100",
+                              instance_scope=True),
+                checkup.Check("big_tables", "大表 TOP5", "ok" if i else "warn", f"db{i}"),
+            )))
+        m = checkup.merge_reports("mysql", reps)
+        assert len(m.checks) == 2, "实例级指标必须去重"
+        assert m.overall == "warn"
+        assert m.checks[1].title == "[db0] 大表 TOP5"
+
+    def test_privilege_gaps_merged_without_duplicates(self):
+        a = _rep()
+        a.privileges = [checkup.PrivilegeGap("pg_monitor", "GRANT ...", ["长查询", "空闲事务"])]
+        b = _rep()
+        b.privileges = [checkup.PrivilegeGap("pg_monitor", "GRANT ...", ["空闲事务", "等待事件"])]
+        m = checkup.merge_reports("postgres", [("d1", a), ("d2", b)])
+        assert len(m.privileges) == 1
+        assert m.privileges[0].affects == ["长查询", "空闲事务", "等待事件"]
+
+    def test_version_taken_from_first_report(self):
+        a = _rep(); a.version = "MySQL 9.5.0"
+        m = checkup.merge_reports("mysql", [("d1", a), ("d2", _rep())])
+        assert m.version == "MySQL 9.5.0"
+
+    def test_serializable_and_renderable(self):
+        a = _rep(checkup.Check("connections", "连接占用", "warn", "82%",
+                               instance_scope=True))
+        m = checkup.merge_reports("mysql", [("d1", a)])
+        d = m.to_dict()
+        assert d["scope"] == "全体 1 个库"
+        assert "全体 1 个库" in checkup.report_to_markdown(d)

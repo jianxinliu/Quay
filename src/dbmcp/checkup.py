@@ -107,6 +107,10 @@ class Check:
     details: list[str] = field(default_factory=list)
     dimension: str = "availability"   # 归属维度（见 DIMENSIONS）
     privilege: str = ""               # 该项所需的权限；仅当 status=unknown 时有意义
+    # 这项指标的值在**同一实例的任一库上查都一样**（连接占用、复制延迟这类全局计数器）。
+    # merge_reports 据此把逐库跑出来的重复项并成一条、不加 [库名] 前缀。
+    # 默认 False = 按库处理：新检查漏标最多是多一行带前缀的重复，不会漏数据。
+    instance_scope: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -118,6 +122,7 @@ class Check:
             "details": list(self.details),
             "dimension": self.dimension,
             "privilege": self.privilege,
+            "instance_scope": self.instance_scope,
         }
 
 
@@ -628,7 +633,17 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     # --- 大表 TOP5 ---
     checks.append(_mysql_big_tables(engine, schema))
 
+    for c in checks:
+        c.instance_scope = c.name in _MYSQL_INSTANCE_SCOPE
     return checks
+
+# 值在实例上任一库查都一样的检查（全局状态变量 / performance_schema 全局视图）。
+# 剩下的（缓冲池 vs 数据量、无主键表、大表 TOP5）才真的按库不同。
+_MYSQL_INSTANCE_SCOPE = frozenset({
+    "server", "connections", "threads_running", "buffer_pool_hit_ratio",
+    "slow_queries", "full_scan_joins", "tmp_tables_on_disk", "aborted_clients",
+    "deadlocks", "long_queries", "lock_waits", "binlog_cache", "replication_lag",
+})
 
 
 def _mysql_deadlocks(engine: SAEngine, status: dict[str, str]) -> Check:
@@ -1057,7 +1072,18 @@ def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     # --- 库与大表 ---
     checks.append(_pg_sizes(engine, schema))
 
+    for c in checks:
+        c.instance_scope = c.name in _PG_INSTANCE_SCOPE
     return checks
+
+# 实例级：pg_stat_activity / pg_stat_replication / pg_replication_slots /
+# pg_stat_archiver / pg_database 都是整实例可见的。
+# 库级（不在此列）：缓存命中率、死锁、临时文件（pg_stat_database 按 current_database()
+# 过滤）、膨胀、统计信息过期、未用索引、库与大表大小。
+_PG_INSTANCE_SCOPE = frozenset({
+    "server", "connections", "idle_in_transaction", "long_queries", "wait_events",
+    "replication_lag", "replication_slots", "archiver", "xid_wraparound",
+})
 
 
 def _pg_idle_transactions(engine: SAEngine) -> Check:
@@ -1921,3 +1947,84 @@ def run_checkup(engine: SAEngine, engine_kind: str, schema: str | None = None) -
         report.privileges = []
     report.elapsed_ms = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
     return report
+
+
+def _same_check(a: Check, b: Check) -> bool:
+    """两条同名检查是否实质相同（值/解读/明细全都一样）。
+
+    用于 merge_reports 判定「这条指标是不是库级」：实例级指标（连接占用、缓存命中率、
+    长查询、锁、复制…）在任一库上查结果都相同，逐库跑只是浪费时间；库级指标
+    （大表、无主键表、膨胀、未用索引…）各库不同。按「完全相同」判定无需为每条
+    检查维护是不是库级的元数据——新引擎、新检查加进来自动正确。
+    """
+    return (a.value == b.value and a.message == b.message
+            and a.status == b.status and a.details == b.details)
+
+
+def merge_reports(engine_kind: str, reports: list[tuple[str, CheckupReport]]) -> CheckupReport:
+    """把逐库体检合并成一份实例级报告（查询台「体检」在未选库时走这条路）。
+
+    用户要的是「针对全体，而不是某个库某个 schema」——慢查询、大表在哪个库都可能
+    发生。合并规则：
+
+    - **实例级指标**（各库查出来完全一样）：只留一条，不加库名前缀；
+    - **库级指标**（各库不同）：取最严重的那条，标题加 ``[库名]`` 前缀——报告保持
+      「一份」的篇幅，既不漏掉任何库的问题，也不把同一项连接占用复制 N 遍；
+    - 某个库体检失败已在 db_checkup_all 那层挡掉，这里不处理。
+
+    reports: [(db_name, report)]，overall 是全部检查里最严重的状态。
+    """
+    started = dt.datetime.now(dt.timezone.utc)
+    merged = CheckupReport(
+        engine=engine_kind,
+        scope="",
+        started_at=started.isoformat(timespec="seconds"),
+    )
+    if not reports:
+        merged.overall = "unknown"
+        merged.checks = [Check(
+            "no_databases", "无可体检的库", "unknown", "0",
+            "该连接下没有可体检的用户库（可能全是系统库，或账号无权限列出）。",
+            dimension="availability",
+        )]
+        merged.elapsed_ms = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
+        return merged
+
+    merged.scope = "全体 " + str(len(reports)) + " 个库"
+    total_ms = 0
+    gaps: dict[str, PrivilegeGap] = {}
+    # name -> [(db, check)]：按检查名归拢，同名才能比较「各库是否相同」
+    by_name: dict[str, list[tuple[str, Check]]] = {}
+    for db, rep in reports:
+        if not merged.version and rep.version:
+            merged.version = rep.version
+        total_ms += rep.elapsed_ms or 0
+        for c in rep.checks:
+            by_name.setdefault(c.name, []).append((db, c))
+        for g in rep.privileges:
+            key = g.privilege
+            if key in gaps:
+                for a in g.affects:
+                    if a not in gaps[key].affects:
+                        gaps[key].affects.append(a)
+            else:
+                gaps[key] = PrivilegeGap(g.privilege, g.grant_sql, list(g.affects))
+
+    for items in by_name.values():
+        pick = items[0][1]
+        first = items[0][1]
+        # 声明成实例级的（连接占用这类）：值在哪个库查都一样，并成一条、不加前缀
+        # ——注意我们自己的连接会让全局计数器微小漂移（多一次连接就读数 +N），
+        # 按值比较会把这些漂移误判成「各库不同」，所以这里信声明而不是信值。
+        same = len(items) == 1 or first.instance_scope \
+            or all(_same_check(first, c) for _, c in items[1:])
+        if not same:
+            # 各库不同 = 库级指标：取最严重那条，标上它来自哪个库
+            db, pick = max(items, key=lambda it: _STATUS_LEVEL[it[1].status])
+            pick.title = f"[{db}] {pick.title}"
+        merged.checks.append(pick)
+
+    merged.overall = _worst(merged.checks)
+    merged.privileges = list(gaps.values())
+    merged.elapsed_ms = total_ms
+    return merged

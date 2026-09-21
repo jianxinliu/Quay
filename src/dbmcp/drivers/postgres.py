@@ -60,6 +60,7 @@ class PostgresDriver(DbDriver):
     explain_format = "json"
     # PG 的 database 与 schema 是两层：一条连接只绑一个库，浏览别的库要另建连接
     needs_database_layer = True
+    client_lib = ("psycopg", "psycopg[binary]")
 
     def build_engine(
         self,

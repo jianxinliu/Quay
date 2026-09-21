@@ -946,7 +946,7 @@ _SETTINGS_GROUPS = [
     ("偏好", [("general", "整体"), ("db", "查询与 Agent"), ("redis", "Redis")]),
     ("能力", [("ai", "AI 助手"), ("notify", "通知")]),
     ("资源", [("connections", "连接管理"), ("ssh", "SSH 配置")]),
-    ("", [("info", "系统信息")]),
+    ("", [("drivers", "驱动"), ("info", "系统信息")]),
 ]
 _SETTINGS_TABS = [(k, label) for _, items in _SETTINGS_GROUPS for k, label in items]
 
@@ -1373,6 +1373,115 @@ def _settings_redis_body(s: dict) -> str:
                             "开启", "关闭",
                             "非 UTF-8 的值先试着按 msgpack 解成结构展示，解不出再退回十六进制。")),
         "redis")
+
+
+def _settings_drivers_body(service: "DbmService") -> str:
+    """驱动 tab：已注册的数据库驱动清单 + 客户端库装没装 + 怎么加一种新库支持。
+
+    驱动是**代码模块**（src/dbmcp/drivers/，import 即完成注册），不是配置项——所以
+    这里是只读页：告诉使用者「现在支持哪些库、各自什么能力、客户端库装全没有」，
+    以及加一种新库支持只需要加一个驱动文件。使用者在配置里选引擎时看到的下拉、
+    图标、默认端口全部来自这张表。
+    """
+    import importlib.util
+
+    from .drivers import DRIVERS
+
+    def lib_cell(drv) -> str:
+        if not drv.client_lib:
+            return "<span class='lib std'>Python 标准库 sqlite3</span>"
+        mod, pip = drv.client_lib
+        ok = importlib.util.find_spec(mod) is not None
+        cls = "ok" if ok else "miss"
+        word = "已安装" if ok else "未安装"
+        hint = ("缺这个库，该引擎的连接会建不上；装一下："
+                if not ok else "")
+        cmd = f"uv sync                      # 或 pip install {pip}"
+        return (f"<span class='lib {cls}'>● {word}</span>"
+                f"<code class='pip'>{_esc(pip)}</code>"
+                + (f"<span class='lib-hint'>{hint}<code>{cmd}</code></span>" if not ok else ""))
+
+    def cap(name: str, on: bool, desc: str) -> str:
+        cls = "on" if on else "off"
+        return (f"<span class='cap {cls}' title='{_esc(desc)}'>{_esc(name)}</span>")
+
+    rows = []
+    for name in sorted(DRIVERS):
+        drv = DRIVERS[name]
+        caps = []
+        if not drv.connectable:
+            caps.append(cap("进程内", True, "不占连接：分析工作台的本地 DuckDB 引擎，仅元数据参与注册"))
+        else:
+            caps.append(cap("可连接", True, "能配置成一条连接"))
+        caps.append(cap("需选库层", drv.needs_database_layer,
+                        "PG 的 database/schema 是两层：一条连接只绑一个库，浏览别的库要另建连接"))
+        caps.append(cap("可同步目标", drv.sync_target, "能作为表同步的目标（要能 CREATE TABLE + INSERT）"))
+        caps.append(cap("AI 生成 SQL", drv.ai_sql, "AI 生成 SQL / 流程时按本引擎方言产出并转写"))
+        rows.append(
+            "<tr>"
+            f"<td class='eng'>{_engine_icon(name)}<b>{_esc(name)}</b></td>"
+            f"<td>{lib_cell(drv)}</td>"
+            f"<td class='dim'>{_esc(drv.dialect or '—')}</td>"
+            f"<td class='port'>{_esc(str(drv.default_port or '—'))}</td>"
+            f"<td class='caps'>{''.join(caps)}</td>"
+            "</tr>"
+        )
+
+    css = ("<style>"
+           ".drv-tbl{width:100%;border-collapse:collapse}"
+           ".drv-tbl th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;"
+           "padding:4px 10px;border-bottom:1px solid var(--border);white-space:nowrap}"
+           ".drv-tbl td{padding:10px;border-bottom:1px solid var(--line);vertical-align:top;font-size:13px}"
+           ".drv-tbl td.eng{white-space:nowrap}"
+           ".drv-tbl td.eng b{font-family:var(--mono);font-size:12.5px}"
+           ".drv-tbl td.dim,.drv-tbl td.port{font-family:var(--mono);font-size:12px;color:var(--muted)}"
+           ".drv-tbl .lib{font-size:12px;white-space:nowrap}"
+           ".drv-tbl .lib.ok{color:#166534} .drv-tbl .lib.miss{color:#c02a26;font-weight:600}"
+           ".drv-tbl .lib.std{color:var(--faint)}"
+           ".drv-tbl .pip{margin-left:7px;background:var(--paper);padding:1px 6px;border-radius:5px;"
+           "font-family:var(--mono);font-size:11.5px}"
+           ".drv-tbl .lib-hint{display:block;margin-top:4px;color:var(--muted);font-size:11.5px}"
+           ".drv-tbl .lib-hint code{background:var(--ink);color:#d7dde6;padding:2px 6px;border-radius:5px;"
+           "font-family:var(--mono);font-size:11px}"
+           ".drv-tbl .caps{display:flex;flex-wrap:wrap;gap:5px;min-width:220px}"
+           ".drv-tbl .cap{font-size:11px;padding:1px 8px;border-radius:9px;white-space:nowrap;"
+           "border:1px solid var(--border);color:var(--muted);cursor:help}"
+           ".drv-tbl .cap.on{border-color:#9ec0a4;color:#166534;background:#f0f7f1}"
+           "pre.cmd{background:var(--ink);color:#d7dde6;border-radius:8px;padding:10px 12px;overflow-x:auto;"
+           "font-family:var(--mono);font-size:12.5px;margin:0}"
+           "</style>")
+
+    table = ("<table class='drv-tbl'><thead><tr>"
+             "<th>引擎</th><th>客户端库</th><th>sqlglot 方言</th><th>默认端口</th><th>能力</th>"
+             "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+
+    howto = (
+        "<div class='card'><h3>新增一种数据库支持</h3>"
+        "<p class='muted'>加一种库 = 加一个驱动文件，不必改别处（引擎名已在配置层放宽为字符串，"
+        "连接表单的引擎下拉、默认端口、图标都从驱动注册表来）。</p>"
+        "<ol style='margin:10px 0 4px;padding-left:22px;color:var(--text);font-size:13px;line-height:1.9'>"
+        "<li>在 <code>src/dbmcp/drivers/</code> 加一个模块（如 <code>mssql.py</code>），"
+        "继承 <code>DbDriver</code>，填 <code>name</code> / <code>dialect</code> / "
+        "<code>default_port</code>，按需覆盖 <code>build_engine</code> 等方法。</li>"
+        "<li>关系库基本零代码：SQLAlchemy 的 dialect 已覆盖 MySQL / PostgreSQL / SQLite / "
+        "MSSQL / Oracle / DB2…，<code>build_engine</code> 就是拼 URL；没有现成方言的库"
+        "（Redis 是先例）自己实现接口的几个方法即可。</li>"
+        "<li>在 <code>src/dbmcp/drivers/__init__.py</code> 加一行 <code>import</code> 完成注册。</li>"
+        "<li>重启服务（<code>bash scripts/install-launchd.sh</code> 或重启 <code>dbm serve</code>），"
+        "新建连接时引擎下拉就会自动出现它。</li>"
+        "</ol>"
+        "<p class='muted' style='margin-top:10px'>基类方法都给了能用的默认实现（取消为空操作、"
+        "容量/行数估算返回空、DDL 走反射拼近似、语法复核标不支持），新驱动只覆盖真正支持的部分，"
+        "缺的能力会优雅降级而不是报错。</p>"
+        "<p class='muted' style='margin-top:8px'>Redis 有独立适配器（<code>redis_engine.py</code>，"
+        "不走 SQLAlchemy），不在本表内，同样可用——它专属于 Redis 控制台。</p>"
+        "</div>"
+    )
+    return (css
+            + f"<div class='card'><h3>已注册驱动（{len(DRIVERS)} 种）</h3>"
+            + "<p class='muted'>驱动在哪里：<code>src/dbmcp/drivers/</code>。import 即注册，"
+              "重复注册以最后一次为准（便于测试替换）。</p>"
+            + table + "</div>" + howto)
 
 
 def _settings_info_body(service: "DbmService", req: "Request") -> str:
@@ -2845,6 +2954,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         plain = {
             "connections": lambda: _connections_body(service, req.query_params.get("edit")),
             "ssh": lambda: _ssh_identities_body(service),
+            "drivers": lambda: _settings_drivers_body(service),
             "info": lambda: _settings_info_body(service, req),
         }
         if tab in plain:
@@ -3542,10 +3652,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         schema = req.query_params.get("schema", "").strip() or None
         database = req.query_params.get("db", "").strip() or None  # 仅 PG：在哪个 database 上体检
+        # all=1：实例级体检——未选具体库时前端传 all，诊断覆盖该连接下的全体库
+        # （慢查询/大表在哪个库都可能发生），而不是只看当前库。单库引擎自动回落。
+        instance_level = req.query_params.get("all", "").strip() in ("1", "true", "yes")
         try:
-            report = await anyio.to_thread.run_sync(
-                partial(service.db_checkup, project, connection, _caller(req),
-                        schema=schema, database=database))
+            if instance_level:
+                report = await anyio.to_thread.run_sync(
+                    partial(service.db_checkup_all, project, connection, _caller(req),
+                            database=database))
+            else:
+                report = await anyio.to_thread.run_sync(
+                    partial(service.db_checkup, project, connection, _caller(req),
+                            schema=schema, database=database))
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e), status_code=400)
         return JSONResponse({"ok": True, "report": report})
@@ -3571,6 +3689,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         schema = str(f.get("schema") or "").strip() or None
         database = str(f.get("db") or "").strip() or None
         session_id = str(f.get("session_id") or "").strip() or None
+        # 连接级体检（未选库）的诊断针对全体库；服务端缺报告时按这个标志重跑体检
+        all_dbs = str(f.get("all") or "").strip() in ("1", "true", "yes")
         report = None
         raw = str(f.get("report") or "").strip()
         if raw:
@@ -3583,7 +3703,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             out = await anyio.to_thread.run_sync(
                 lambda: service.ai_diagnose_checkup(
                     project, connection, question, _caller(req),
-                    report=report, schema=schema, database=database, session_id=session_id))
+                    report=report, schema=schema, database=database, session_id=session_id,
+                    all_dbs=all_dbs))
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception as e:  # noqa: BLE001

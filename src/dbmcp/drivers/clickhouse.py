@@ -32,6 +32,7 @@ class ClickhouseDriver(DbDriver):
     # 查询台 JSON 计划：CH 的 EXPLAIN 有 PLAN/PIPE/AST 等形态但非 JSON 行集，不开放
     explain_json_prefix = None
     explain_format = "rows"
+    client_lib = ("clickhouse_driver", "clickhouse-driver")
 
     def build_engine(
         self,

@@ -60,6 +60,7 @@ class MysqlDriver(DbDriver):
     # MySQL 9 起 explain_format 默认 TREE，而 TREE 解释不了 DML（只回一句
     # "not executable by iterator executor"）；显式要传统表格式才有 type/key/rows 可看。
     icon = "mysql"
+    client_lib = ("pymysql", "pymysql")
     explain_prefix = "EXPLAIN FORMAT=TRADITIONAL "
     explain_json_prefix = "EXPLAIN FORMAT=JSON "
     explain_format = "json"

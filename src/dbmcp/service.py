@@ -2838,12 +2838,70 @@ class DbmService:
         if cfg.engine == "redis":
             raise ValueError(
                 "Redis 连接不支持体检（Redis 不对 agent 开放，请在管理后台的 Redis 控制台操作）")
-        engine = self.pool.get(project, connection, cfg, database=database)
         scope = schema or cfg.database
+        return self._checkup_one(project, connection, cfg, caller, scope, database).to_dict()
+
+    def _checkup_one(
+        self, project: str, connection: str, cfg: ConnectionConfig, caller: CallerInfo,
+        scope: str | None, database: str | None = None,
+    ) -> "checkup.CheckupReport":
+        """单库体检（db_checkup / db_checkup_all 共用）：建引擎 + 审计 + 跑检查项。
+
+        database 只对 needs_database_layer 的引擎（PG）有意义——一条 PG 连接只绑一个
+        库，换库必须另建连接；MySQL/ClickHouse 的 schema 就是库，靠 scope 指定即可。
+        """
+        engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(
             project, connection, cfg, "checkup", scope or "", caller,
-            lambda: checkup.run_checkup(engine, cfg.engine, scope).to_dict(),
+            lambda: checkup.run_checkup(engine, cfg.engine, scope),
         )
+
+    def db_checkup_all(
+        self, project: str, connection: str, caller: CallerInfo,
+        *, database: str | None = None,
+    ) -> dict:
+        """实例级体检：对该连接下的所有用户库逐个体检，合并成一份报告。
+
+        普通体检只看一个库/schema；「这台 DB 健康吗」不该只看当前库——慢查询、大表、
+        膨胀在哪个库都可能发生。枚举该实例上的用户库（PG 的统计视图是库级隔离的，
+        逐库另建连接；MySQL/CH 的 schema 就是库，同一条连接按库查），逐库走
+        _checkup_one，再 merge_reports 去重实例级指标、只留各库最严重的那条。
+
+        database：PG 指定先连哪个库去列清单（不传用连接默认库）。
+        单库实例（sqlite 一个文件就是一个库）或列库失败时回落到普通体检，保证可用。
+        """
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine == "redis":
+            raise ValueError(
+                "Redis 连接不支持体检（Redis 不对 agent 开放，请在管理后台的 Redis 控制台操作）")
+        # PG 一条连接只绑一个库：换库必须另建引擎；MySQL/CH 的 schema 就是库，
+        # 同一条连接按 schema 查即可，不必为每个库建引擎（实例上库可能很多）
+        per_db_engine = _driver_of(cfg).needs_database_layer
+        engine = self.pool.get(project, connection, cfg, database=database)
+        try:
+            if per_db_engine:
+                # 先查 pg_database 拿到这台实例上的库清单
+                dbs = engines.list_server_databases(engine, cfg.engine)
+            else:
+                dbs = engines.list_databases(engine)
+        except Exception:  # noqa: BLE001
+            dbs = []
+        # 单库连接或列库失败：退化成普通体检（不抛错，保证按钮永远可用）
+        if not dbs:
+            return self.db_checkup(project, connection, caller, database=database)
+
+        reports: list[tuple[str, checkup.CheckupReport]] = []
+        last_err = ""
+        for db in dbs:
+            try:
+                reports.append((db, self._checkup_one(
+                    project, connection, cfg, caller, scope=db,
+                    database=db if per_db_engine else None)))
+            except Exception as e:  # noqa: BLE001 - 某个库失败不废掉整份报告
+                last_err = f"{db}: {e}"
+        if not reports:
+            raise QueryRejected(f"所有库体检均失败（最后错误：{last_err}）")
+        return checkup.merge_reports(cfg.engine, reports).to_dict()
 
     def admin_table_sizes(
         self, project: str, connection: str, caller: CallerInfo, schema: str | None = None,
@@ -2986,6 +3044,7 @@ class DbmService:
         *,
         report: dict | None = None, schema: str | None = None,
         database: str | None = None, session_id: str | None = None,
+        all_dbs: bool = False,
     ) -> dict:
         """让 AI 根据体检报告 + 连接信息给出诊断建议（只读分析、不执行任何 SQL）。
 
@@ -3005,11 +3064,13 @@ class DbmService:
         if cfg.engine == "redis":
             raise ValueError("Redis 连接不支持体检诊断（Redis 无体检报告）")
 
-        # 报告缺失：现场重跑体检（走 db_checkup，自带健康检查与审计）。拿到了报告就
-        # 不再碰 DB——诊断是纯文本分析，连接挂了也能基于已有报告给出建议。
+        # 报告缺失：现场重跑体检（自带健康检查与审计）。拿到了报告就不再碰 DB——
+        # 诊断是纯文本分析，连接挂了也能基于已有报告给出建议。
         rep = report if isinstance(report, dict) and report.get("checks") else None
         if rep is None:
-            rep = self.db_checkup(project, connection, caller, schema=schema, database=database)
+            # 连接级（未选具体库）时跑实例级体检：诊断针对全体库，而不是某一个
+            rep = (self.db_checkup_all(project, connection, caller, database=database) if all_dbs
+                   else self.db_checkup(project, connection, caller, schema=schema, database=database))
 
         db_info = {
             "engine": cfg.engine,

@@ -18,6 +18,9 @@ class DuckdbDriver(DbDriver):
     name = "duckdb"
     dialect = "duckdb"
     connectable = False
+    # 连接表单里不会出现它（build_engine 刻意不实现），自然也不能做同步目标
+    sync_target = False
     icon = "duckdb"
+    client_lib = ("duckdb", "duckdb")
     # 不会被 engine.dialect.name 反查到（没有 SQLAlchemy 连接）
     sa_dialect_names = ()

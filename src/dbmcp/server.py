@@ -1071,6 +1071,35 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise agent_error(e) from e
 
     @mcp.tool
+    def db_checkup_all(
+        project: str,
+        connection: str,
+        pg_database: PgDatabase = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """实例级体检：一次看遍这条连接所在服务器上的**所有用户库**，合并成一份诊断报告。
+
+        db_checkup 只检一个库/schema；但「这台 DB 健康吗」不该只看当前库——慢查询、
+        大表、索引膨胀、无主键表在哪个库都可能发生。本工具逐库体检后合并：
+
+        - 实例级指标（连接占用、缓存命中率、长查询、锁、复制延迟…）各库值相同，
+          只留一条；
+        - 库级指标（大表 TOP5、无主键表、膨胀、未用索引…）取**最严重**的那条，
+          标题带 `[库名]` 前缀。
+
+        因此报告篇幅和 db_checkup 相当，但覆盖全体库。单库实例（如 SQLite）
+        自动回落到 db_checkup。**想知道整台实例健康状况时用本工具，而不是逐库
+        db_checkup 拼接。**
+        """
+        try:
+            db = service.resolve_pg_database(project, connection, pg_database)
+            return service.db_checkup_all(
+                project, connection, _caller_from_ctx(ctx), database=db
+            )
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
+
+    @mcp.tool
     def table_ddl(
         project: str,
         connection: str,

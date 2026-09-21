@@ -124,6 +124,9 @@ class DbDriver:
     # 注册进来的目的只是让方言/图标/可 lint 清单与真实引擎同一份来源（连接表单会过滤掉它）。
     connectable: bool = True
     icon: str | None = None                  # 品牌图标文件名（devicon，vendored 到 static/db-icons/）；None = 无图标
+    # 该驱动的客户端库（import 名, pip 名）。None = 用标准库或无外部依赖。
+    # 系统设置「驱动」页据此展示库装没装——缺库的引擎仍能注册，但连不上。
+    client_lib: tuple[str, str] | None = None
 
     # ---- 能力声明：新引擎按实际情况覆盖，未声明的能力按默认值处理 ----
     # 表位于 schema/database 之下：未绑定默认库时反射会崩或落错库，故未选库时
