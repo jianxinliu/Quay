@@ -19,6 +19,8 @@ from .tunnel import SSHTunnel, TunnelError, open_tunnel
 
 # 各引擎的超级用户常见默认名
 _SUPERUSER_NAMES = {"mysql": {"root"}, "postgres": {"postgres"}}
+# 有独立适配器、不在驱动注册表里的引擎的默认端口
+_NON_DRIVER_DEFAULT_PORT = {"redis": 6379}
 _MYSQL_WRITE_KEYWORDS = ("ALL PRIVILEGES", "INSERT", "UPDATE", "DELETE",
                          "CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT OPTION")
 
@@ -119,7 +121,9 @@ def probe_ssh(
     """只建 SSH 隧道验证跳板链（不连数据库）。"""
     if not cfg.jump_hosts:
         return ProbeResult(ok=False, message="该连接未配置 SSH 跳板")
-    default_port = {"mysql": 3306, "postgres": 5432, "redis": 6379}.get(cfg.engine, 0)
+    # 默认端口来自驱动注册表；redis 等非注册表引擎在此兜底（它有独立适配器）
+    from .drivers import engine_default_port
+    default_port = engine_default_port(cfg.engine) or _NON_DRIVER_DEFAULT_PORT.get(cfg.engine, 0)
     chain = " → ".join(h.label() for h in cfg.jump_hosts)
     tunnel: SSHTunnel | None = None
     try:

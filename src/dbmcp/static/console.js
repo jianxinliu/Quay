@@ -282,6 +282,80 @@
   // DgSelect 已抽出到 static/dg-select.js（与 redis/workflows 共用），此处从 window 引用。
   var DgSelect = window.DgSelect;
 
+  // 极简 Markdown → HTML（只供 AI 诊断文本用，不引外部库）：
+  // 支持 ```代码块```、#/~ 标题、-/* 列表、**粗体**、`行内代码`、> 引用、空行分段。
+  // 输入来自本机 AI 出口（纯排版文本），先整体转义再按块处理，不存在注入路径。
+  function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function renderMd(text) {
+    var src = String(text || "");
+    var lines = src.split("\n"), out = [], i = 0;
+    function inline(t) {
+      return escHtml(t)
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/`([^`]+)`/g, "<code>$1</code>");
+    }
+    while (i < lines.length) {
+      var line = lines[i];
+      // 代码块
+      if (line.trim().indexOf("```") === 0) {
+        var buf = [], lang = line.trim().slice(3);
+        i++;
+        while (i < lines.length && lines[i].trim().indexOf("```") !== 0) { buf.push(lines[i]); i++; }
+        i++;  // 跳过闭合的 ```
+        out.push("<pre" + (lang ? " class=\"lang-" + escHtml(lang) + "\"" : "") + ">"
+                 + escHtml(buf.join("\n")) + "</pre>");
+        continue;
+      }
+      // 标题（# 到 ####）
+      var hm = /^(#{1,4})\s+(.*)$/.exec(line);
+      if (hm) { out.push("<h" + hm[1].length + ">" + inline(hm[2]) + "</h" + hm[1].length + ">"); i++; continue; }
+      // 引用
+      if (/^>\s?/.test(line)) {
+        var q = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) { q.push(lines[i].replace(/^>\s?/, "")); i++; }
+        out.push("<blockquote>" + inline(q.join(" ")) + "</blockquote>");
+        continue;
+      }
+      // 无序列表（- 或 *）
+      if (/^\s*[-*]\s+/.test(line)) {
+        var items = [];
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+          items.push("<li>" + inline(lines[i].replace(/^\s*[-*]\s+/, "")) + "</li>"); i++;
+        }
+        out.push("<ul>" + items.join("") + "</ul>");
+        continue;
+      }
+      // 有序列表（1. 2.）
+      if (/^\s*\d+\.\s+/.test(line)) {
+        var oi = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          oi.push("<li>" + inline(lines[i].replace(/^\s*\d+\.\s+/, "")) + "</li>"); i++;
+        }
+        out.push("<ol>" + oi.join("") + "</ol>");
+        continue;
+      }
+      // 空行 = 段落间隔
+      if (!line.trim()) { i++; continue; }
+      // 普通段落：连续非空行合并
+      var para = [];
+      while (i < lines.length && lines[i].trim()
+             && lines[i].trim().indexOf("```") !== 0
+             && !/^(#{1,4})\s+/.test(lines[i])
+             && !/^>\s?/.test(lines[i])
+             && !/^\s*[-*]\s+/.test(lines[i])
+             && !/^\s*\d+\.\s+/.test(lines[i])) {
+        para.push(lines[i]); i++;
+      }
+      out.push("<p>" + inline(para.join(" ")) + "</p>");
+    }
+    return out.join("");
+  }
+
   // 递归把 EXPLAIN JSON 计划里的「表访问」摘出来做直观概览，兼容三种格式：
   // ① MySQL 旧 FORMAT=JSON（access_type ALL/ref…、cost_info、rows_examined_per_scan）
   // ② MySQL 新 JSON（schema v2.0，operation/estimated_rows/estimated_total_cost，access_type "table"=全表扫描）
@@ -386,10 +460,14 @@
         dropPlan: null,         // {items:[{t,db}], running, results}
         delSnip: null, delWf: null, wfAsk: null,
         history: [], showHistory: false,
+        selAnchor: "",           // shift 区间选择的锚点表 key（最近一次非 shift 点击）
         snippets: [], showSnipForm: false, snipDraft: { title: "", note: "" },
         snipAllConns: false,   // 片段列表：默认只显示当前连接的，切「全部」看所有连接
 
         exportOpen: false, copyOpen: false, submitOpen: false, editorReady: false, toast: "",
+        // 异步导出弹框：{jobId, fmt, status:'running'|'done'|'error', rows, elapsedAt, result, err, closed}
+        // closed=true 表示用户关掉了弹框——导出仍在后台跑，完成时改用 toast + 铃铛提醒。
+        expModal: null,
         bmOpen: false, bmTick: 0,   // 书签下拉菜单；bmTick 强制刷新预览文本
         colMenu: { show: false, x: 0, y: 0, ci: -1 },
         sug: { open: false, items: [], sel: 0, which: "", word: "" },  // WHERE/ORDER BY 字段提示
@@ -404,6 +482,9 @@
         aiEnabled: false,       // 系统设置：AI 辅助写 SQL 是否开启（决定「✨ AI」按钮是否出现）
         aiPanel: null,          // AI 生成面板：{question, explain, samples, tables, picked, filter, loading, running, error}
         checkup: null,          // 数据库体检浮层：{status:'loading'|'report'|'error', report, error, connLabel}
+        // 体检报告的 AI 诊断（挂在体检浮层内）：{status:'loading'|'done'|'error', text, error, sessionId}
+        checkupDiag: null,
+        diagQuestion: "",       // 诊断追问输入框
       };
     },
     computed: {
@@ -508,6 +589,33 @@
         return this.snippets.filter(function (s) { return s.connection === conn; });
       },
       selCount: function () { return Object.keys(this.selected).length; },
+      // 当前树里**实际渲染出来的**表行顺序（PG: 遍历 treeRows 里展开的 schema；
+      // 非 PG: tablesByDb['']）。shift 区间选择必须按这份顺序算区间——
+      // 直接遍历 tablesByDb 会带上已折叠或被 schema 过滤掉的库，选出一堆看不见的表。
+      visibleTableKeys: function () {
+        var self = this, keys = [];
+        if (!this.needsDb) {
+          if (this.openTf[""]) (this.tablesByDb[""] || []).forEach(function (t) {
+            keys.push(self.mk(t, ""));
+          });
+          return keys;
+        }
+        this.treeRows.forEach(function (row) {
+          if (row.kind !== "schema") return;
+          var db = row.name;
+          if (self.openDb[db] && self.openTf[db]) {
+            (self.tablesByDb[db] || []).forEach(function (t) { keys.push(self.mk(t, db)); });
+          }
+        });
+        return keys;
+      },
+      // DROP 弹框的结果摘要（成功 x / 失败 y / 共 z）
+      dropResultSummary: function () {
+        var p = this.dropPlan;
+        if (!p || !p.results) return "";
+        var ok = p.results.filter(function (r) { return r.ok; }).length;
+        return ok + " 成功 / " + (p.results.length - ok) + " 失败 · 共 " + p.results.length;
+      },
       // 执行计时（客户端秒表，随 clockTick 每 200ms 刷新，平滑准确）——从本 tab 开跑那一刻算起
       runElapsed: function () {
         this.clockTick;  // 依赖：让本 computed 随定时器重算
@@ -521,10 +629,13 @@
         return { height: this.editorH + "px" };
       },
       connOptions: function () {
+        var self = this;
         // Redis 连接走独立的 /admin/redis 控制台，不在 SQL 查询台里
         var sqlConns = this.connections.filter(function (c) { return c.engine !== "redis"; });
         var opts = [{ value: "", label: "选择连接…", env: "" }].concat(sqlConns.map(function (c) {
-          return { value: c.value, label: c.connection, env: c.environment || "", ic: engIcon(c.engine) };
+          var d = self.connDot(c.value);   // 状态点：绿=正常 / 琥珀=断开自愈中 / 红=重试耗尽
+          return { value: c.value, label: c.connection, env: c.environment || "", ic: engIcon(c.engine),
+                   dot: d.color, dotPulse: d.pulse, dotTip: d.tip };
         }));
         return opts.concat(this.workspaces.map(function (w) {
           return { value: "analysis/" + w, label: "⚗ " + w + " · 分析工作区", env: "" };
@@ -637,6 +748,7 @@
       },
     },
     methods: {
+      renderMd: function (text) { return renderMd(text); },
       flash: function (m) { var self = this; this.toast = m; clearTimeout(this._tt);
         this._tt = setTimeout(function () { self.toast = ""; }, 2600); },
       lvColor: function (l) { return LVL[l] || "#666"; },
@@ -878,9 +990,9 @@
         }
         this.activeId = id;
         var t = this.activeTab;
-        // 目标 tab 所在的组是折叠的话先展开：否则「切过去了」但 tab 条上根本看不见它，
-        // 从左树/⌘P 跳过来会像是点了没反应
-        if (t && this.tabGroupCollapsed[t.conn]) this.toggleTabGroup(t.conn);
+        // 顶部 tab 分组：只展开当前 tab 所在的组，其余自动折叠。连接一多时 N 个组全摊开，
+        // 当前组会被挤到滚动区外看不见；手动展开的组在下次切 tab 时也自动折回（组头仍可拖放）。
+        if (t) this.collapseOtherGroups(t.conn);
         var m = models.get(id);
         if (editor && m) {
           editor.setModel(m); editor.updateOptions({ readOnly: !!t && t.type === "ddl" });
@@ -903,6 +1015,21 @@
       },
       toggleTabGroup: function (conn) {
         this.tabGroupCollapsed[conn] = !this.tabGroupCollapsed[conn];
+        this.persistTabGroups();
+      },
+      // 除 keepConn 外的组全部折叠、keepConn 强制展开。Vue 3 代理式响应式下直接赋新键也能驱动
+      // 更新（同样的写法在 Vue 2 里是新键不可响应的坑——本组件已经是 Vue 3 构建）。
+      collapseOtherGroups: function (keepConn) {
+        var self = this, changed = false;
+        this.tabGroups.forEach(function (g) {
+          var c = g.conn || "";
+          if (c === keepConn) {
+            if (self.tabGroupCollapsed[c]) { self.tabGroupCollapsed[c] = false; changed = true; }
+          } else if (!self.tabGroupCollapsed[c]) { self.tabGroupCollapsed[c] = true; changed = true; }
+        });
+        if (changed) this.persistTabGroups();
+      },
+      persistTabGroups: function () {
         try { localStorage.setItem("dbm-tabgrp-collapsed", JSON.stringify(this.tabGroupCollapsed)); } catch (e) {}
       },
       onTabDragStart: function (id, e) { this.dragGroup = null; this.dragId = id; if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; },
@@ -1264,17 +1391,40 @@
           self.persist();
         });
       },
-      // 选中：点名单选，⌘/Ctrl 点多选
+      // 选中：点名单选，⌘/Ctrl 点多选，shift 点按可见顺序区间选择
+      // （像 Finder/表格：先点一个锚点，再 shift 点另一个，两者之间的表全选）
       clickTable: function (e, t, db) {
         var k = this.mk(t, db);
+        if (e.shiftKey) {
+          var order = this.visibleTableKeys;   // computed：this 上取值即已求值，勿加括号
+          var ai = order.indexOf(this.selAnchor), bi = order.indexOf(k);
+          if (this.selAnchor && ai >= 0 && bi >= 0) {
+            var from = Math.min(ai, bi), to = Math.max(ai, bi);
+            var sel = {};
+            for (var i = from; i <= to; i++) {
+              var kk = order[i];
+              // 反解 mk 的 key（(db||"") + "|" + t）——直接用 {t,db} 构造会漏掉
+              // 「同名的表与库前缀」的边界情况，split("|", 2) 更稳
+              var cut = kk.indexOf("|");
+              sel[kk] = { db: kk.slice(0, cut), t: kk.slice(cut + 1) };
+            }
+            this.selected = sel;
+            return;
+          }
+          // 锚点不在当前可见列表里（折叠了/切库了）：把这次点击当新锚点，单选
+          this.selected = {}; this.selected[k] = { t: t, db: db || "" };
+          this.selAnchor = k;
+          return;
+        }
         if (e.metaKey || e.ctrlKey) {
           if (this.selected[k]) delete this.selected[k];
           else this.selected[k] = { t: t, db: db || "" };
         } else {
           this.selected = {}; this.selected[k] = { t: t, db: db || "" };
         }
+        this.selAnchor = k;   // 记住锚点，供下次 shift 区间选择
       },
-      clearSel: function () { this.selected = {}; },
+      clearSel: function () { this.selected = {}; this.selAnchor = ""; },
       insertText: function (text) {
         if (!editor) return;
         var sel = editor.getSelection();
@@ -1412,6 +1562,9 @@
                      session_id: p.sessionId || null };
         // picked 已是 schema.table 限定名（跨库累计）；schema 仅作「整库」模式的默认库
         var sc = p.schema || this.aiSchema(); if (sc) body.schema = sc;
+        // PG 的执行库：表列表是在这个库下拉的（dbQs 带 db），取 DDL/样本也必须去这个库，
+        // 否则服务端会落到连接默认库，报表不存在、可用表为空（真实反馈）。
+        if (t.db && (this.connMeta && this.connMeta.engine === "postgres")) body.db = t.db;
         apiPost("/admin/sql/ai", body).then(function (d) {
           if (!self.aiPanel) return;
           p.running = false;
@@ -2016,6 +2169,17 @@
       },
       // 某连接是否不健康（用于左树/连接选择器画状态点）
       healthOf: function (conn) { return (conn && this.connHealth[conn]) || null; },
+      // 连接状态点配色：健康端点只返回**非 ok** 的连接，所以「查不到」即正常（绿）。
+      // 琥珀=中断但后台正在自愈；红=退避阶梯走完仍连不上（exhausted），提示人看一眼。
+      // 健康端的文字说明（含「约 N 秒后自动重连」）挂在点的 title 上，悬停可见。
+      connDot: function (conn) {
+        var h = this.healthOf(conn);
+        // healthText 自带完整述（含「约 N 秒后自动重连」/「已连续 N 次失败」），直接复用
+        if (!h) return { color: "var(--dg-green)", pulse: false, tip: "连接正常" };
+        if (h.state === "exhausted")
+          return { color: "var(--dg-red)", pulse: true, tip: "连接断开 · " + this.healthText(h) };
+        return { color: "var(--dg-amber)", pulse: true, tip: this.healthText(h) };
+      },
       // 一次执行失败是否属于「连接问题」——服务端在 error_kind 里标好了，
       // 这样第一次撞上连接错误（健康位还没打标）时也能立刻给出重连入口。
       isConnErr: function (t) {
@@ -2093,7 +2257,11 @@
         rep.checks.forEach(function (c) { if (c.status === st) n++; });
         return n;
       },
-      closeCheckup: function () { this.checkup = null; },
+      closeCheckup: function () { this.checkup = null; this.checkupDiag = null; this.diagQuestion = ""; },
+      closeDropPlan: function () {
+        if (this.dropPlan && this.dropPlan.running) { this.flash("DROP 正在执行，请稍候"); return; }
+        this.dropPlan = null;
+      },
       checkupStatusLabel: function (s) {
         return ({ ok: "正常", info: "参考", warn: "需关注", critical: "严重", unknown: "无法测量" })[s] || s;
       },
@@ -2140,6 +2308,40 @@
           });
         }
         this.copyCheckupText(out.join("\n"), "报告已复制为 Markdown");
+      },
+      // AI 诊断：把体检报告 + 连接信息（引擎/版本/环境/范围）发给 AI，拿回诊断与建议。
+      // 报告 JSON 由前端回传，服务端补非敏感的连接信息后喂给 AI；不传报告则服务端现场重跑体检。
+      // question 为空 = 首轮诊断（「整体诊断 + 优先处理项」）；sessionId 非空 = 追问续接会话。
+      aiDiagnose: function () {
+        var t = this.activeTab, self = this;
+        if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        if (this.checkupDiag && this.checkupDiag.status === "loading") return;  // 防重复点击
+        var sid = (this.checkupDiag && this.checkupDiag.sessionId) || "";
+        var q = this.diagQuestion.trim();
+        if (!sid && !q) q = "";   // 首轮可以为空（服务端给默认诊断要求）；追问必须有问题
+        if (sid && !q) { this.flash("请输入追问内容"); return; }
+        var body = { conn: t.conn, question: q };
+        if (t.schema) body.schema = t.schema;
+        if (this.pgDb) body.db = this.pgDb;
+        if (sid) body.session_id = sid;
+        if (this.checkup && this.checkup.report) body.report = JSON.stringify(this.checkup.report);
+        this.checkupDiag = { status: "loading", text: "", error: "", sessionId: sid };
+        apiPost("/admin/sql/checkup/ai", body).then(function (d) {
+          if (d && d.ok) {
+            self.checkupDiag = { status: "done", text: d.diagnosis || "",
+                                error: "", sessionId: d.session_id || sid };
+            self.diagQuestion = "";
+          } else {
+            self.checkupDiag = { status: "error", text: "", error: (d && d.error) || "诊断失败", sessionId: sid };
+          }
+        }).catch(function (e) {
+          self.checkupDiag = { status: "error", text: "", error: String(e), sessionId: sid };
+        });
+      },
+      closeCheckupDiag: function () { this.checkupDiag = null; this.diagQuestion = ""; },
+      copyDiagnosis: function () {
+        var d = this.checkupDiag;
+        if (d && d.text) this.copyCheckupText(d.text, "诊断已复制");
       },
       // 选中多条执行：先整批评估，含写操作就只确认一次，确认后逐条执行不再询问。
       // 语法错误在这一步整批拦下——不能前几条已经写进去了才发现后面有一条写错。
@@ -3220,18 +3422,100 @@
         if (!sql.trim()) { this.flash("请输入 SQL"); return; }
         this.run(false, 0, "EXPLAIN ANALYZE " + sql);
       },
+      // 导出「当前展示的这一页结果」：用产生该结果的 SQL，而不是编辑器全文——
+      // 编辑器里可能有多条语句，拿全文会被分类器判成多语句写操作而拒绝导出（真实反馈）。
+      resultSql: function (t) {
+        var rt = t.results && t.results.length ? t.results[t.resultIdx] : null;
+        if (rt && rt.sql) return rt.sql;
+        if (t.readSql) return t.readSql;   // 数据 tab：上次执行的 SELECT（含 WHERE/排序/分页）
+        return this.currentSql();
+      },
+      // 导出完整结果集（异步）：提交后台任务 → 弹框显示行数+耗时；可关掉弹框，
+      // 导出仍在后台跑，完成后 toast + 铃铛提醒下载。文件落服务端，凭 token 下载。
       exportAs: function (fmt) {
         this.exportOpen = false;
         var self = this, t = this.activeTab; if (!t) return;
-        var fd = new FormData(); fd.append("conn", t.conn); fd.append("sql", this.currentSql()); fd.append("format", fmt);
+        if (this.expModal && this.expModal.status === "running") { this.flash("已有导出任务在跑"); return; }
+        var fd = new FormData();
+        fd.append("conn", t.conn); fd.append("sql", this.resultSql(t)); fd.append("format", fmt);
         if (t.schema) fd.append("schema", t.schema);
-        fetch("/admin/sql/export", { method: "POST", body: fd }).then(function (r) {
-          if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || "导出失败"); });
-          var dispo = r.headers.get("Content-Disposition") || "";
-          var mm = /filename="?([^"]+)"?/.exec(dispo);
-          var name = mm ? mm[1] : "export." + fmt;
-          return r.blob().then(function (b) { download(b, name); self.flash("已导出 " + name); });
-        }).catch(function (e) { self.flash("" + (e.message || e)); });
+        if (t.db) fd.append("db", t.db);   // PG：结果在哪个库，就去那个库导
+        apiPost("/admin/sql/export_async", { conn: t.conn, sql: this.resultSql(t), format: fmt,
+                                             schema: t.schema || null, db: t.db || null })
+          .then(function (d) {
+            if (!d.ok) { self.flash(d.error || "导出失败"); return; }
+            self.expModal = { jobId: d.job_id, fmt: fmt, status: "running", rows: 0,
+                              elapsedAt: Date.now(), result: null, err: "", closed: false };
+            self.pollExport(d.job_id);
+          })
+          .catch(function (e) { self.flash("" + (e.message || e)); });
+      },
+      pollExport: function (jobId) {
+        var self = this;
+        var m = this.expModal;
+        if (!m || m.jobId !== jobId) return;          // 弹框被重置/开始了新导出
+        apiGet("/admin/sql/job?id=" + jobId).then(function (d) {
+          var m2 = self.expModal;
+          if (!m2 || m2.jobId !== jobId) return;
+          if (!d.ok) { m2.status = "error"; m2.err = d.error || "任务丢失"; return; }
+          if (d.status === "running") {
+            m2.status = "running";
+            if (d.progress && d.progress.rows) m2.rows = d.progress.rows;
+            // 客户端秒表锚定服务端真实耗时（与 pollJob 同一套做法）
+            m2.elapsedAt = Date.now() - (d.elapsed_ms || 0);
+            setTimeout(function () { self.pollExport(jobId); }, 300);
+            return;
+          }
+          if (d.status === "error" || d.status === "canceled") {
+            m2.status = "error";
+            m2.err = d.error || (d.status === "canceled" ? "已取消" : "导出失败");
+            if (d.error_kind) self.loadHealth();
+            return;
+          }
+          // 完成
+          m2.status = "done";
+          m2.elapsedAt = Date.now() - (d.elapsed_ms || 0);   // 用最终耗时锚定，显示定格在真实值
+          var r = d.result || {};
+          m2.rows = r.row_count || m2.rows;
+          m2.result = r;
+          // 弹框已关：toast 提醒 + 铃铛未读数由 SSE/轮询自动 +1（后端已写收件箱）
+          if (m2.closed) {
+            self.flash("导出完成：" + (r.filename || "export") + "（" + self.fmtN(m2.rows) + " 行）");
+          }
+        }).catch(function () {                        // 网络抖动：稍后重试
+          setTimeout(function () { self.pollExport(jobId); }, 1200);
+        });
+      },
+      cancelExport: function () {
+        var m = this.expModal; if (!m || m.status !== "running") return;
+        var self = this, jid = m.jobId;
+        apiPost("/admin/sql/cancel", { id: jid }).then(function (d) {
+          self.flash(d.ok ? "已请求取消导出" : "导出已结束，无需取消");
+        }).catch(function (e) { self.flash("取消失败：" + e); });
+      },
+      closeExportModal: function () {
+        var m = this.expModal;
+        if (!m) return;
+        if (m.status === "running") { m.closed = true; this.expModal = null; }  // 后台继续
+        else this.expModal = null;
+      },
+      downloadExport: function () {
+        var m = this.expModal; if (!m || !m.result) return;
+        var url = m.result.download_url;
+        // 绝对链接直接打开；相对链接（base_url 没配）走同源 fetch
+        if (/^https?:/.test(url)) { window.open(url, "_blank"); return; }
+        fetch(url).then(function (r) {
+          if (!r.ok) throw new Error("文件已过期或不存在");
+          return r.blob();
+        }).then(function (b) { download(b, m.result.filename); })
+          .catch(function (e) { /* fetch 失败时直接跳转让浏览器处理 */ window.open(url, "_blank"); });
+      },
+      // 弹框里显示的耗时（秒），随 clockTick 刷新
+      exportElapsed: function () {
+        var m = this.expModal;
+        if (!m) return "0.0";
+        // elapsedAt 恒为 Date.now() - 已知耗时：运行中随 clockTick 自然递增，完成态定格
+        return ((Date.now() - m.elapsedAt) / 1000).toFixed(1);
       },
       // ⌘/Ctrl+S：把当前 SQL 保存到服务端片段库（服务管理的 dbm.sqlite3，不落用户磁盘）。
       // 已保存过的 tab（有 snippetId）直接原地覆盖同一条；新 tab 弹命名表单。
@@ -3433,6 +3717,9 @@
           rawTabs.forEach(function (t) {  // 恢复编辑器光标/滚动位置，等 initEditor 建好 editor 后应用
             if (t.viewState) viewStates.set(t.id, t.viewState);
           });
+          // 启动时也按当前 tab 折叠其余分组：否则刷新页面回来 N 个组仍全摊开
+          // （restore 不走 switchTab，得单独调一次）
+          this.collapseOtherGroups(this.activeTab ? (this.activeTab.conn || "") : "");
         } catch (e) { /* 损坏则从空开始 */ }
       },
 
@@ -3765,6 +4052,7 @@
           e.preventDefault(); self.saveCurrent();
         }
         if (e.key === "Escape" && self.checkup) { e.preventDefault(); self.closeCheckup(); }
+        if (e.key === "Escape" && self.dropPlan) { e.preventDefault(); self.closeDropPlan(); }
       });
       window.addEventListener("resize", function () { if (chartInst) chartInst.resize(); });
       // 恢复的活动 tab 若在图表视图，重画
@@ -3788,6 +4076,14 @@
         <span class="act" @click="refreshTree" title="刷新（重新拉取）">↻</span></span></div>
       <div v-show="acc.tree" class="acc-body grow">
       <div v-if="!activeTab || !activeTab.conn" class="dg-empty">先选择连接</div>
+      <!-- 连接不可用时树里画「tables (0)」是骗人的——会让人以为库是空的。换成明确的断连提示
+           + 就地重连入口（健康位非空即不健康；健康时整块不渲染）。 -->
+      <div v-else-if="activeHealth" class="dg-tree-down" :class="{gone: activeHealth.state==='exhausted'}">
+        <div class="t">{{ healthText(activeHealth) }}</div>
+        <div v-if="activeHealth.last_error" class="why" :title="activeHealth.last_error">{{ activeHealth.last_error }}</div>
+        <button class="dg-btn" :disabled="reconnecting" @click="reconnect(activeTab.conn)">
+          {{ reconnecting ? "重连中…" : "↻ 立即重连" }}</button>
+      </div>
       <template v-else-if="needsDb">
         <!-- 切库时 databases 会先清空再重填；这条工具条若跟着消失又出现，整棵树会上下
              弹一次（真实反馈「点击的时候会跳动」）。PG 只要还有库就一直挂着。 -->
@@ -3959,20 +4255,6 @@
         </template>
       </template>
       <button class="dg-tab-add" @click="newTab({})" title="新建查询">＋</button>
-    </div>
-    <div v-if="dropPlan" class="dg-drop">
-      <div class="hd">⚠ 高危操作：DROP {{ dropPlan.items.length }} 张表（<b>不可逆</b>，writer 账号直接执行并审计）</div>
-      <div class="list"><code v-for="i in dropPlan.items" :key="qn(i)">{{ qn(i) }}</code></div>
-      <div v-if="dropPlan.results" class="res">
-        <div v-for="r in dropPlan.results" :key="r.q" :class="r.ok?'okline':'errline'">{{ r.ok?'✓':'✗' }} {{ r.q }} <span v-if="r.error">— {{ r.error }}</span></div>
-      </div>
-      <div class="acts">
-        <template v-if="!dropPlan.results">
-          <button class="dg-btn danger" :disabled="dropPlan.running" @click="confirmDrop">{{ dropPlan.running ? "执行中…" : "确认 DROP" }}</button>
-          <button class="dg-btn" :disabled="dropPlan.running" @click="dropPlan=null">取消</button>
-        </template>
-        <button v-else class="dg-btn" @click="dropPlan=null">关闭</button>
-      </div>
     </div>
     <div v-if="importPlan" class="dg-drop" style="background:#1f2d3a;border-color:#2f4a63">
       <div class="hd" style="color:#9fc6ee">导入 <code>{{ importPlan.db ? importPlan.db + "." + importPlan.t : importPlan.t }}</code> 快照到分析工作区（reader 拉取，受审计与行数上限）</div>
@@ -4336,7 +4618,9 @@
               <td class="gut" @mousedown.prevent @click.stop="rowClick(ri,$event)"
                   :title="isDelRow(ri) ? '已标记删除（提交时执行）' : '点击选择行'">{{ isDelRow(ri) ? '␡' : ri+1 }}</td>
               <td v-for="(v,ci) in row" :key="ci" :title="cellTitle(v)" :data-cell="ri+':'+ci"
-                  :class="{editable: activeTab.type==='data', vsel: activeTab.vsel && activeTab.vsel.ri===ri && activeTab.vsel.ci===ci,
+                  :class="{editable: activeTab.type==='data',
+                           editing: activeTab.edit && activeTab.edit.ri===ri && activeTab.edit.ci===ci,
+                           vsel: activeTab.vsel && activeTab.vsel.ri===ri && activeTab.vsel.ci===ci,
                            edited: isEditedCell(ri,ci), hit: isHit(ri,ci), curhit: isCurHit(ri,ci),
                            csel: isCellSel(ri,ci)}"
                   @click="cellClick(ri,ci)"
@@ -4483,6 +4767,74 @@
     </div>
   </div>
   <!-- 数据库体检报告浮层：逐项 status + 值 + 解读，失败项标「无法测量」而非隐藏 -->
+  <!-- 异步导出弹框：实时行数 + 耗时；可关掉（后台继续跑，完成 toast 提醒） -->
+  <div v-if="expModal" class="dg-exp" @click.self="closeExportModal">
+    <div class="box">
+      <div class="hd">
+        <span class="t">导出结果</span>
+        <span class="sub">{{ expModal.fmt.toUpperCase() }}</span>
+        <span class="x" @click="closeExportModal" title="关闭">✕</span>
+      </div>
+      <div v-if="expModal.status === 'running'" class="body">
+        <span class="spin"></span>
+        <span class="txt">正在导出</span>
+        <span class="num">{{ fmtN(expModal.rows) }} 行</span>
+        <span class="meta">· {{ exportElapsed() }} s</span>
+      </div>
+      <div v-else-if="expModal.status === 'error'" class="body err">
+        <span class="txt">✗ 导出失败</span>
+        <span class="meta">{{ expModal.err }}</span>
+      </div>
+      <div v-else class="body ok">
+        <span class="txt">✓ 导出完成</span>
+        <span class="num">{{ fmtN(expModal.rows) }} 行</span>
+        <span class="meta">· {{ exportElapsed() }} s · {{ expModal.result.byte_size ? Math.ceil(expModal.result.byte_size / 1024) + " KB" : "" }}</span>
+        <span v-if="expModal.result.truncated" class="meta warn">已达导出上限，结果被截断</span>
+      </div>
+      <div class="ft">
+        <button v-if="expModal.status === 'running'" class="ck-mini" @click="cancelExport">取消</button>
+        <button v-if="expModal.status === 'done'" class="ck-mini primary" @click="downloadExport">下载 {{ expModal.result.filename }}</button>
+        <button v-if="expModal.status === 'error'" class="ck-mini" @click="closeExportModal">关闭</button>
+        <span class="ft-note" v-if="expModal.status === 'running'">关掉弹框也会继续导出，完成后提醒你</span>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="dropPlan" class="dg-drop-modal" @click.self="closeDropPlan">
+    <div class="box">
+      <div class="hd">
+        <span class="t">高危操作：DROP {{ dropPlan.items.length }} 张表</span>
+        <span class="sub">writer 账号执行 · 落审计 · <b>不可逆</b></span>
+        <span class="x" @click="closeDropPlan" title="关闭（Esc）">✕</span>
+      </div>
+      <div class="dp-body">
+        <div class="dp-warn">即将删除以下表（含全部数据），请逐个核对后确认：</div>
+        <div class="dp-list">
+          <code v-for="i in dropPlan.items" :key="qn(i)">{{ qn(i) }}</code>
+        </div>
+        <div v-if="dropPlan.results" class="dp-res">
+          <div class="dp-res-hd">执行结果（{{ dropResultSummary }}）</div>
+          <div v-for="r in dropPlan.results" :key="r.q" class="dp-res-row" :class="r.ok ? 'ok' : 'err'">
+            <span class="mk">{{ r.ok ? "✓" : "✗" }}</span><span class="q">{{ r.q }}</span>
+            <span v-if="r.error" class="why" :title="r.error">{{ r.error }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="ft">
+        <template v-if="!dropPlan.results">
+          <button class="ck-mini danger" :disabled="dropPlan.running" @click="confirmDrop">
+            {{ dropPlan.running ? "执行中…" : "确认 DROP " + dropPlan.items.length + " 张表" }}</button>
+          <button class="ck-mini" :disabled="dropPlan.running" @click="closeDropPlan">取消</button>
+          <span class="ft-note">执行期间请勿关闭本页</span>
+        </template>
+        <template v-else>
+          <button class="ck-mini primary" @click="closeDropPlan">关闭</button>
+          <span class="ft-note">失败的需要你逐条核对原因；成功的表已从左树移除</span>
+        </template>
+      </div>
+    </div>
+  </div>
+
   <div v-if="checkup" class="dg-checkup" @click.self="closeCheckup">
     <div class="box">
       <div class="hd">
@@ -4518,6 +4870,33 @@
             </div>
           </div>
         </div>
+        <!-- AI 诊断：把上面的报告 + 连接信息丢给 AI，拿回「该优先处理什么、为什么、怎么办」。
+             只在 aiEnabled 时出现；诊断进行中/出错/完成都在这块区域内展示，不遮挡报告。 -->
+        <div v-if="checkupDiag" class="ck-ai">
+          <div class="ck-ai-hd">
+            <span class="t">✦ AI 诊断</span>
+            <span class="acts">
+              <button v-if="checkupDiag.status === 'done'" class="ck-mini" @click="copyDiagnosis">复制</button>
+              <button class="ck-mini" @click="closeCheckupDiag">收起</button>
+            </span>
+          </div>
+          <div v-if="checkupDiag.status === 'loading'" class="ck-ai-loading">
+            <span class="spin"></span> AI 正在分析体检报告…
+          </div>
+          <div v-else-if="checkupDiag.status === 'error'" class="ck-ai-err">
+            {{ checkupDiag.error }}
+            <button class="ck-mini" @click="aiDiagnose">重试</button>
+          </div>
+          <!-- 用 v-html 渲染 AI 产出的 Markdown：内容来自本机 AI 出口，且只是排版文本，
+               不含可执行脚本路径（与工作流 AI 面板同一种处理方式）。 -->
+          <div v-else class="ck-ai-text" v-html="renderMd(checkupDiag.text)"></div>
+          <div class="ck-ai-ask">
+            <input v-model="diagQuestion" placeholder="接着问：例如「缓存命中率低怎么处理？」"
+                   @keydown.enter="aiDiagnose" :disabled="checkupDiag.status === 'loading'">
+            <button class="ck-mini" :disabled="checkupDiag.status === 'loading'"
+                    @click="aiDiagnose">{{ checkupDiag.sessionId ? "追问" : "诊断" }}</button>
+          </div>
+        </div>
         <div class="ck-list">
           <div v-for="g in checkupGroups" :key="g.name" class="ck-dim">
             <div class="ck-dim-hd">
@@ -4542,6 +4921,9 @@
         </div>
       </template>
       <div class="ft">
+        <button v-if="aiEnabled" class="ck-mini ai" @click="aiDiagnose"
+                :disabled="checkup.status !== 'report' || (checkupDiag && checkupDiag.status === 'loading')"
+                title="把体检报告和连接信息交给 AI，给出优先处理项与建议">✦ AI 诊断</button>
         <button class="ck-mini" @click="copyCheckupReport">复制报告</button>
         <button class="ck-mini" @click="runCheckup" :disabled="checkup.status === 'loading'">重新体检</button>
         <span class="ft-note">逐项只读诊断 · 权限不足的指标自动标「无法测量」 · Esc 关闭</span>

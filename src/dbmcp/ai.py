@@ -199,6 +199,88 @@ DEFAULT_WORKFLOW_PROMPT = (
     "尽量用少而清晰的节点表达需求；取数节点的 SQL 只取需要的列并带合理 LIMIT。"
 )
 
+
+# ---------- 体检报告 AI 诊断 ----------
+
+# 诊断用的系统提示词（可在系统设置覆盖）。约束：基于报告里**真实存在**的指标说话，
+# 不臆造数值；unknown 项明确说是权限不足、不要当成「指标正常」；建议要可落地。
+DEFAULT_DIAGNOSIS_PROMPT = """你是一位经验丰富的数据库 DBA。根据给定的数据库体检报告与连接信息，给出诊断与建议。
+
+要求：
+1. 只基于报告中**真实给出**的指标下结论；报告中标「无法测量」的项，明确说明是权限不足等原因导致，不要当作正常，也不要编造数值。
+2. 优先级分明：先列出**必须尽快处理**的问题（critical/严重项），再列需关注项；正常项不必逐条复述。
+3. 每个问题给出：可能的原因、具体的处理建议（可执行的 SQL 或命令、或明确的操作步骤）、以及风险与注意事项。
+4. 区分「指标本身异常」与「业务可接受」：结合给定的环境（dev/staging/prod）判断严重程度，生产环境的标准更严格。
+5. 若报告整体健康，简要说明哪些方面可以观察趋势即可，不要硬找问题。
+6. 用中文输出，使用 Markdown，结构清晰、言简意赅。"""
+
+
+def build_diagnosis_prompt(
+    system_prompt: str,
+    db_info: dict[str, str],
+    report_md: str,
+    question: str,
+) -> str:
+    """拼出体检诊断的完整 prompt（纯函数）。
+
+    db_info: 连接侧的非敏感信息（引擎/版本/环境/范围，不含 host 与密码）。
+    report_md: checkup.report_to_markdown 的输出。
+    question: 用户的具体追问；空时由契约给出默认诊断要求。
+    """
+    parts = [(system_prompt or DEFAULT_DIAGNOSIS_PROMPT).strip(), ""]
+    parts.append("=== 数据库连接信息（非敏感）===")
+    parts.append(f"引擎：{db_info.get('engine', '')}")
+    if db_info.get("version"):
+        parts.append(f"版本：{db_info['version']}")
+    if db_info.get("environment"):
+        parts.append(f"环境：{db_info['environment']}")
+    if db_info.get("scope"):
+        parts.append(f"体检范围（库/schema）：{db_info['scope']}")
+    parts.append("")
+    parts.append("=== 体检报告 ===")
+    parts.append((report_md or "").strip())
+    parts.append("")
+    parts.append("=== 诊断要求 ===")
+    parts.append((question or "请给出整体诊断：哪些项需要优先处理、原因与具体建议。").strip())
+    parts.append("")
+    parts.append("用中文输出 Markdown 诊断报告。")
+    return "\n".join(parts)
+
+
+def build_diagnosis_followup_prompt(question: str) -> str:
+    """诊断追问 prompt（续接会话）：只带新的问题，不重发报告。"""
+    return "基于刚才的体检诊断，进一步回答：\n\n" + (question or "").strip()
+
+
+def generate_diagnosis(
+    *,
+    system_prompt: str,
+    db_info: dict[str, str],
+    report_md: str,
+    question: str,
+    provider: str,
+    model: str,
+    timeout: int,
+    cli_path: str = "",
+    session_id: str | None = None,
+    api: dict | None = None,
+) -> tuple[str, str]:
+    """体检诊断：拼 prompt → 调 AI → 返回 (诊断正文, session_id)。失败抛 AIError。
+
+    session_id 非空 = 追问：续接同一会话、只发新问题（报告上下文 AI 侧已有）。
+    """
+    if session_id:
+        prompt = build_diagnosis_followup_prompt(question)
+    else:
+        prompt = build_diagnosis_prompt(system_prompt, db_info, report_md, question)
+    raw, new_sid = run_ai(prompt, provider=provider, model=model, timeout=timeout,
+                          cli_path=cli_path, session_id=session_id, **_api_kwargs(api))
+    text = _strip_fences((raw or "").strip())
+    if not text:
+        raise AIError("AI 未返回诊断内容，请重试")
+    return text, new_sid
+
+
 _WF_CONTRACT = "只输出该 JSON 对象，不要 markdown 代码围栏、不要额外解释。"
 
 

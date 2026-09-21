@@ -383,3 +383,74 @@ def test_generate_sql_followup_sends_new_tables_ddl(monkeypatch):
                     provider="claude", model="", timeout=10, session_id="sid-1")
     assert "CREATE TABLE users" in captured["prompt"]
     assert "关联用户表" in captured["prompt"]
+
+
+# ---------- 体检诊断 prompt ----------
+
+def test_build_diagnosis_prompt_has_db_info_report_and_question():
+    p = ai.build_diagnosis_prompt(
+        "", {"engine": "mysql", "version": "8.0", "environment": "prod", "scope": "shop"},
+        "# 体检报告\n\n## 容量与连接\n- [需关注] **连接占用** — 82%",
+        "连接占用 82% 该怎么办")
+    assert ai.DEFAULT_DIAGNOSIS_PROMPT.strip()[:12] in p   # 空系统提示回退默认
+    assert "引擎：mysql" in p
+    assert "版本：8.0" in p
+    assert "环境：prod" in p
+    assert "体检范围（库/schema）：shop" in p
+    assert "[需关注] **连接占用** — 82%" in p
+    assert "连接占用 82% 该怎么办" in p
+    assert "用中文输出 Markdown 诊断报告" in p
+
+
+def test_build_diagnosis_prompt_omits_missing_optional_db_info():
+    p = ai.build_diagnosis_prompt("", {"engine": "sqlite"}, "# 报告", "")
+    assert "引擎：sqlite" in p
+    assert "版本：" not in p
+    assert "环境：" not in p
+    # 空 question 用默认诊断要求
+    assert "整体诊断" in p
+
+
+def test_build_diagnosis_followup_prompt_has_no_report():
+    p = ai.build_diagnosis_followup_prompt("需要扩容连接池吗")
+    assert "需要扩容连接池吗" in p
+    assert "体检报告" not in p
+    assert "基于刚才的体检诊断" in p
+
+
+def test_generate_diagnosis_strips_fences_and_returns_session(monkeypatch):
+    monkeypatch.setattr(ai, "run_ai", lambda prompt, **kw: ("```markdown\n## 诊断\n\n连接数偏高\n", "sid-d"))
+    text, sid = ai.generate_diagnosis(
+        system_prompt="", db_info={"engine": "mysql"}, report_md="# 报告", question="",
+        provider="claude", model="", timeout=10)
+    assert text.startswith("## 诊断")
+    assert "```" not in text
+    assert sid == "sid-d"
+
+
+def test_generate_diagnosis_empty_output_raises(monkeypatch):
+    monkeypatch.setattr(ai, "run_ai", lambda prompt, **kw: ("   ", "sid-e"))
+    with pytest.raises(ai.AIError):
+        ai.generate_diagnosis(
+            system_prompt="", db_info={"engine": "mysql"}, report_md="# 报告",
+            question="q", provider="claude", model="", timeout=10)
+
+
+def test_generate_diagnosis_followup_uses_session_prompt(monkeypatch):
+    seen = {}
+
+    def fake(prompt, **kw):
+        seen["prompt"] = prompt
+        seen["session_id"] = kw.get("session_id")
+        return ("追问答案", "sid-f")
+
+    monkeypatch.setattr(ai, "run_ai", fake)
+    text, sid = ai.generate_diagnosis(
+        system_prompt="", db_info={"engine": "mysql"}, report_md="# 报告",
+        question="那缓存呢", provider="claude", model="", timeout=10, session_id="sid-old")
+    assert text == "追问答案"
+    assert sid == "sid-f"
+    assert seen["session_id"] == "sid-old"
+    assert "那缓存呢" in seen["prompt"]
+    # 追问不重发报告
+    assert "# 报告" not in seen["prompt"]

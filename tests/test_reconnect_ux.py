@@ -118,7 +118,7 @@ class TestJobErrorKind:
     def test_error_kind_propagates_through_job(self):
         mgr = JobManager(ttl_s=5)
 
-        def boom(_register):
+        def boom(_register, _report=None):
             e = RuntimeError("连接不可用")
             e.dbm_error_kind = "connection_exhausted"
             raise e
@@ -134,7 +134,7 @@ class TestJobErrorKind:
 
     def test_plain_error_has_empty_kind(self):
         mgr = JobManager(ttl_s=5)
-        jid = mgr.submit(("p", "c"), lambda _r: (_ for _ in ()).throw(ValueError("语法错")))
+        jid = mgr.submit(("p", "c"), lambda _r, _rp=None: (_ for _ in ()).throw(ValueError("语法错")))
         for _ in range(100):
             snap = mgr.get(jid)
             if snap["status"] != "running":

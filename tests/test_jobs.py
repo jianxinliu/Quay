@@ -23,12 +23,12 @@ def test_same_key_busy_rejects_second():
     gate = threading.Event()
     ran = []
 
-    def first(_register):
+    def first(_register, _report=None):
         ran.append("a")
         gate.wait(2)
         return {"v": "a"}
 
-    def second(_register):
+    def second(_register, _report=None):
         ran.append("b")
         return {"v": "b"}
 
@@ -51,7 +51,7 @@ def test_different_keys_run_in_parallel():
     mgr = JobManager()
     both_running = threading.Barrier(2, timeout=3)
 
-    def work(_register):
+    def work(_register, _report=None):
         both_running.wait()  # 只有两条同时在跑才能通过
         return "ok"
 
@@ -67,7 +67,7 @@ def test_cancel_running_invokes_canceller():
     canceled = threading.Event()
     proceed = threading.Event()
 
-    def work(register):
+    def work(register, _report=None):
         def canceller():
             canceled.set()
             proceed.set()  # 模拟 DB 层中断，让查询立即抛错返回
@@ -89,7 +89,7 @@ def test_cancel_frees_key_for_next_submit():
     mgr = JobManager()
     proceed = threading.Event()
 
-    def work(register):
+    def work(register, _report=None):
         register(lambda: proceed.set())
         proceed.wait(2)
 
@@ -98,7 +98,7 @@ def test_cancel_frees_key_for_next_submit():
     mgr.cancel(j1)
     assert _wait_until(lambda: mgr.get(j1)["status"] in ("canceled", "done"))
     # key 已释放
-    j2 = mgr.submit("c", lambda _r: "ok")
+    j2 = mgr.submit("c", lambda _r, _rp=None: "ok")
     assert _wait_until(lambda: mgr.get(j2)["status"] == "done")
 
 
@@ -109,7 +109,7 @@ def test_cancel_before_register_still_fires():
     release = threading.Event()
     fired = threading.Event()
 
-    def work(register):
+    def work(register, _report=None):
         entered.set()
         release.wait(2)  # 卡住，等 cancel 先到
 
@@ -129,7 +129,7 @@ def test_timing_field():
     """执行耗时非负、大致合理。"""
     mgr = JobManager()
 
-    def work(_register):
+    def work(_register, _report=None):
         time.sleep(0.05)
         return "ok"
 
@@ -141,10 +141,10 @@ def test_timing_field():
 def test_gc_removes_expired():
     """gc 清理超过 TTL 的已结束任务。"""
     mgr = JobManager(ttl_s=0)
-    j = mgr.submit("c", lambda _r: "ok")
+    j = mgr.submit("c", lambda _r, _rp=None: "ok")
     assert _wait_until(lambda: mgr.get(j)["status"] == "done")
     time.sleep(0.02)
-    mgr.submit("c2", lambda _r: "ok")  # 触发 gc
+    mgr.submit("c2", lambda _r, _rp=None: "ok")  # 触发 gc
     assert _wait_until(lambda: mgr.get(j) is None)
 
 
@@ -152,7 +152,7 @@ def test_error_job_reports_error():
     """任务抛错（非取消）→ status error，带错误文本。"""
     mgr = JobManager()
 
-    def boom(_register):
+    def boom(_register, _report=None):
         raise ValueError("boom")
 
     j = mgr.submit("c", boom)
@@ -163,6 +163,6 @@ def test_error_job_reports_error():
 def test_cancel_unknown_or_finished_returns_false():
     mgr = JobManager()
     assert mgr.cancel("nope") is False
-    j = mgr.submit("c", lambda _r: "ok")
+    j = mgr.submit("c", lambda _r, _rp=None: "ok")
     assert _wait_until(lambda: mgr.get(j)["status"] == "done")
     assert mgr.cancel(j) is False

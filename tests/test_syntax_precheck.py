@@ -99,6 +99,27 @@ class TestDryRunSyntaxCheck:
         res = _check_one_statement(_Conn(), "HANDLER orders OPEN", "mysql")
         assert res.supported is True and res.ok is True
 
+    def test_mysql_and_postgres_drivers_check_statement_runs(self):
+        """驱动的 PREPARE 复核路径必须能跑通。
+
+        曾有 bug：mysql 驱动用了 `_SYNTAX_CHECK_STMT_NAME` 却没 import，真实 MySQL
+        上一走语法复核就 NameError（SQLite 单测覆盖不到，ruff 才扫出来）。
+        """
+        from dbmcp.drivers import get_driver
+
+        class _Conn:
+            def __init__(self):
+                self.stmts = []
+
+            def execute(self, stmt, params=None):  # noqa: ANN001, ANN202
+                self.stmts.append((str(stmt), params))
+
+        for engine in ("mysql", "postgres"):
+            conn = _Conn()
+            res = get_driver(engine).check_statement(conn, "SELECT 1")
+            assert res == SyntaxCheck(supported=True, ok=True), engine
+            assert any("dbm_syntax_chk" in s for s, _ in conn.stmts), engine
+
     def test_postgres_ddl_is_not_checked(self, sa_engine):
         """PG 的 PREPARE 不接受 DDL（会报语法错），这类组合必须标为「无法复核」。"""
         res = dry_run_syntax_check(sa_engine, "ALTER TABLE t DROP PARTITION p1, p2", "postgres")

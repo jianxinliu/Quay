@@ -2,7 +2,9 @@
  *
  * 查询台 console.js / Redis 控制台 / 流程页 workflows.js 共用。挂到 window.DgSelect
  * 与 window.ENV_COLORS，业务页启动时 app.component("dg-select", window.DgSelect)。
- * 支持筛选（选项 > 8 显示搜索框）、环境色徽章、引擎图标。
+ * 支持筛选（选项 > 8 显示搜索框）、环境色徽章、引擎图标、连接状态点。
+ * 状态点（dot）：选项带 dot（css 颜色）即渲染一个圆点；dotPulse=true 时做呼吸闪烁
+ * 表示「断开但后台正在自愈」。查询台的连接下拉用它显示红/绿/琥珀三态。
  */
 (function () {
   "use strict";
@@ -33,6 +35,25 @@
         for (var i = 0; i < this.options.length; i++)
           if (this.options[i].value === v) return this.options[i].ic || null;
         return null;
+      },
+      // 当前项的状态点（颜色 / 是否呼吸 / 悬停说明）
+      selDot: function () {
+        var v = this.modelValue;
+        for (var i = 0; i < this.options.length; i++)
+          if (this.options[i].value === v) return this.options[i].dot || null;
+        return null;
+      },
+      selDotPulse: function () {
+        var v = this.modelValue;
+        for (var i = 0; i < this.options.length; i++)
+          if (this.options[i].value === v) return !!this.options[i].dotPulse;
+        return false;
+      },
+      selDotTip: function () {
+        var v = this.modelValue;
+        for (var i = 0; i < this.options.length; i++)
+          if (this.options[i].value === v) return this.options[i].dotTip || "";
+        return "";
       },
       envColor: function () { return function (e) { return ENV_COLORS[e] || "#64748b"; }; },
       filtered: function () {
@@ -69,6 +90,7 @@
     template:
       '<div class="dg-sel" :class="{up: drop === \'up\'}">'
       + '<button type="button" class="dg-sel-btn" @click.stop="toggle" :title="label">'
+      + '<span v-if="selDot" class="dg-sdot" :class="{pulse: selDotPulse}" :style="{background: selDot}" :title="selDotTip"></span>'
       + '<img v-if="selIc" class="dg-eng" :src="selIc.src" :title="selIc.label" alt="">'
       + '<span v-if="selEnv" class="dg-env" :style="{background: envColor(selEnv)}">{{ selEnv }}</span>'
       + '<span class="lb">{{ label }}</span><span class="ar">{{ drop === \'up\' ? "▴" : "▾" }}</span></button>'
@@ -78,6 +100,7 @@
       +     '<template v-for="(r, i) in rows" :key="i">'
       +       '<div v-if="r.group" class="dg-sel-group">{{ r.group }}</div>'
       +       '<div v-else class="dg-sel-item" :class="{cur: r.o.value === modelValue}" @click="pick(r.o.value)">'
+      +         '<span v-if="r.o.dot" class="dg-sdot" :class="{pulse: r.o.dotPulse}" :style="{background: r.o.dot}" :title="r.o.dotTip"></span>'
       +         '<img v-if="r.o.ic" class="dg-eng" :src="r.o.ic.src" :title="r.o.ic.label" alt="">'
       +         '<span v-if="r.o.env" class="dg-env" :style="{background: envColor(r.o.env)}">{{ r.o.env }}</span>{{ r.o.label }}</div>'
       +     '</template>'

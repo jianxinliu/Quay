@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .ai import DEFAULT_DIAGNOSIS_PROMPT as _AI_DIAGNOSIS_PROMPT_DEFAULT
 from .ai import DEFAULT_SQL_PROMPT as _AI_SQL_PROMPT_DEFAULT
 from .ai import DEFAULT_WORKFLOW_PROMPT as _AI_WF_PROMPT_DEFAULT
 
@@ -25,6 +26,10 @@ DEFAULTS: dict[str, object] = {
     "sql_word_wrap": False,      # 编辑器是否自动换行
     "sql_max_rows": 1000,        # 结果默认行上限（自动 LIMIT 兜底 / 非分页读取上限）
     "sql_max_cell_chars": 4096,  # 单元格最大字符数（超长值截断）
+    # 查询台「导出结果」的行数上限——与 sql_max_rows 解耦：屏幕上一页只看几百行，
+    # 但导出要的是**完整结果集**，被查询上限截断就没有导出的意义了；仍保留一个
+    # 较大的硬护栏防止把进程内存拖垮（导出是流式写盘，但序列化缓冲仍在内存里）。
+    "export_max_rows": 1_000_000,
     # agent 查询（query/sample_rows）是否按内置模式自动脱敏敏感列（password/token/secret…）。
     # **只作用于 agent 路径**——已认证的后台查询台与导出一律返回真实值。
     # 连接级 Policy.mask_default_patterns 可覆盖（None = 跟随这里）。
@@ -70,6 +75,7 @@ DEFAULTS: dict[str, object] = {
     "ai_max_tables": 40,           # 「整库」模式喂给 AI 的最大表数（超出要求收窄）
     "ai_sql_prompt": _AI_SQL_PROMPT_DEFAULT,  # 系统提示词（persona + SQL 约束），可编辑
     "ai_workflow_prompt": _AI_WF_PROMPT_DEFAULT,  # workflow 生成的系统提示词，可编辑
+    "ai_diagnosis_prompt": _AI_DIAGNOSIS_PROMPT_DEFAULT,  # 体检诊断的系统提示词，可编辑
     # ——provider=api（直连 HTTP API，接入面更广、省 CLI 开销）。密钥存 keyring，绝不落库
     "ai_api_base": "https://api.anthropic.com",  # API 根地址（anthropic 或 openai 兼容端点）
     "ai_api_format": "anthropic",  # 请求/响应格式：anthropic（Messages）/ openai（Chat Completions）
@@ -90,6 +96,7 @@ _INT_BOUNDS = {  # 整型设置项的合法区间（保存时夹取）
     "sql_page_size": (10, 2000),
     "sql_font_size": (10, 24),
     "sql_max_rows": (10, 500_000),
+    "export_max_rows": (100, 20_000_000),
     "sql_max_cell_chars": (256, 65_536),
     "redis_page_size": (10, 2000),
     "redis_key_limit": (100, 100_000),

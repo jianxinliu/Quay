@@ -901,3 +901,64 @@ async def test_mcp_tool_rejects_redis(service, tmp_path):
         with pytest.raises(ToolError) as ei:
             await c.call_tool("db_checkup", {"project": "demo", "connection": "cache"})
         assert "Redis" in str(ei.value)
+
+
+# =====================================================================
+# report_to_markdown：服务端权威 Markdown 渲染（供 AI 诊断当上下文）
+# =====================================================================
+
+def _sample_report_dict():
+    return {
+        "engine": "mysql", "version": "8.0.36", "scope": "shop",
+        "started_at": "2026-09-20T00:00:00+00:00", "elapsed_ms": 320,
+        "overall": "warn", "summary": "1 项需关注、1 项正常（共 2 项）",
+        "dimensions": [{"name": d[0], "title": d[1]} for d in checkup.DIMENSIONS],
+        "checks": [
+            {"name": "conn", "title": "连接占用", "status": "warn", "value": "82%",
+             "message": "连接数偏高", "details": ["db: 40 / 48"], "dimension": "capacity",
+             "privilege": ""},
+            {"name": "hit", "title": "缓存命中率", "status": "ok", "value": "99.1%",
+             "message": "", "details": [], "dimension": "performance", "privilege": ""},
+            {"name": "long", "title": "长查询", "status": "unknown", "value": "",
+             "message": "权限不足", "details": [], "dimension": "performance",
+             "privilege": "PROCESS"},
+        ],
+        "privileges": [
+            {"privilege": "PROCESS", "grant_sql": "GRANT PROCESS ON *.* TO 'u'@'%';",
+             "affects": ["长查询"]},
+        ],
+    }
+
+
+def test_report_to_markdown_has_engine_scope_summary_and_checks():
+    md = checkup.report_to_markdown(_sample_report_dict())
+    assert "# 数据库体检报告" in md
+    assert "mysql 8.0.36" in md
+    assert "范围：shop" in md
+    assert "1 项需关注、1 项正常（共 2 项）" in md
+    # 检查项按维度分组、带状态标签与值
+    assert "[需关注] **连接占用** — 82%" in md
+    assert "连接数偏高" in md
+    assert "db: 40 / 48" in md
+    assert "[正常] **缓存命中率** — 99.1%" in md
+    assert "[无法测量] **长查询**" in md
+
+
+def test_report_to_markdown_includes_privilege_gaps_and_grant():
+    md = checkup.report_to_markdown(_sample_report_dict())
+    assert "权限缺口" in md
+    assert "缺 PROCESS 权限" in md
+    assert "GRANT PROCESS ON *.* TO 'u'@'%';" in md
+
+
+def test_report_to_markdown_skips_empty_dimensions_and_handles_minimal_report():
+    md = checkup.report_to_markdown({"engine": "sqlite"})
+    assert "sqlite" in md
+    # 没有检查项时不应输出空的维度标题
+    assert "## " not in md
+
+
+def test_report_to_markdown_does_not_escape_backticks_in_grant_block():
+    """GRANT 块要保留 ``` 围栏，AI 才知道那是 SQL。"""
+    md = checkup.report_to_markdown(_sample_report_dict())
+    assert "```sql" in md

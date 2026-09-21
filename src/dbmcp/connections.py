@@ -18,6 +18,7 @@ from .config import (
     WriterAccount,
     save_config,
 )
+from .privileges import SUPPORTED_ENGINES as _PRIVILEGE_ENGINES
 from .secrets import SecretResolveError, delete_keyring_secret, store_keyring_secret
 
 
@@ -157,9 +158,10 @@ class ConnectionManager:
         hops = _build_jump_hosts(jump_hosts, self.config.ssh_identities)
         ssh_options = list(ssh_options_extra)
 
-        # 保存前自动权限校验（mysql/pg，未勾选强制时）：连库探测账号权限，
+        # 保存前自动权限校验（支持 GRANT/REVOKE 的引擎，未勾选强制时）：连库探测账号权限，
         # 超级用户 / 有写权限 / 连不上 → 阻止保存。在写 keyring 前用明文探测。
-        if engine in ("mysql", "postgres") and not force_privileged:
+        # 支持清单见 privileges.SUPPORTED_ENGINES——权限管理需要引擎专属 SQL，不随驱动自动获得。
+        if engine in _PRIVILEGE_ENGINES and not force_privileged:
             self._check_account_privilege(
                 engine, environment, host, port, database, user,
                 password, existing, hops, ssh_options, max_rows,

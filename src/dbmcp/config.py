@@ -12,7 +12,11 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-Engine = Literal["mysql", "postgres", "sqlite", "redis", "clickhouse"]
+# 引擎标识。刻意用 str 而不是 Literal：新增一种数据库时这里不用改——
+# 可用清单由运行时的驱动注册表决定（dbmcp.drivers.supported_engines()，
+# 外加有独立适配器的 redis）。配置加载阶段不校验引擎名，建连时 get_driver()
+# 找不到驱动会明确报出「未注册」并提示怎么加。
+Engine = str
 Environment = Literal["local", "dev", "staging", "prod"]
 
 DEFAULT_MAX_ROWS = 1000

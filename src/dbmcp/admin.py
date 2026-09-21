@@ -25,6 +25,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from .approvals import ApprovalError
+from .drivers import (
+    UnsupportedEngineError,
+    connectable_engines,
+    engine_default_port,
+    engine_dialect,
+    get_driver,
+)
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -32,6 +39,56 @@ if TYPE_CHECKING:
     from .service import CallerInfo, DbmService
 
 _COOKIE_NAME = "dbm_admin"
+
+# redis 有独立适配器（redis_engine.py，不走 SQLAlchemy），不在驱动注册表里；
+# 把它单列出来，是因为连接表单/默认端口/图标仍然要用到它。
+_NON_DRIVER_ENGINES = ("redis",)
+
+
+def _connectable_engines() -> tuple[str, ...]:
+    """连接表单下拉的引擎清单 = 已注册且可连接的驱动 + 独立适配器（redis）。
+
+    新增一种可连数据库时这里自动出现——只需在 drivers/ 加驱动并注册。
+    """
+    return tuple(connectable_engines()) + _NON_DRIVER_ENGINES
+
+
+def _engine_dialect(engine: str) -> str | None:
+    """sqlglot 方言名（用于 SQL 美化与编辑器 lint）。无方言/未注册 → None。"""
+    return engine_dialect(engine)
+
+
+# 非注册表引擎的图标（redis）；驱动自带的图标见各驱动的 icon 属性
+_EXTRA_ENGINE_ICONS = {"redis": "redis"}
+
+# 引擎 → 连接表单的默认端口（空串 = 不预填）。来自驱动的 default_port；redis 单列。
+def _engine_default_ports() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for e in _connectable_engines():
+        # redis 等非注册表引擎没有驱动，端口单列在下面
+        port = engine_default_port(e)
+        out[e] = str(port) if port else ""
+    out["redis"] = "6379"
+    return out
+
+
+# 「看起来仍是自动填的」端口集合：用户没定制时才允许引擎切换覆盖它。
+# 表单每次渲染都现算——晚注册的驱动（如测试替身）也能进下拉。
+def _default_ports_js() -> str:
+    return "{" + ",".join(f"{e}:'{v}'" for e, v in _engine_default_ports().items()) + "}"
+
+
+def _auto_ports_js() -> str:
+    return json.dumps(sorted({""} | set(_engine_default_ports().values())))
+
+
+def _engine_icon_file(engine: str) -> str | None:
+    """品牌 logo 文件名（devicon，vendored 到 static/db-icons/）；没有就 None。"""
+    try:
+        f = get_driver(engine).icon
+    except UnsupportedEngineError:
+        f = None
+    return f or _EXTRA_ENGINE_ICONS.get(engine)
 
 
 def _session_value(token: str) -> str:
@@ -179,8 +236,7 @@ def _format_sql(sql: str, engine: str) -> str:
     """用 sqlglot 美化 SQL（缩进/关键字对齐）；解析失败则原样返回。"""
     if not sql:
         return ""
-    dialect = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
-               "clickhouse": "clickhouse"}.get(engine)
+    dialect = _engine_dialect(engine)
     try:
         import sqlglot  # noqa: PLC0415
         out = sqlglot.transpile(sql, read=dialect, write=dialect, pretty=True)
@@ -344,16 +400,9 @@ def _env_badge(env: str) -> str:
     return f'<span class="badge" style="background:{color}">{_esc(env or "—")}</span>'
 
 
-# 引擎 → 真实品牌 logo 文件名（devicon，vendored 到 static/db-icons/；postgres 文件名为 postgresql）
-_ENGINE_ICON_FILE = {
-    "mysql": "mysql", "postgres": "postgresql", "sqlite": "sqlite",
-    "clickhouse": "clickhouse", "redis": "redis", "duckdb": "duckdb",
-}
-
-
 def _engine_icon(engine: str) -> str:
-    """连接列表里引擎名前的品牌 logo（无对应图标则空串）。"""
-    f = _ENGINE_ICON_FILE.get(engine)
+    """连接列表里引擎名前的品牌 logo（无对应图标则空串）。文件名来自驱动的 icon 属性。"""
+    f = _engine_icon_file(engine)
     if not f:
         return ""
     return (f"<img src='/admin/static/db-icons/{f}.svg' alt='' title='{_esc(engine)}' "
@@ -516,7 +565,7 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     ro = "readonly" if is_edit else ""
     engines_opts = "".join(
         f"<option value='{e}'{' selected' if cfg and cfg.engine == e else ''}>{e}</option>"
-        for e in ("mysql", "postgres", "clickhouse", "redis", "sqlite")
+        for e in _connectable_engines()
     )
     envs_opts = "".join(
         f"<option value='{e}'{' selected' if cfg and cfg.environment == e else ''}>{e}</option>"
@@ -671,8 +720,8 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
 
   // 新增模式：引擎决定默认端口，local 环境默认 host 127.0.0.1（不覆盖用户手改的值）
   if (!{is_edit_js}) {{
-    var DEFAULT_PORTS = {{mysql:'3306', postgres:'5432', redis:'6379', sqlite:''}};
-    var AUTO_PORTS = ['', '3306', '5432', '6379'];
+    var DEFAULT_PORTS = {_default_ports_js()};
+    var AUTO_PORTS = {_auto_ports_js()};
     var engineSel = form.querySelector('[name=engine]');
     var envSel = form.querySelector('[name=environment]');
     var hostInput = form.querySelector('[name=host]');
@@ -2904,7 +2953,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         name = str(f.get("name") or "")
         caller = _caller(req)
 
-        def _work_wf(_register) -> dict:  # noqa: ANN001
+        def _work_wf(_register, _report=None) -> dict:  # noqa: ANN001
             return {"kind": "workflow", **service.workflow_run(name, caller)}
 
         job_id = _jobmgr.submit(_solo_key(), _work_wf)
@@ -2923,7 +2972,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return JSONResponse({"ok": False, "error": "graph 不是合法 JSON"}, status_code=400)
         caller = _caller(req)
 
-        def _work_graph(_register) -> dict:  # noqa: ANN001
+        def _work_graph(_register, _report=None) -> dict:  # noqa: ANN001
             return {"kind": "workflow", **service.workflow_run_graph(workspace, graph, caller)}
 
         job_id = _jobmgr.submit(_solo_key(), _work_graph)
@@ -3213,9 +3262,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         """编辑器实时语法检查：sqlglot 按方言 parse，返回首个错误的行列。"""
         f = await req.form()
         sql = str(f.get("sql") or "")
-        dialect = str(f.get("dialect") or "mysql")
-        if dialect not in ("mysql", "postgres", "sqlite", "duckdb", "clickhouse"):
-            dialect = "mysql"
+        engine = str(f.get("dialect") or "mysql")
+        # 方言来自驱动注册表（分析工作台的 duckdb 也在其中）；未注册的引擎退回 mysql
+        dialect = _engine_dialect(engine) or "mysql"
         return JSONResponse({"ok": True, "errors": _lint_sql(sql, dialect)})
 
     @mcp.custom_route("/admin/sql/import", methods=["POST"])
@@ -3332,6 +3381,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         explain = str(f.get("explain") or "") in ("1", "on", "true")
         samples = str(f.get("include_samples") or "") in ("1", "on", "true")
         session_id = str(f.get("session_id") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None   # PG：取表结构所在的 database
         try:
             tables = json.loads(str(f.get("tables") or "[]"))
             tables = [str(t).strip() for t in tables if str(t).strip()] or None
@@ -3343,7 +3393,8 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             out = await anyio.to_thread.run_sync(
                 lambda: service.ai_generate_sql(
                     project, connection, question, caller, schema=schema, tables=tables,
-                    explain=explain, include_samples=samples, session_id=session_id))
+                    explain=explain, include_samples=samples, session_id=session_id,
+                    database=db))
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         # 美化 SQL 再回给前端（AI 常吐一长条）；解析失败则原样返回
@@ -3384,7 +3435,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         if ws:
             # 分析工作区：沙箱内任意 SQL 自由执行（不需确认流）。按工作区串行——忙时直接拒绝；
             # 不透传取消器（DuckDB 沙箱查询本地、无 KILL 路径）。
-            def _work_ws(_register) -> dict:  # noqa: ANN001
+            def _work_ws(_register, _report=None) -> dict:  # noqa: ANN001
                 out = service.analysis_sql(ws, sql, caller)
                 return {"kind": "read", "paginated": False, **out}
 
@@ -3399,7 +3450,7 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)})
 
-        def _work(register) -> dict:  # noqa: ANN001
+        def _work(register, report=None) -> dict:  # noqa: ANN001
             try:
                 return service.admin_run_sql(project, connection, sql, caller,
                                              confirm, page, None, schema, on_start=register,
@@ -3434,6 +3485,9 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         if snap is None:
             return JSONResponse({"ok": False, "error": "任务不存在或已过期（结果保留 10 分钟）"})
         out = {"ok": True, "status": snap["status"], "elapsed_ms": snap["elapsed_ms"]}
+        # 运行中的长任务（异步导出）带实时进度：{rows: 已导出行数}
+        if snap["status"] == "running" and snap.get("progress") is not None:
+            out["progress"] = snap["progress"]
         if snap["status"] == "done":
             out["result"] = snap["result"]
         elif snap["status"] in ("error", "canceled"):
@@ -3495,6 +3549,46 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         except Exception as e:  # noqa: BLE001
             return JSONResponse(error_payload(e), status_code=400)
         return JSONResponse({"ok": True, "report": report})
+
+    @mcp.custom_route("/admin/sql/checkup/ai", methods=["POST"])
+    @guard
+    async def _sql_checkup_ai(req: Request) -> JSONResponse:
+        """让 AI 根据体检报告给出诊断建议（纯文本分析，不执行任何 SQL）。
+
+        前端把体检浮层里的报告 JSON 回传；服务端补上连接侧非敏感信息后喂给 AI。
+        也可在没报告时直接调（服务端现场重跑体检）。追问带 session_id 续接会话。
+        """
+        from .service import QueryRejected
+
+        if not service.get_settings().get("ai_enabled"):
+            return JSONResponse({"ok": False, "error": "AI 辅助未开启"}, status_code=403)
+        f = await req.form()
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        question = str(f.get("question") or "")
+        schema = str(f.get("schema") or "").strip() or None
+        database = str(f.get("db") or "").strip() or None
+        session_id = str(f.get("session_id") or "").strip() or None
+        report = None
+        raw = str(f.get("report") or "").strip()
+        if raw:
+            try:
+                obj = json.loads(raw)
+                report = obj if isinstance(obj, dict) else None
+            except (ValueError, TypeError):
+                return JSONResponse({"ok": False, "error": "体检报告 JSON 解析失败"}, status_code=400)
+        try:
+            out = await anyio.to_thread.run_sync(
+                lambda: service.ai_diagnose_checkup(
+                    project, connection, question, _caller(req),
+                    report=report, schema=schema, database=database, session_id=session_id))
+        except (QueryRejected, KeyError, ValueError) as e:
+            return JSONResponse({"ok": False, "error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e), status_code=400)
+        return JSONResponse({"ok": True, **out})
 
     @mcp.custom_route("/admin/sql/reconnect", methods=["POST"])
     @guard
@@ -3591,10 +3685,18 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
             pass
         return JSONResponse({"ok": True, "sql": _format_sql(sql, engine)})
 
+    def _export_filename(project: str, connection: str, ext: str) -> str:
+        import re
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        slug = re.sub(r"[^A-Za-z0-9_.-]", "-", f"{project}-{connection}")
+        return f"{slug}-{stamp}.{ext}"
+
     @mcp.custom_route("/admin/sql/export", methods=["POST"])
     @guard
     async def _sql_export(req: Request) -> Response:
-        from .export import ExportError
+        """同步导出（小结果）：直接返回文件字节。大结果请走 /admin/sql/export_async。"""
+        from .export import ExportError, export_result
         from .service import QueryRejected
         f = await req.form()
         sql = str(f.get("sql") or "")
@@ -3604,26 +3706,116 @@ def mount_admin(mcp: "FastMCP", service: "DbmService", admin_token: str,
         ws = _analysis_ws(str(f.get("conn") or ""))
         try:
             if ws:
-                from .export import export_result
                 out = await anyio.to_thread.run_sync(
                     service.analysis_sql, ws, sql, _caller(req), 100_000)
-                data, media_type, ext = export_result(out["columns"], out["rows"], fmt)
+                data = export_result(out["columns"], out["rows"], fmt)
+                media_type, ext = data[1], data[2]
                 project, connection = "analysis", ws
             else:
                 project, connection = _resolve_conn(str(f.get("conn") or ""))
-                data, media_type, ext = await anyio.to_thread.run_sync(
-                    service.admin_export, project, connection, sql, fmt, _caller(req), schema, db)
+                res = await anyio.to_thread.run_sync(
+                    service.admin_export, project, connection, sql, fmt, _caller(req),
+                    schema, db)
+                data, media_type, ext = res["data"], res["media_type"], res["ext"]
         except (QueryRejected, KeyError, ValueError, ExportError) as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         except Exception as e:
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=400)
-        import re
-        from datetime import datetime
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        slug = re.sub(r"[^A-Za-z0-9_.-]", "-", f"{project}-{connection}")
-        fname = f"{slug}-{stamp}.{ext}"
         return Response(data, media_type=media_type,
-                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{_export_filename(project, connection, ext)}"'})
+
+    # 异步导出：完整结果集可能上百万行、跑几十秒，不能让一次 HTTP 请求扛着——
+    # 提交进任务队列在后台跑，前端弹框看进度、可关掉（后台继续）、完成了再提醒下载。
+    # 文件落服务端（复用 agent 导出的 token 目录），返回带 token 的下载链接，
+    # 而不是把几个 MB 的 blob 塞进 job 快照。
+    @mcp.custom_route("/admin/sql/export_async", methods=["POST"])
+    @guard
+    async def _sql_export_async(req: Request) -> JSONResponse:
+        from .export import SUPPORTED_FORMATS
+        from .jobs import Busy
+        f = await req.form()
+        sql = str(f.get("sql") or "")
+        fmt = str(f.get("format") or "csv")
+        schema = str(f.get("schema") or "").strip() or None
+        db = str(f.get("db") or "").strip() or None   # PG：执行所在的 database
+        caller = _caller(req)
+        ws = _analysis_ws(str(f.get("conn") or ""))
+
+        # 只读校验在提交前同步做：写 SQL 立即给 400，比丢进任务再失败体验好
+        if fmt not in SUPPORTED_FORMATS:
+            return JSONResponse(
+                {"ok": False, "error": f"不支持的导出格式 {fmt!r}，可选：{', '.join(SUPPORTED_FORMATS)}"},
+                status_code=400)
+
+        if ws:
+            # 分析工作区：沙箱 DuckDB，不受 classify 约束；行数上限给大一些
+            def _work(_register, report):  # noqa: ANN001
+                from .export import export_result
+                out = service.analysis_sql(ws, sql, caller, 100_000)
+                if report:
+                    report({"rows": out["row_count"], "stage": "serializing"})
+                data, media_type, ext = export_result(out["columns"], out["rows"], fmt)
+                summary = {
+                    "project": "analysis", "connection": ws,
+                    "database": ws, "table": "query",
+                    "row_count": out["row_count"], "truncated": out.get("truncated", False),
+                    "format": fmt, "columns": out["columns"],
+                }
+                return {**service._save_mcp_export(data, media_type, ext, summary),
+                        "duration_ms": out.get("duration_ms", 0)}
+        else:
+            try:
+                project, connection = _resolve_conn(str(f.get("conn") or ""))
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+            # 提交前先判定只读（同步返回错误，不占任务槽）
+            from .audit.classify import classify
+            engine_kind = service.config.get_connection(project, connection).engine
+            if not classify(sql, engine_kind).readonly:
+                return JSONResponse(
+                    {"ok": False, "error": "导出仅支持只读查询（SELECT/SHOW/...）的结果"},
+                    status_code=400)
+
+            def _work(register, report):  # noqa: ANN001
+                try:
+                    res = service.admin_export(
+                        project, connection, sql, fmt, caller, schema, db,
+                        on_progress=lambda n: report({"rows": n}) if report else None,
+                        on_start=register)
+                except Exception as e:  # noqa: BLE001
+                    payload = error_payload(e)
+                    wrapped = RuntimeError(payload["error"])
+                    wrapped.dbm_error_kind = payload.get("error_kind", "")
+                    raise wrapped from e
+                data, media_type, ext = res["data"], res["media_type"], res["ext"]
+                summary = {
+                    "project": project, "connection": connection,
+                    "database": db or "", "table": "query",
+                    "row_count": res["row_count"], "truncated": res["truncated"],
+                    "format": fmt, "columns": res["columns"],
+                }
+                saved = service._save_mcp_export(data, media_type, ext, summary)
+                # 完成提醒：写收件箱（SSE 推给还开着的页面 → 铃铛 +1；
+                # 页面关了也没关系，下次打开看未读数）。用户要的「导出成功再提醒」。
+                try:
+                    fname = saved.get("filename") or "export"
+                    service.notifier.send(
+                        title="导出完成",
+                        body=f"{fname}（{res['row_count']} 行，"
+                             f"{res['duration_ms'] / 1000:.1f}s）",
+                        meta={"kind": "export",
+                              "deeplink": saved.get("download_url") or ""})
+                except Exception:  # noqa: BLE001 — 通知失败不影响导出结果
+                    pass
+                return {**saved, "duration_ms": res["duration_ms"]}
+
+        try:
+            job_id = _jobmgr.submit(_solo_key(), _work)   # 独立 key：不占用连接串行名额
+        except Busy:
+            return JSONResponse(
+                {"ok": False, "error": "已有导出任务正在执行，请等待其完成或取消后再试。"})
+        return JSONResponse({"ok": True, "job_id": job_id})
 
     # ---------- SQL 片段库 ----------
 

@@ -10,7 +10,9 @@ workflow/画布用唯一 key）互不影响、各自并行。
   任务函数抛错后按「取消」而非「失败」归类。
 - 纯逻辑（线程 + 可调用对象），可用简单函数单测。
 
-任务函数签名 JobFn：接收一个 register(canceller) 回调，返回结果（任意，通常是 dict）。
+任务函数签名 JobFn：接收一个 register(canceller) 回调与一个 report(progress) 回调，
+返回结果（任意，通常是 dict）。report 供长任务（如导出）实时把进度写进任务快照，
+前端轮询 /admin/sql/job 时就能看到「已导出 N 行」；不需要进度的任务忽略它即可。
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from collections.abc import Callable
 from typing import Any
 
 Register = Callable[[Callable[[], None]], None]
-JobFn = Callable[[Register], Any]
+ProgressReport = Callable[[Any], None]
+JobFn = Callable[[Register, ProgressReport], Any]
 
 _TERMINAL = ("done", "error", "canceled")
 
@@ -33,7 +36,8 @@ class Busy(Exception):
 
 class _Job:
     __slots__ = ("id", "key", "fn", "status", "submitted_ts", "started_ts",
-                 "finished_ts", "result", "error", "error_kind", "canceller", "canceling")
+                 "finished_ts", "result", "error", "error_kind", "canceller", "canceling",
+                 "progress")
 
     def __init__(self, job_id: str, key: Any, fn: JobFn) -> None:
         self.id = job_id
@@ -50,6 +54,8 @@ class _Job:
         self.error_kind: str = ""
         self.canceller: Callable[[], None] | None = None
         self.canceling = False
+        # 长任务（导出）的实时进度，由任务函数通过 report 回调写入；get() 下发给轮询方。
+        self.progress: Any = None
 
 
 class JobManager:
@@ -89,6 +95,8 @@ class JobManager:
             return {
                 "status": job.status,
                 "elapsed_ms": max(elapsed_ms, 0),
+                # 运行中才带进度（结束后 progress 已是最终值，结果里有更完整的摘要）
+                "progress": job.progress if job.status == "running" else None,
                 "result": job.result if job.status == "done" else None,
                 "error": job.error if job.status in ("error", "canceled") else None,
                 "error_kind": job.error_kind if job.status == "error" else "",
@@ -124,8 +132,12 @@ class JobManager:
                 except Exception:  # noqa: BLE001
                     pass
 
+        def report(value: Any) -> None:  # noqa: ANN001, ANN401
+            with self._lock:
+                job.progress = value
+
         try:
-            result = job.fn(register)
+            result = job.fn(register, report)
             with self._lock:
                 if job.canceling:
                     job.status = "canceled"

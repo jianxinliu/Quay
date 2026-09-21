@@ -27,6 +27,17 @@ from .budget import SessionBudget
 from .metrics import LiveOps
 from .notify import NoopNotifier, Notifier
 from . import checkup, engines, privileges, redis_engine, sync
+from .drivers import get_driver as _get_driver
+
+
+def _driver_of(cfg: ConnectionConfig):  # noqa: ANN001, ANN201
+    """连接对应的驱动（引擎特有能力从这里取，不再散落 if engine == ... 清单）。"""
+    return _get_driver(cfg.engine)
+
+
+def _has_schema_layer(cfg: ConnectionConfig) -> bool:  # noqa: ANN001
+    """该连接的表是否位于 schema/database 之下（sqlite 一个文件就是一个库，不是）。"""
+    return _driver_of(cfg).has_schema_layer
 
 if TYPE_CHECKING:
     from .snippets import SnippetStore
@@ -517,7 +528,7 @@ class DbmService:
                 # 无默认库时提示 agent 用全限定表名
                 **({"note": "此连接未绑定默认库，查询/schema 操作请用「库名.表名」全限定，"
                             "list_tables/describe_table 需先用 SHOW DATABASES 选定库"}
-                   if c.engine in ("mysql", "postgres", "clickhouse") and not c.database else {}),
+                   if _get_driver(c.engine).has_schema_layer and not c.database else {}),
                 # 有意不返回 user/password/writer 等账号信息
             }
             # Redis 有意不返回：agent 碰不到 Redis
@@ -1015,20 +1026,131 @@ class DbmService:
         self.store.record(rec)
         return {"inserted": result.row_count, "duration_ms": result.duration_ms}
 
+    _EXPORT_MAX_ROWS_DEFAULT = 1_000_000
+
+    def export_max_rows(self) -> int:
+        """导出的行数上限：独立于查询台的 max_rows，取系统设置 export_max_rows。
+
+        查询台 max_rows（默认 1000）管的是「屏幕上一页看多少行」，导出要的是完整结果集，
+        被它截断就没有导出的意义；这里另设一个较大的上限做防 OOM 硬护栏。
+        """
+        value = self._setting("export_max_rows")
+        try:
+            n = int(value) if value is not None else self._EXPORT_MAX_ROWS_DEFAULT
+        except (TypeError, ValueError):
+            n = self._EXPORT_MAX_ROWS_DEFAULT
+        return n if n > 0 else self._EXPORT_MAX_ROWS_DEFAULT
+
     def admin_export(
         self, project: str, connection: str, sql: str, fmt: str, caller: CallerInfo,
         schema: str | None = None, database: str | None = None,
-    ) -> tuple[bytes, str, str]:
-        """导出只读查询结果为文件，返回 (字节, media_type, 扩展名)。仅限只读语句。"""
-        from .export import export_result
+        max_rows: int | None = None, on_progress=None,  # noqa: ANN001
+        on_start=None,  # noqa: ANN001
+    ) -> dict:
+        """导出只读查询的**完整**结果集为文件字节，流式写盘、不驻留全量行。
+
+        返回 {data, media_type, ext, row_count, truncated, result_bytes, duration_ms}。
+
+        - max_rows 缺省取 export_max_rows（远大于查询台 max_rows）；仍会注入 LIMIT 兜底，
+          超过上限时 truncated 如实标注——导出「不该被截断」指的是不被查询上限截断，
+          而不是无上限（无上限会把进程内存拖垮）。
+        - on_progress(rows_written)：每导出一批（_STREAM_BATCH 行）回调一次累计行数，
+          供前端弹框实时显示「已导出 N 行」。
+        - on_start：拿到连接后回调一次并传入取消函数，导出任务经它注册 KILL QUERY。
+        """
+        import time
+
+        from .export import SUPPORTED_FORMATS, stream_export
+        from .metrics import estimate_cell_bytes
 
         cfg = self.config.get_connection(project, connection)
+        if fmt not in SUPPORTED_FORMATS:
+            from .export import ExportError
+            raise ExportError(f"不支持的导出格式 {fmt!r}，可选：{', '.join(SUPPORTED_FORMATS)}")
         if not classify(sql, cfg.engine).readonly:
             raise QueryRejected("导出仅支持只读查询（SELECT/SHOW/...）的结果")
-        run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, cfg.policy.max_rows + 1, 0)
-        result = self._read(project, connection, cfg, run_sql, caller,
-                            cfg.policy.max_rows, schema=schema, mask=False, database=database)
-        return export_result(result["columns"], result["rows"], fmt)
+        limit = int(max_rows) if (max_rows or 0) > 0 else self.export_max_rows()
+        # 注入 LIMIT limit+1 兜底：既防大表拖垮，又让 truncated 判得准（多取一行探测）
+        run_sql, _, _ = engines.paginate_sql(sql, cfg.engine, limit + 1, 0)
+        rec = self._base_record(project, connection, cfg, "query", sql, caller)
+        rec.detail = " ".join(f"{k}={v}" for k, v in (("db", database), ("schema", schema)) if v)
+
+        def _do() -> dict:
+            engine = self.pool.get(project, connection, cfg, schema=schema, database=database)
+            # writer 在 _on_meta 里按真实列名创建——stream_rows 保证 on_meta 在首个 yield
+            # 之前触发，故 for 循环拿到第一行时 writer 一定已就绪。
+            writer = None
+            media_type = ext = ""
+            columns: list[str] = []
+            written = 0
+            est_bytes = 0
+            truncated = False
+            start = time.monotonic()
+
+            def _on_meta(cols, _cats):  # noqa: ANN001
+                nonlocal writer, media_type, ext, columns
+                columns = cols
+                writer, media_type, ext = stream_export(cols, fmt)
+
+            gen = engines.stream_rows(
+                engine, run_sql, limit + 1,
+                max_cell_chars=cfg.policy.max_cell_chars,
+                on_start=on_start, on_meta=_on_meta,
+            )
+            try:
+                for row in gen:
+                    if written >= limit:          # 第 limit+1 行：只用来判定截断，不写盘
+                        truncated = True
+                        break
+                    writer.write(row)
+                    written += 1
+                    # 结果体积估算只用于审计统计，没必要逐单元格精确算——
+                    # 每行采样第一个单元格再按列数放大，量级足够（实测逐单元格算
+                    # 会让百万行导出从几秒退化到两分钟）。
+                    est_bytes += estimate_cell_bytes(row[0]) if row else 0
+                    est_bytes += (len(row) - 1) * 16 if len(row) > 1 else 0
+                    if on_progress is not None and written % engines._STREAM_BATCH == 0:
+                        on_progress(written)
+            finally:
+                gen.close()
+            if on_progress is not None:
+                on_progress(written)
+            data = writer.bytes()
+            duration_ms = int((time.monotonic() - start) * 1000)
+            est_bytes += sum(estimate_cell_bytes(c) for c in columns)
+            return {
+                "data": data,
+                "media_type": media_type,
+                "ext": ext,
+                "columns": columns,
+                "row_count": written,
+                "truncated": truncated,
+                "result_bytes": est_bytes,
+                "duration_ms": duration_ms,
+            }
+
+        try:
+            out = self._run_touching_db(project, connection, _do, rec)
+        except ConnectionUnavailable as e:
+            rec.status = "error"
+            rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
+            self.store.record(rec)
+            raise
+        except QueryRejected:
+            raise
+        except Exception as e:
+            rec.status = "error"
+            rec.detail = f"{type(e).__name__}: {e}"
+            self.store.record(rec)
+            raise
+        rec.status = "ok"
+        rec.row_count = out["row_count"]
+        rec.duration_ms = out["duration_ms"]
+        rec.result_bytes = out["result_bytes"]
+        if out["truncated"]:
+            rec.detail = (rec.detail + " " if rec.detail else "") + f"导出截断至 {limit} 行"
+        self.store.record(rec)
+        return out
 
     def export_table(
         self,
@@ -1072,9 +1194,7 @@ class DbmService:
             database, table = table_database, plain_table
         if not table:
             raise ValueError("表名不能为空")
-        if database is None and not cfg.database and cfg.engine in (
-            "mysql", "postgres", "clickhouse"
-        ):
+        if database is None and not cfg.database and _has_schema_layer(cfg):
             raise ValueError("此连接未绑定默认库，请通过 database 参数选择要导出的库（schema）")
 
         engine = self.pool.get(project, connection, cfg, schema=database, database=pg_database)
@@ -1351,12 +1471,6 @@ class DbmService:
                 break
         return out
 
-    _EXPLAIN_PREFIX = {
-        "mysql": "EXPLAIN FORMAT=JSON ",
-        "postgres": "EXPLAIN (FORMAT JSON) ",
-        "sqlite": "EXPLAIN QUERY PLAN ",
-    }
-
     def admin_explain(
         self, project: str, connection: str, sql: str, caller: CallerInfo,
         schema: str | None = None, database: str | None = None,
@@ -1373,10 +1487,14 @@ class DbmService:
         verdict = classify(stmt, cfg.engine)
         if "多语句" in verdict.reason:
             raise QueryRejected("EXPLAIN 只支持单条语句")
-        prefix = self._EXPLAIN_PREFIX.get(cfg.engine)
+        # 计划前缀与输出格式由驱动决定（drivers/<engine>.py 的 explain_json_prefix/explain_format）
+        from .drivers import get_driver
+
+        drv = get_driver(cfg.engine)
+        prefix = drv.explain_json_prefix
         if prefix is None:
             raise QueryRejected(f"引擎 {cfg.engine} 不支持 EXPLAIN")
-        fmt = "rows" if cfg.engine == "sqlite" else "json"
+        fmt = drv.explain_format
         # 写语句（DELETE/UPDATE/INSERT/DDL）的 EXPLAIN 需要对应表的写权限：reader（只读账号）
         # 会被 DB 以权限不足拒绝（MySQL 1142）。EXPLAIN 不带 ANALYZE 不真正执行，改用 writer
         # 账号取计划是安全的；无独立 writer 时退回 reader（sqlite 等无账号概念场景）。
@@ -2641,7 +2759,7 @@ class DbmService:
         database：PG 专用——列**哪个 database 下**的 schema（查询台切库后要看新库的 schema）。
         """
         cfg = self.config.get_connection(project, connection)
-        if cfg.engine not in ("mysql", "postgres", "clickhouse"):
+        if not _has_schema_layer(cfg):
             return []
         engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "list_databases", database or "", caller,
@@ -2655,7 +2773,7 @@ class DbmService:
         当前库里的 schema。查询台左树的「库」这一层用的就是这里。
         """
         cfg = self.config.get_connection(project, connection)
-        if cfg.engine not in ("mysql", "postgres", "clickhouse"):
+        if not _has_schema_layer(cfg):
             return []
         engine = self.pool.get(project, connection, cfg)
         return self._audited(project, connection, cfg, "list_databases", "server", caller,
@@ -2668,7 +2786,7 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         # 未绑定默认库时，先让用户选库（库→表→列 三级树）。MySQL/PG 不带 schema 反射会崩
         # （默认 schema 为 None）；ClickHouse 不会崩但会落到 default 库、看不到别的库 → 一并引导
-        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres", "clickhouse"):
+        if schema is None and not cfg.database and _has_schema_layer(cfg):
             raise ValueError("此连接未绑定默认库，请先选择一个库（schema）再列表")
         engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "list_tables", schema or "", caller,
@@ -2683,7 +2801,7 @@ class DbmService:
         # ① 从「库.表」限定名拆出 schema；② 仍无 schema 且无默认库 → 明确报错引导，而非让它崩
         if schema is None and "." in table:
             schema, table = table.split(".", 1)
-        if schema is None and not cfg.database and cfg.engine in ("mysql", "postgres", "clickhouse"):
+        if schema is None and not cfg.database and _has_schema_layer(cfg):
             raise ValueError("此连接未绑定默认库，请用「库名.表名」指定表，或先选择一个库（schema）")
         engine = self.pool.get(project, connection, cfg, database=database)
         detail = f"{schema}.{table}" if schema else table
@@ -2783,13 +2901,14 @@ class DbmService:
         self, project: str, connection: str, question: str, caller: CallerInfo,
         *, schema: str | None = None, tables: list[str] | None = None,
         explain: bool = False, include_samples: bool = False,
-        session_id: str | None = None,
+        session_id: str | None = None, database: str | None = None,
     ) -> dict:
         """让命令行 AI 按表结构 + 自然语言需求生成一条 SQL。只生成、不执行。
 
         tables 为空 = 「整库」模式：列出该库的表（超 ai_max_tables 报错要求收窄）。
         include_samples 时附少量样本行帮助 AI 理解数据形态。
         session_id 非空 = 追问：续接同一会话、不重发表结构。返回 {sql, explanation, session_id}。
+        database 仅 PostgreSQL 有效：表所在的库（PG 一条连接只绑一个库，跨库必须换引擎）。
         """
         from . import ai
 
@@ -2800,9 +2919,11 @@ class DbmService:
         if not question:
             raise QueryRejected("请填写你想查什么")
         cfg = self.config.get_connection(project, connection)
-        if cfg.engine not in ("mysql", "postgres", "sqlite"):
+        if not _driver_of(cfg).ai_sql:
             raise QueryRejected(f"连接引擎 {cfg.engine} 暂不支持 AI 生成 SQL")
-        engine = self.pool.get(project, connection, cfg)
+        # PG 的库先校验再建引擎：不存在的库会让连接失败被当成断连、打坏健康位
+        database = self.resolve_pg_database(project, connection, database, cfg)
+        engine = self.pool.get(project, connection, cfg, database=database)
         max_tables = int(s.get("ai_max_tables") or 40)
 
         def _run() -> dict:
@@ -2831,8 +2952,11 @@ class DbmService:
                     for t in names:
                         tbl_schema, tbl = (t.split(".", 1) if "." in t else (schema, t))
                         try:
+                            # schema 一起带上：PG 的表多在非默认 schema、MySQL 在非默认库，
+                            # 不带 schema 反射不到，样本就被静默丢弃了
                             r = engines.sample_rows(engine, tbl, 5,
-                                                    max_cell_chars=cfg.policy.max_cell_chars)
+                                                    max_cell_chars=cfg.policy.max_cell_chars,
+                                                    schema=tbl_schema)
                             samples[tbl] = _rows_to_text(r.columns, r.rows)
                         except Exception:  # 样本拿不到不阻断生成
                             continue
@@ -2857,6 +2981,64 @@ class DbmService:
         except ai.AIError as e:
             raise QueryRejected(str(e)) from e
 
+    def ai_diagnose_checkup(
+        self, project: str, connection: str, question: str, caller: CallerInfo,
+        *,
+        report: dict | None = None, schema: str | None = None,
+        database: str | None = None, session_id: str | None = None,
+    ) -> dict:
+        """让 AI 根据体检报告 + 连接信息给出诊断建议（只读分析、不执行任何 SQL）。
+
+        report 为前端回传的体检报告 JSON（db_checkup 的返回结构）。为防止前端伪造
+        上下文，**报告本身不作为权威数据**：服务端只用它判定「有过体检」，
+        并把连接侧的非敏感信息（引擎/版本/环境/范围）补进来；报告内容原样透传给 AI
+        （体检报告本身就是只读诊断结果，不存在被篡改后执行的风险）。
+        report 缺失时服务端现场重跑一次体检（要求连接可用）。
+        session_id 非空 = 追问：续接同一会话、不重发报告。返回 {diagnosis, session_id}。
+        """
+        from . import ai, checkup
+
+        s = self.get_settings()
+        if not s.get("ai_enabled"):
+            raise QueryRejected("AI 辅助未开启，请在系统设置中开启")
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine == "redis":
+            raise ValueError("Redis 连接不支持体检诊断（Redis 无体检报告）")
+
+        # 报告缺失：现场重跑体检（走 db_checkup，自带健康检查与审计）。拿到了报告就
+        # 不再碰 DB——诊断是纯文本分析，连接挂了也能基于已有报告给出建议。
+        rep = report if isinstance(report, dict) and report.get("checks") else None
+        if rep is None:
+            rep = self.db_checkup(project, connection, caller, schema=schema, database=database)
+
+        db_info = {
+            "engine": cfg.engine,
+            "version": str(rep.get("version") or ""),
+            "environment": cfg.environment,
+            "scope": rep.get("scope") or schema or cfg.database or "",
+        }
+        report_md = checkup.report_to_markdown(rep)
+        question = (question or "").strip()
+
+        def _run() -> dict:
+            text, new_sid = ai.generate_diagnosis(
+                system_prompt=str(s.get("ai_diagnosis_prompt") or ai.DEFAULT_DIAGNOSIS_PROMPT),
+                db_info=db_info, report_md=report_md, question=question,
+                provider=str(s.get("ai_provider") or "claude"),
+                model=str(s.get("ai_model") or ""),
+                timeout=int(s.get("ai_timeout_s") or 60),
+                cli_path=str(s.get("ai_cli_path") or ""),
+                session_id=session_id, api=_ai_api_cfg(s))
+            return {"diagnosis": text, "session_id": new_sid}
+
+        tool = "ai_diagnose_followup" if session_id else "ai_diagnose_checkup"
+        detail = (question or report_md)[:2000]
+        try:
+            return self._audited(project, connection, cfg, tool, detail, caller, _run,
+                                 touch_db=False)
+        except ai.AIError as e:
+            raise QueryRejected(str(e)) from e
+
     def ai_generate_workflow(
         self, project: str, connection: str, question: str, caller: CallerInfo,
         *, schema: str | None = None, tables: list[str] | None = None,
@@ -2878,7 +3060,7 @@ class DbmService:
         if not question:
             raise QueryRejected("请描述你想做的分析流程")
         cfg = self.config.get_connection(project, connection)
-        if cfg.engine not in ("mysql", "postgres", "sqlite"):
+        if not _driver_of(cfg).ai_sql:
             raise QueryRejected(f"连接引擎 {cfg.engine} 暂不支持 AI 生成流程")
         engine = self.pool.get(project, connection, cfg)
         max_tables = int(s.get("ai_max_tables") or 40)
@@ -3139,10 +3321,18 @@ class DbmService:
             fingerprint=fingerprint(sql, cfg.engine) if sql else "",
         )
 
-    def _audited(self, project, connection, cfg, tool, detail_sql, caller, fn):  # noqa: ANN001
+    def _audited(self, project, connection, cfg, tool, detail_sql, caller, fn,  # noqa: ANN001
+                 *, touch_db: bool = True):
+        """落审计地执行 fn。
+
+        touch_db=False：fn 不碰数据库（如纯文本的体检诊断），跳过健康位检查——
+        否则连接一挂，连「根据已有报告让 AI 给建议」都做不了，而那恰恰是连接出问题时
+        用户最想做的事。
+        """
         rec = self._base_record(project, connection, cfg, tool, detail_sql, caller)
         try:
-            result = self._run_touching_db(project, connection, fn, rec)
+            result = (fn() if not touch_db
+                      else self._run_touching_db(project, connection, fn, rec))
         except ConnectionUnavailable as e:
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"

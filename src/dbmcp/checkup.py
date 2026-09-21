@@ -177,6 +177,71 @@ class CheckupReport:
         }
 
 
+_STATUS_LABEL_MD = {"ok": "正常", "info": "参考", "warn": "需关注",
+                     "critical": "严重", "unknown": "无法测量"}
+
+
+def report_to_markdown(report: dict) -> str:
+    """把 to_dict() 序列化的体检报告渲染成 Markdown（服务端权威渲染）。
+
+    给 AI 诊断当上下文、也给人贴工单用——前端 copyCheckupReport 是另一份给剪贴板的
+    实现，两处保持同一套排版口径（摘要 → 维度分组 → 权限缺口），改的时候一起改。
+    报告里的值都是已格式化好的文本（如 "<0.1 M"），这里不做再加工。
+    """
+    rep = report or {}
+    out: list[str] = []
+    out.append("# 数据库体检报告")
+    out.append("")
+    out.append(f"- 引擎：{rep.get('engine', '')}{(' ' + rep['version']) if rep.get('version') else ''}"
+               + (f" · 范围：{rep['scope']}" if rep.get("scope") else ""))
+    if rep.get("started_at"):
+        out.append(f"- 体检时间：{rep['started_at']}（耗时 {rep.get('elapsed_ms', 0)} ms）")
+    out.append(f"- 总体结论：{rep.get('summary', '')}")
+    out.append("")
+
+    # 维度顺序：report 里带 dimensions 就用它（前端浮层同一套），否则回落内置表。
+    dim_names: list[str] = []
+    dim_titles: dict[str, str] = {}
+    for d in rep.get("dimensions") or []:
+        if isinstance(d, dict) and d.get("name"):
+            dim_names.append(d["name"])
+            dim_titles[d["name"]] = d.get("title") or d["name"]
+    if not dim_names:
+        dim_names = [k for k, _ in DIMENSIONS]
+        dim_titles = {k: t for k, t in DIMENSIONS}
+    buckets: dict[str, list[dict]] = {}
+    for c in rep.get("checks") or []:
+        dim = c.get("dimension") or "maintenance"
+        buckets.setdefault(dim, []).append(c)
+
+    for dim in dim_names:
+        title = dim_titles.get(dim) or dim
+        checks = buckets.get(dim)
+        if not checks:
+            continue
+        out.append(f"## {title}")
+        for c in checks:
+            label = _STATUS_LABEL_MD.get(c.get("status") or "", c.get("status") or "")
+            out.append(f"- [{label}] **{c.get('title', '')}**"
+                       + (f" — {c['value']}" if c.get("value") else ""))
+            if c.get("message"):
+                out.append(f"  - {c['message']}")
+            for d in c.get("details") or []:
+                out.append(f"  - {d}")
+        out.append("")
+
+    gaps = rep.get("privileges") or []
+    if gaps:
+        out.append("## 权限缺口（以下指标因账号权限不足无法测量）")
+        for g in gaps:
+            out.append(f"- 缺 {g.get('privilege', '')} 权限，影响：{'、'.join(g.get('affects') or [])}")
+            out.append("  ```sql")
+            out.append(f"  {g.get('grant_sql', '')}")
+            out.append("  ```")
+        out.append("")
+    return "\n".join(out)
+
+
 # =====================================================================
 # 执行辅助
 # =====================================================================

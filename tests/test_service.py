@@ -381,11 +381,13 @@ class TestAdminConsole:
         assert res["rows"][0][0] == 3
 
     def test_export_read_result_as_csv(self, service):
-        data, media_type, ext = service.admin_export(
+        out = service.admin_export(
             "demo", "main", "SELECT id, name FROM users ORDER BY id", "csv", CALLER
         )
-        assert ext == "csv" and data.startswith(b"\xef\xbb\xbf")
-        assert b"id,name" in data
+        assert out["ext"] == "csv" and out["data"].startswith(b"\xef\xbb\xbf")
+        assert b"id,name" in out["data"]
+        # 导出走独立上限，不再被查询台的 max_rows 截断
+        assert out["row_count"] == 3 and out["truncated"] is False
 
     def test_export_rejects_write_sql(self, service):
         with pytest.raises(QueryRejected, match="只读"):
@@ -432,8 +434,8 @@ class TestConsoleUnmasked:
         assert "masked_columns" not in out
 
     def test_console_export_not_masked(self, svc):
-        data, _, _ = svc.admin_export("demo", "main", "SELECT name, password FROM accounts", "csv", CALLER)
-        assert b"s3cr3t" in data
+        out = svc.admin_export("demo", "main", "SELECT name, password FROM accounts", "csv", CALLER)
+        assert b"s3cr3t" in out["data"]
 
     def test_agent_table_export_is_masked(self, svc):
         summary = svc.export_table(
@@ -828,3 +830,173 @@ class TestExhaustedNotify:
         # 但落了 warn 日志（方便运维排查）
         assert any("exhausted" in rec.getMessage() for rec in caplog.records)
         svc.close()
+
+
+class TestAiPgDatabase:
+    """PG 跨库时 AI 取表结构必须落到用户选中的库。
+
+    真实反馈：选了表点生成，报「表 'device_installed_app' 不存在，可用表: （无）」——
+    根因是 AI 路径用连接默认库建引擎，而表在另一个库里。
+    """
+
+    def _svc(self, tmp_path):
+        from dbmcp.audit.log import AuditStore
+        from dbmcp.config import AppConfig
+        from dbmcp.service import DbmService
+
+        cfg = AppConfig.model_validate(
+            {
+                "projects": {
+                    "demo": {
+                        "connections": {
+                            "pg": {
+                                "engine": "postgres",
+                                "host": "h",
+                                "port": 5432,
+                                "database": "maindb",
+                                "user": "u",
+                                "password": "plain://unused",
+                                "environment": "local",
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        svc = DbmService(cfg, AuditStore(tmp_path / "audit.sqlite3"))
+        svc.data_dir = str(tmp_path / "data")
+        return svc
+
+    def _enable(self, svc):
+        from dbmcp.settings import SettingsStore
+
+        svc.settings = SettingsStore(":memory:")
+        svc.save_settings({"ai_enabled": "true"})
+
+    def test_other_database_threaded_to_pool(self, tmp_path, monkeypatch):
+        svc = self._svc(tmp_path)
+        self._enable(svc)
+        monkeypatch.setattr(svc, "_pg_server_databases",
+                            lambda *a, **k: ["maindb", "otherdb"])
+        got = {}
+
+        def fake_get(project, connection, cfg, role="reader", schema=None,
+                     identities=None, database=None):
+            got["database"] = database
+            return object()  # 不真连库：下面的 engines.get_table_ddl 被一起挡掉
+
+        monkeypatch.setattr(svc.pool, "get", fake_get)
+        from dbmcp import engines
+
+        monkeypatch.setattr(engines, "get_table_ddl",
+                            lambda engine, kind, table, schema=None: f"CREATE TABLE {table}(id INT)")
+        from dbmcp import ai
+
+        monkeypatch.setattr(ai, "generate_sql",
+                            lambda **kw: ai.AIResult(sql="SELECT 1", explanation="", session_id=""))
+        svc.ai_generate_sql("demo", "pg", "查设备表", CALLER,
+                            tables=["public.device_installed_app"], database="otherdb")
+        # 引擎建在用户选中的 otherdb 上，不是连接默认的 maindb
+        assert got["database"] == "otherdb"
+        svc.close()
+
+    def test_default_database_stays_none(self, tmp_path, monkeypatch):
+        svc = self._svc(tmp_path)
+        self._enable(svc)
+        monkeypatch.setattr(svc, "_pg_server_databases",
+                            lambda *a, **k: ["maindb", "otherdb"])
+        got = {}
+
+        def fake_get(project, connection, cfg, role="reader", schema=None,
+                     identities=None, database=None):
+            got["database"] = database
+            return object()
+
+        monkeypatch.setattr(svc.pool, "get", fake_get)
+        from dbmcp import engines
+
+        monkeypatch.setattr(engines, "get_table_ddl",
+                            lambda engine, kind, table, schema=None: f"CREATE TABLE {table}(id INT)")
+        from dbmcp import ai
+
+        monkeypatch.setattr(ai, "generate_sql",
+                            lambda **kw: ai.AIResult(sql="SELECT 1", explanation="", session_id=""))
+        # 恰好是连接默认库 → resolve_pg_database 归一为 None，复用默认引擎
+        svc.ai_generate_sql("demo", "pg", "查设备表", CALLER,
+                            tables=["public.device_installed_app"], database="maindb")
+        assert got["database"] is None
+        svc.close()
+
+    def test_unknown_database_rejects(self, tmp_path, monkeypatch):
+        svc = self._svc(tmp_path)
+        self._enable(svc)
+        monkeypatch.setattr(svc, "_pg_server_databases",
+                            lambda *a, **k: ["maindb", "otherdb"])
+        with pytest.raises(ValueError, match="可连接的库"):
+            svc.ai_generate_sql("demo", "pg", "q", CALLER, tables=["t"], database="nope")
+        svc.close()
+
+    def test_database_rejected_on_non_pg(self, service, monkeypatch):
+        # 非 PG 连接传 database 应被拒（不会静默落到错误库）
+        from dbmcp.settings import SettingsStore
+
+        service.settings = SettingsStore(":memory:")
+        service.save_settings({"ai_enabled": "true"})
+        with pytest.raises(ValueError, match="pg_database 只适用"):
+            service.ai_generate_sql("demo", "main", "q", CALLER, tables=["users"],
+                                    database="whatever")
+
+
+class TestExportStreaming:
+    """导出改造：不截断 + 流式进度回调 + 截断如实标注。"""
+
+    @pytest.fixture
+    def svc(self, tmp_path):
+        db_file = tmp_path / "big.sqlite3"
+        conn = sqlite3.connect(db_file)
+        conn.executescript("CREATE TABLE big (id INTEGER, payload TEXT);")
+        conn.executemany(
+            "INSERT INTO big VALUES (?, ?)",
+            [(i, f"row-{i}-padding-padding") for i in range(3000)],
+        )
+        conn.commit()
+        conn.close()
+        cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
+            "engine": "sqlite", "database": str(db_file), "environment": "local"}}}}})
+        s = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
+        s.data_dir = str(tmp_path / "data")
+        yield s
+        s.close()
+
+    def test_export_full_result_not_truncated_by_query_max_rows(self, svc):
+        # 连接策略 max_rows 默认很小；导出必须拿到完整 3000 行
+        out = svc.admin_export("demo", "main", "SELECT id FROM big ORDER BY id", "csv", CALLER)
+        assert out["row_count"] == 3000
+        assert out["truncated"] is False
+        assert out["data"].count(b"\n") >= 3000  # 表头 + 3000 行
+
+    def test_export_max_rows_param_caps_and_marks_truncated(self, svc):
+        out = svc.admin_export("demo", "main", "SELECT id FROM big ORDER BY id", "csv", CALLER,
+                               max_rows=500)
+        assert out["row_count"] == 500
+        assert out["truncated"] is True
+
+    def test_exact_limit_not_marked_truncated(self, svc):
+        # 恰好 500 行 + 上限 500：不多不少，不算截断
+        out = svc.admin_export("demo", "main", "SELECT id FROM big ORDER BY id LIMIT 500", "csv",
+                               CALLER, max_rows=500)
+        assert out["row_count"] == 500
+        assert out["truncated"] is False
+
+    def test_progress_callback_reports_batches(self, svc):
+        seen = []
+        svc.admin_export("demo", "main", "SELECT id FROM big ORDER BY id", "csv", CALLER,
+                         on_progress=lambda n: seen.append(n))
+        # 3000 行 / 2000 一批 → 至少回调到 2000 和 3000，且单调不减
+        assert seen and seen[-1] == 3000
+        assert list(seen) == sorted(seen)
+
+    def test_export_unsupported_format(self, svc):
+        from dbmcp.export import ExportError
+        with pytest.raises(ExportError, match="不支持的导出格式"):
+            svc.admin_export("demo", "main", "SELECT id FROM big", "pdf", CALLER)

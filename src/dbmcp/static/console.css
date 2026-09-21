@@ -154,6 +154,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
   position: relative; display: flex; align-items: center; gap: 7px;
   padding: 3px 8px; margin: 0 6px; border-radius: 5px; cursor: pointer;
   font-family: var(--dg-mono); font-size: 12.5px; line-height: 19px; white-space: nowrap;
+  user-select: none;   /* shift 区间选择时不要顺手选中一堆表名文本 */
 }
 .dg-item:hover { background: var(--dg-hover); }
 .dg-item .tw {
@@ -364,6 +365,15 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-sel-item:hover { background: var(--dg-hover); }
 .dg-sel-item.cur { background: var(--dg-accent-soft); color: #d7e3ff; }
 .dg-sel-none { padding: 6px 10px; color: var(--dg-faint); font-size: 12px; }
+/* 选项/按钮上的连接状态点（dg-select 通用）：
+   .dg-sel-btn 是 flex 容器，.dg-sel-item 是文本行（靠 inline-block + vertical-align 对齐，
+   不能改 flex——否则 label 的 text-overflow 省略号会失效）。
+   深色底上小圆点加一圈暗描边，否则红色与深底糊在一起。 */
+.dg-sdot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block;
+  vertical-align: middle; box-shadow: 0 0 0 1.5px rgba(0,0,0,.45); }
+.dg-sel-btn .dg-sdot { margin-right: 1px; }
+.dg-sel-item .dg-sdot { margin-right: 6px; }
+.dg-sdot.pulse { animation: dg-pulse 1.4s ease-in-out infinite; }
 /* 分组标题（替代原生 <optgroup>）：只标不选 */
 .dg-sel-group { padding: 7px 10px 3px; color: var(--dg-faint); font-size: 10.5px;
   letter-spacing: .06em; font-family: var(--dg-mono); }
@@ -377,6 +387,51 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-drop .res .okline { color: var(--dg-green); }
 .dg-drop .res .errline { color: var(--dg-red); }
 .dg-drop .acts { display: flex; gap: 8px; }
+/* 批量 DROP 弹框（遮罩 + 居中，不再撑没编辑区/表格） */
+.dg-drop-modal { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.45);
+  display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+.dg-drop-modal .box { width: 560px; max-width: 94vw; max-height: 76vh; display: flex;
+  flex-direction: column; background: var(--dg-panel); border: 1px solid rgba(217,83,79,.45);
+  border-radius: 8px; box-shadow: 0 10px 32px rgba(0,0,0,.5); overflow: hidden; }
+.dg-drop-modal .hd { display: flex; align-items: baseline; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--dg-border); background: rgba(217,83,79,.07); }
+.dg-drop-modal .hd .t { font-weight: 600; color: #f1b8b4; font-size: 13px; }
+.dg-drop-modal .hd .sub { color: var(--dg-muted); font-size: 11px; }
+.dg-drop-modal .hd .sub b { color: var(--dg-red); font-weight: 600; }
+.dg-drop-modal .hd .x { margin-left: auto; cursor: pointer; color: var(--dg-muted); padding: 0 4px; }
+.dg-drop-modal .hd .x:hover { color: var(--dg-red); }
+.dg-drop-modal .dp-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 14px; }
+.dg-drop-modal .dp-warn { color: var(--dg-muted); font-size: 12px; margin-bottom: 8px; }
+.dg-drop-modal .dp-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.dg-drop-modal .dp-list code { background: #4a2b2d; color: #ffd9d6; border: 1px solid #7c3a3a;
+  border-radius: 5px; padding: 2px 8px; font-size: 12px; font-family: var(--dg-mono); }
+.dg-drop-modal .dp-res { margin-top: 12px; border-top: 1px dashed var(--dg-border); padding-top: 8px; }
+.dg-drop-modal .dp-res-hd { font-size: 11.5px; color: var(--dg-muted); margin-bottom: 5px; }
+.dg-drop-modal .dp-res-row { display: flex; align-items: baseline; gap: 7px;
+  font-family: var(--dg-mono); font-size: 12px; padding: 2px 0; }
+.dg-drop-modal .dp-res-row .mk { flex: none; }
+.dg-drop-modal .dp-res-row.ok { color: var(--dg-green); }
+.dg-drop-modal .dp-res-row.err { color: var(--dg-red); }
+.dg-drop-modal .dp-res-row .q { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dg-drop-modal .dp-res-row .why { margin-left: auto; flex: none; max-width: 46%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--dg-faint); }
+.dg-drop-modal .ft { display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border-top: 1px solid var(--dg-border); }
+/* 弹框内的小按钮：与体检浮层 .ck-mini 同一套观感（该容器不是 .dg-checkup，需单独声明） */
+.dg-drop-modal .ck-mini { flex: none; font-size: 11px; color: var(--dg-muted);
+  border: 1px solid var(--dg-border); background: var(--dg-panel-2); border-radius: 4px;
+  padding: 2px 9px; cursor: pointer; }
+.dg-drop-modal .ck-mini:hover:not(:disabled) { color: var(--dg-text); border-color: var(--dg-accent); }
+.dg-drop-modal .ck-mini:disabled { opacity: .5; cursor: default; }
+.dg-drop-modal .ft-note { color: var(--dg-faint); font-size: 11px; }
+.dg-drop-modal .ck-mini.danger { color: #ffb3ae; border-color: rgba(217,83,79,.6);
+  background: rgba(217,83,79,.14); }
+.dg-drop-modal .ck-mini.danger:hover:not(:disabled) { color: #fff; border-color: var(--dg-red);
+  background: rgba(217,83,79,.3); }
+.dg-drop-modal .ck-mini.primary { color: var(--dg-text); border-color: var(--dg-accent);
+  background: var(--dg-accent-soft); }
+.theme-light .dg-drop-modal .box { box-shadow: 0 10px 32px rgba(0,0,0,.18); }
+
 .dg-btn.danger { background: var(--dg-red); border-color: var(--dg-red); color: #fff; }
 .dg-ctx .sep { height: 1px; background: var(--dg-border); margin: 4px 6px; }
 .dg-ctx button.danger { color: #ff8a80; }
@@ -484,7 +539,10 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 /* 拖框选中的单元格高亮（Excel 风矩形区域） */
 .dg-rt td.csel { background: color-mix(in srgb, var(--dg-accent) 18%, transparent);
   outline: 1px solid var(--dg-accent); outline-offset: -1px; }
-table.dg-rt { border-collapse: collapse; font-size: 12px; width: max-content; min-width: 100%; font-family: var(--dg-mono); }
+/* 列宽按内容自适应（width: max-content）：列少时不把列强行拉宽铺满整宽，
+   而是各自贴合内容，多余宽度留给空白——和 DataGrip 一致。
+   单格内容上限 460px，超长文本仍走省略号 + 值面板看全文。 */
+table.dg-rt { border-collapse: collapse; font-size: 12px; width: max-content; font-family: var(--dg-mono); }
 table.dg-rt th, table.dg-rt td {
   border: 1px solid var(--dg-border); padding: 4px 10px; white-space: nowrap;
   max-width: 460px; overflow: hidden; text-overflow: ellipsis; text-align: left;
@@ -586,10 +644,15 @@ table.dg-rt th .funnel:hover { color: var(--dg-accent); }
 
 /* 单元格就地编辑 */
 table.dg-rt td.editable { cursor: cell; }
+/* 编辑中的单元格去掉内边距，让输入框完全贴合单元格（真实反馈：输入框和格子之间有缝）。
+   td 行高恒为 27px（12px 字 / 18px 行高 / 4px 内边距 / 1px 边），输入框填满内容区
+   （25px = 27 - 2 边），行高不变、不跳格。 */
+table.dg-rt td.editing { padding: 0; }
 .dg-cell-edit {
-  width: 100%; min-width: 80px; background: var(--dg-bg); color: var(--dg-text);
-  border: 1px solid var(--dg-accent); border-radius: 4px; padding: 2px 6px;
-  font-size: 12px; font-family: var(--dg-mono);
+  box-sizing: border-box; width: 100%; height: 25px; margin: 0;
+  background: var(--dg-bg); color: var(--dg-text);
+  border: 1px solid var(--dg-accent); border-radius: 4px; padding: 2px 9px;
+  font-size: 12px; line-height: 18px; font-family: var(--dg-mono);
 }
 .dg-cell-edit:focus { outline: none; }
 
@@ -907,6 +970,19 @@ table.dg-rt tbody td.curhit *, table.dg-rt tbody td.curhit .nul { color: inherit
 /* 生产连接：连接下拉框变红警示 */
 .dg-conn.env-prod .dg-sel-btn { border-color: var(--dg-red); color: #ffb4b4; }
 .dg-conn.env-staging .dg-sel-btn { border-color: #d97706; color: #f0c078; }
+/* 左树里的断连提示：连接不可用时替代误导性的「tables (0)」。
+   配色与顶部告警条同源（琥珀=自愈中 / 红=退避用尽），但更紧凑，贴在树所在的位置 */
+.dg-tree-down { margin: 8px 8px 4px; padding: 10px 11px; border-radius: 7px;
+  background: #3d3119; border: 1px solid rgba(217,163,67,.5); color: #e8d5a0; font-size: 12px; }
+.dg-tree-down.gone { background: #3d2223; border-color: rgba(217,83,79,.55); color: #f0b8b4; }
+.dg-tree-down .t { font-weight: 600; line-height: 1.45; }
+.dg-tree-down .why { margin-top: 5px; opacity: .8; font-family: var(--dg-mono); font-size: 10.5px;
+  line-height: 1.5; max-height: 3.2em; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.dg-tree-down .dg-btn { margin-top: 8px; font-size: 11.5px; padding: 4px 11px; }
+.theme-light .dg-tree-down { background: #fef3c7; border-color: #d97706; color: #78350f; }
+.theme-light .dg-tree-down.gone { background: #fee2e2; border-color: #dc2626; color: #7f1d1d; }
+
 /* schema 勾选器 */
 .dg-schema-tools { position: relative; display: flex; gap: 6px; align-items: center; padding: 6px 10px; }
 .dg-schema-tools input {
@@ -1085,6 +1161,43 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-ai-turns .row { padding: 1px 0; color: var(--dg-text); }
 
 
+/* ---------- 异步导出弹框 ----------
+   复用体检浮层的视觉语言（淡底 + 描边 + 提亮文字），小而轻：导出是长任务，
+   弹框只回答「导了多少行、跑了多久」，不放数据。 */
+.dg-exp { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,.45);
+  display: flex; justify-content: center; align-items: flex-start; padding-top: 14vh; }
+.dg-exp .box { width: 460px; max-width: 94vw; display: flex; flex-direction: column;
+  background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 8px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.5); overflow: hidden; }
+.dg-exp .hd { display: flex; align-items: baseline; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--dg-border); }
+.dg-exp .hd .t { font-weight: 600; color: var(--dg-text); font-size: 13px; }
+.dg-exp .hd .sub { color: var(--dg-faint); font-size: 11px; font-family: var(--dg-mono);
+  text-transform: uppercase; }
+.dg-exp .hd .x { margin-left: auto; cursor: pointer; color: var(--dg-muted); padding: 0 4px; }
+.dg-exp .hd .x:hover { color: var(--dg-red); }
+.dg-exp .body { display: flex; align-items: center; gap: 9px; padding: 16px 14px;
+  color: var(--dg-muted); }
+.dg-exp .body .txt { color: var(--dg-text); font-size: 13px; }
+.dg-exp .body .num { color: var(--dg-text); font-size: 15px; font-weight: 600;
+  font-family: var(--dg-mono); font-variant-numeric: tabular-nums; }
+.dg-exp .body .meta { color: var(--dg-faint); font-size: 12px; font-family: var(--dg-mono);
+  font-variant-numeric: tabular-nums; }
+.dg-exp .body .spin { width: 13px; height: 13px; border: 2px solid var(--dg-border);
+  border-top-color: var(--dg-accent); border-radius: 50%; animation: dg-spin 0.8s linear infinite; }
+.dg-exp .body.ok .txt { color: var(--dg-green); }
+.dg-exp .body.err .txt { color: var(--dg-red); }
+.dg-exp .body.err { flex-direction: column; align-items: flex-start; }
+.dg-exp .body .meta.warn { color: var(--dg-amber); }
+.dg-exp .ft { display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border-top: 1px solid var(--dg-border); background: var(--dg-bg); }
+.dg-exp .ft .ck-mini { flex: none; font-size: 11.5px; color: var(--dg-muted);
+  border: 1px solid var(--dg-border); background: var(--dg-panel-2); border-radius: 4px;
+  padding: 3px 10px; cursor: pointer; }
+.dg-exp .ft .ck-mini:hover:not(:disabled) { color: var(--dg-text); border-color: var(--dg-accent); }
+.dg-exp .ft .ck-mini.primary { color: var(--dg-accent); border-color: var(--dg-accent); }
+.dg-exp .ft .ft-note { color: var(--dg-faint); font-size: 11px; }
+
 /* ---------- 数据库体检报告浮层 ----------
    深色 UI 不整块翻亮色：状态靠「圆点 + 描边徽章 + 淡底」传达，文字提亮为主。
    五态配色只用一套：ok 绿 / info 蓝 / warn 琥珀 / critical 红 / unknown 灰。 */
@@ -1193,3 +1306,46 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-checkup .ck-row .dot.st-critical { background: var(--dg-red); }
 .dg-checkup .ck-row .dot.st-unknown { background: var(--dg-faint); }
 .theme-light .dg-checkup .box { box-shadow: 0 10px 32px rgba(0,0,0,.18); }
+/* 体检浮层内的 AI 诊断区：报告下方独立一块，不遮挡上面的报告 */
+.dg-checkup .ck-ai { margin: 8px 14px 2px; border: 1px solid rgba(90,130,240,.4);
+  border-radius: 6px; background: rgba(90,130,240,.05); flex: none; max-height: 42%;
+  display: flex; flex-direction: column; min-height: 0; }
+.dg-checkup .ck-ai-hd { display: flex; align-items: center; gap: 7px; padding: 6px 10px 4px; }
+.dg-checkup .ck-ai-hd .t { color: var(--dg-accent); font-size: 11.5px; font-weight: 600; }
+.dg-checkup .ck-ai-hd .acts { margin-left: auto; display: flex; gap: 6px; }
+.dg-checkup .ck-ai-loading { padding: 14px 10px; color: var(--dg-muted); display: flex;
+  align-items: center; justify-content: center; gap: 8px; }
+.dg-checkup .ck-ai-err { padding: 10px; color: var(--dg-red); font-size: 12px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dg-checkup .ck-ai-text { flex: 1; min-height: 0; overflow: auto; padding: 4px 12px 8px;
+  font-size: 12.5px; line-height: 1.65; color: var(--dg-text); }
+.dg-checkup .ck-ai-text h1, .dg-checkup .ck-ai-text h2, .dg-checkup .ck-ai-text h3,
+.dg-checkup .ck-ai-text h4 { color: var(--dg-text); font-weight: 600; margin: 8px 0 4px; }
+.dg-checkup .ck-ai-text h1 { font-size: 14px; }
+.dg-checkup .ck-ai-text h2 { font-size: 13px; }
+.dg-checkup .ck-ai-text h3, .dg-checkup .ck-ai-text h4 { font-size: 12.5px; color: var(--dg-muted); }
+.dg-checkup .ck-ai-text p { margin: 4px 0; }
+.dg-checkup .ck-ai-text ul, .dg-checkup .ck-ai-text ol { margin: 4px 0; padding-left: 20px; }
+.dg-checkup .ck-ai-text li { margin: 2px 0; }
+.dg-checkup .ck-ai-text strong { color: #dbe6ff; font-weight: 600; }
+.dg-checkup .ck-ai-text code { font-family: var(--dg-mono); font-size: 11.5px;
+  background: var(--dg-panel-2); border: 1px solid var(--dg-border);
+  border-radius: 3px; padding: 0 4px; }
+.dg-checkup .ck-ai-text pre { font-family: var(--dg-mono); font-size: 11.5px; line-height: 1.5;
+  background: var(--dg-panel-2); border: 1px solid var(--dg-border); border-radius: 5px;
+  padding: 7px 9px; overflow: auto; margin: 6px 0; }
+.dg-checkup .ck-ai-text pre code { border: none; background: none; padding: 0; }
+.dg-checkup .ck-ai-text blockquote { border-left: 2px solid var(--dg-accent);
+  padding-left: 9px; color: var(--dg-muted); margin: 6px 0; }
+.dg-checkup .ck-ai-ask { display: flex; gap: 7px; padding: 7px 10px 9px; flex: none;
+  border-top: 1px solid var(--dg-border); }
+.dg-checkup .ck-ai-ask input { flex: 1; min-width: 0; background: var(--dg-panel-2);
+  border: 1px solid var(--dg-border); border-radius: 4px; color: var(--dg-text);
+  font-size: 12px; padding: 4px 8px; }
+.dg-checkup .ck-ai-ask input:focus { outline: none; border-color: var(--dg-accent); }
+.dg-checkup .ck-mini.ai { color: var(--dg-accent); border-color: rgba(90,130,240,.5);
+  background: var(--dg-accent-soft); }
+.dg-checkup .ck-mini.ai:hover:not(:disabled) { color: #dbe6ff; border-color: var(--dg-accent); }
+.dg-checkup .ck-mini.primary { color: var(--dg-text); border-color: var(--dg-accent);
+  background: var(--dg-accent-soft); }
+

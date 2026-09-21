@@ -28,7 +28,7 @@ flowchart TB
         L3["③ 审批中心：审批单生命周期（拒绝—重提模式）"]
         L4["④ 元数据缓存：schema / 索引 / 表行数统计"]
         L5["⑤ 连接管理：连接池 · SSH 多跳隧道生命周期"]
-        L6["⑥ 驱动适配：MySQL / PostgreSQL / SQLite / ClickHouse / Redis"]
+        L6["⑥ 可插拔驱动（drivers/）：MySQL / PostgreSQL / SQLite / ClickHouse<br/>注册表 + DbDriver 接口，加一种数据库 = 加一个驱动文件"]
         S[("存储 SQLite<br/>审计记录 / 审批单 / 元数据缓存")]
         F --> L1 --> L2 --> L3 --> L4 --> L5 --> L6
         L2 -.-> S
@@ -47,7 +47,7 @@ flowchart TB
 | 语言/框架 | Python 3.12 + FastMCP（官方 MCP SDK）+ FastAPI | MCP 与管理后台共用一个 ASGI 应用 |
 | SQL 解析 | **sqlglot** | AST 级解析：语句分类、提取涉及表/列、识别多语句与 CTE 内写操作 |
 | SQL 审计 | sqlglot 规则引擎 + `EXPLAIN` + information_schema 统计（自建核心）；**goInception** 作为可选增强（Docker sidecar，仅 MySQL，提供成熟的审核规则与影响行数估算） | 说明：Python 生态中"解析"有成熟库（sqlglot），"安全审计"没有开箱即用的成熟库，业界通行做法即 AST 规则 + EXPLAIN；goInception 是独立服务形态的成熟审计组件 |
-| 多数据库 | SQLAlchemy Core（不用 ORM）+ redis-py | 统一 MySQL/PG 方言；Redis 走命令分类模型 |
+| 多数据库 | SQLAlchemy Core（不用 ORM）+ redis-py + 可插拔驱动（`drivers/`） | 统一 MySQL/PG/SQLite/ClickHouse 方言；加一种数据库 = 加一个驱动模块并注册，config 与后台清单都不用改（见第十五节）；Redis 走命令分类模型，有独立适配器 |
 | SSH 多跳 | 子进程调用系统 OpenSSH：`ssh -N -L 本地端口:db:port -J jump1,jump2 target` | 天然多跳、复用 `~/.ssh/config`；本地进程直接读 `~/.ssh` 与真实 key 路径 |
 | 密钥 | SecretProvider 抽象：`env://`（Docker 推荐，经 docker secret/env 注入）、`file+age`（加密配置文件）、`keyring://`（裸机运行时用 macOS Keychain） | **Docker 内无法访问宿主 Keychain**，故容器部署默认 env/加密文件 |
 | 存储 | SQLite（volume 持久化） | 审计、审批单、元数据缓存 |
@@ -253,3 +253,58 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 **最小可行闭环**（真做时的第一步）：只支持集群的**键浏览 + 单 key 读写 + 命令窗口**（`RedisCluster` 对单 key 操作几乎透明），**明确不支持**跨 slot 批量与多库切换；前端对集群连接隐藏库切换器。配套用容器起 3 主 3 从 e2e 脚本（参照 `scripts/e2e_ssh_multihop.sh`）验证后再合入。
 
 ### goInception 深度审核集成 — 需跑起实例才能联调（接入点预留在 `audit/risk.py`）
+
+## 十五、可插拔驱动：加一种数据库 = 加一个驱动
+
+支持这么多 DB，引擎相关行为（建连参数、只读防线、取消手段、DDL 取法、容量/行数估算、
+跨库搜表、语法复核、执行计划、默认端口、图标、方言…）全部收拢进 `src/dbmcp/drivers/`：
+
+- `base.py`：`DbDriver` 基类 + `DRIVERS` 注册表。基类的每个方法都给**能用的默认实现**
+  （取消为空操作、容量/行数返回空、DDL 由反射拼近似、语法复核标为不支持），新引擎只覆盖
+  自己真正支持的部分，缺的能力**优雅降级**（前端本来就按「取不到 = 不支持」处理），不报错。
+- `<engine>.py`：各引擎的驱动，模块级 `@register` 即完成注册。
+- `engines.py` 只保留引擎无关的执行/反射逻辑，引擎特有入口一律委托
+  `get_driver(engine_kind).xxx(...)`；`config.Engine` 已是 `str`，配置层不再校验引擎清单。
+
+### 加一种数据库的完整步骤
+
+1. `src/dbmcp/drivers/xxx.py`：实现需要的部分（关系库通常只写 `build_engine`——
+   SQLAlchemy dialect 覆盖 MySQL/PG/SQLite/ClickHouse/MSSQL/Oracle/DB2…，拼 URL + 会话事件即可；
+   没有现成方言的库，自己实现接口的几个方法，`redis_engine.py` 是先例）。
+2. `src/dbmcp/drivers/__init__.py` 加一行 import。
+
+然后自动可用：连接表单下拉、默认端口联动、品牌图标、SQL 美化与编辑器 lint 的方言、
+跨库搜表、DDL、容量/行数估算、取消、执行计划、表同步的源/目标、AI 生成 SQL 的开关、
+MCP 工具（`query`/`execute`/`list_tables`/`table_ddl`/`sync_table`…）。**不用改 config 类型、
+不用改 admin 表单、不用改任何引擎清单。** `tests/test_drivers.py` 用一个临时注册的「假引擎」
+端到端钉住这条链路——注册后表单下拉、同步源、方言、端口、图标全部出现。
+
+### 能力声明（驱动属性，按需覆盖）
+
+| 属性 | 含义 | 默认 |
+|---|---|---|
+| `connectable` | 能否作为**连接**配置（分析工作台的进程内 DuckDB 注册进来只贡献方言/图标，不能连） | `True` |
+| `has_schema_layer` | 表位于 schema/database 之下，未选库时强制先选库（反射才不崩） | `True`（sqlite 为 `False`） |
+| `sync_target` | 可作为表同步目标（要能执行 CREATE TABLE + INSERT） | `True`（clickhouse 为 `False`，本期只读） |
+| `ai_sql` | AI 生成 SQL/DAG（按本引擎方言生成并转写） | `True`（clickhouse 为 `False`） |
+| `dialect` / `default_port` / `icon` | sqlglot 方言、默认端口、品牌图标文件名 | 逐引擎设置 |
+
+### 不随驱动自动获得的能力（需另写引擎专属 SQL）
+
+- **权限管理**（`privileges.py`）：GRANT/REVOKE 的目录查询与 DCL 构造按引擎写死，支持清单见
+  `privileges.SUPPORTED_ENGINES`。
+- **数据库体检**（`checkup.py`）：MySQL/PG/ClickHouse/SQLite 各一套诊断 SQL，分发表 `_DISPATCH`。
+
+这两处仍是「加一个函数 + 加一行分发表」的注册表形状，只是没有 driver 化——它们的成本在
+**引擎专属 SQL 本身**，挪进驱动不省事。
+
+### 模块依赖
+
+```
+drivers →（运行时惰性 import）engines    # drivers 模块级绝不 import engines
+engines → drivers（注册表，模块级）       # 故 import 无环
+service / admin / sync / probe → drivers
+```
+
+`create_engine` 与 `event` 在驱动里一律经 `engines.xxx` 引用，保持 SQLAlchemy 的单一引用面——
+这样测试 patch `dbmcp.engines.create_engine` 对所有驱动生效。

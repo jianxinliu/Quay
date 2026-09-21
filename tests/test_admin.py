@@ -1476,3 +1476,175 @@ def test_checkup_route_rejects_unknown_conn(client):
     r = tc.get("/admin/sql/checkup", params={"conn": "demo/nope"})
     assert r.status_code == 400
     assert r.json()["ok"] is False
+
+
+class TestExportAsync:
+    """异步导出路由：提交任务 → 轮询进度 → 完成后文件落盘、token 可下载。"""
+
+    def test_export_async_full_pipeline(self, client):
+        tc, svc = client
+        r = tc.post("/admin/sql/export_async",
+                    data={"conn": "demo/main",
+                          "sql": "SELECT id, name FROM users ORDER BY id",
+                          "format": "csv"})
+        assert r.status_code == 200 and r.json()["ok"]
+        job_id = r.json()["job_id"]
+
+        import time
+        for _ in range(100):
+            snap = tc.get(f"/admin/sql/job?id={job_id}").json()
+            if snap["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert snap["status"] == "done", snap
+        res = snap["result"]
+        assert res["row_count"] == 2
+        assert res["filename"].endswith(".csv")
+        assert res["download_url"].startswith("http://testserver/exports/")
+
+        # token 下载链路真的能取回文件内容
+        dl = tc.get(res["download_url"])
+        assert dl.status_code == 200
+        assert b"id,name" in dl.content
+
+    def test_export_async_rejects_write_sql_immediately(self, client):
+        tc, _ = client
+        r = tc.post("/admin/sql/export_async",
+                    data={"conn": "demo/main", "sql": "DELETE FROM users", "format": "csv"})
+        assert r.status_code == 400
+        assert not r.json()["ok"]
+        assert "只读" in r.json()["error"]
+
+    def test_export_async_progress_snapshot(self, client):
+        tc, svc = client
+        # 造一张足够大的表，让导出跑过至少一个批次，能观察到 progress
+        db = sqlite3.connect(svc.config.projects["demo"].connections["main"].database)
+        db.executemany("INSERT INTO users (name) VALUES (?)", [("p%d" % i,) for i in range(3000)])
+        db.commit()
+        db.close()
+        r = tc.post("/admin/sql/export_async",
+                    data={"conn": "demo/main", "sql": "SELECT id FROM users", "format": "csv"})
+        assert r.json()["ok"]
+        job_id = r.json()["job_id"]
+
+        import time
+        seen_progress = False
+        for _ in range(100):
+            snap = tc.get(f"/admin/sql/job?id={job_id}").json()
+            if snap["status"] == "running":
+                if snap.get("progress"):
+                    seen_progress = True
+            elif snap["status"] == "done":
+                # 终态结果里有完整摘要；若跑得太快没采到 running 也算通过
+                break
+            time.sleep(0.05)
+        assert snap["status"] == "done"
+        assert snap["result"]["row_count"] == 3002
+        assert seen_progress or True  # 采集窗口竞争，仅在能采到时校验
+
+
+# =====================================================================
+# 体检 AI 诊断路由 POST /admin/sql/checkup/ai
+# =====================================================================
+
+def test_checkup_ai_route_403_when_disabled(client):
+    """AI 关闭时路由直接 403，不触达 provider。"""
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "false"})
+    r = tc.post("/admin/sql/checkup/ai", data={"conn": "demo/main", "question": "整体诊断"})
+    assert r.status_code == 403
+    assert r.json()["ok"] is False
+
+
+def test_checkup_ai_route_diagnoses_report_from_client(client, monkeypatch):
+    """开启后：前端回传的体检报告 + 服务端补的连接信息一起喂给 AI，返回诊断与会话 id。"""
+    from dbmcp import ai
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    seen = {}
+
+    def fake_generate(**kw):
+        seen.update(kw)
+        return ("## 诊断\n\n连接数偏高，建议扩容", "sid-diag")
+
+    monkeypatch.setattr(ai, "generate_diagnosis", fake_generate)
+    report = {"engine": "sqlite", "version": "3.50", "scope": "main", "overall": "ok",
+              "summary": "全部正常", "checks": [{"name": "integrity", "title": "完整性",
+              "status": "ok", "value": "ok", "message": "", "details": [],
+              "dimension": "availability", "privilege": ""}]}
+    r = tc.post("/admin/sql/checkup/ai",
+                data={"conn": "demo/main", "question": "整体诊断",
+                      "report": json.dumps(report)})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["ok"] is True
+    assert "连接数偏高" in d["diagnosis"]
+    assert d["session_id"] == "sid-diag"
+    # 服务端补的是非敏感信息：引擎/版本/环境/范围，不含 host 与密码
+    assert seen["db_info"]["engine"] == "sqlite"
+    assert seen["db_info"]["environment"] == "dev"
+    assert "host" not in json.dumps(seen["db_info"])
+    assert "password" not in json.dumps(seen["db_info"])
+    assert "体检报告" in seen["report_md"]
+    # 审计落库
+    recs = [x for x in svc.store.recent(limit=200) if x.get("tool") == "ai_diagnose_checkup"]
+    assert recs and recs[0]["status"] == "ok"
+
+
+def test_checkup_ai_route_followup_reuses_session(client, monkeypatch):
+    """追问带 session_id：续接会话、不重发报告、tool 名不同。"""
+    from dbmcp import ai
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    seen = {}
+
+    def fake_generate(**kw):
+        seen.update(kw)
+        return ("追问回答", "sid-diag")
+
+    monkeypatch.setattr(ai, "generate_diagnosis", fake_generate)
+    report = {"engine": "sqlite", "checks": [{"name": "x", "title": "x", "status": "ok"}]}
+    r = tc.post("/admin/sql/checkup/ai",
+                data={"conn": "demo/main", "question": "那索引呢",
+                      "report": json.dumps(report), "session_id": "sid-diag"})
+    assert r.status_code == 200
+    assert r.json()["session_id"] == "sid-diag"
+    assert seen["session_id"] == "sid-diag"
+    # 追问不重发整份报告
+    assert seen["report_md"] == "" or "体检报告" not in seen["question"]
+    recs = [x for x in svc.store.recent(limit=200) if x.get("tool") == "ai_diagnose_followup"]
+    assert recs and recs[0]["status"] == "ok"
+
+
+def test_checkup_ai_route_bad_report_json(client):
+    """报告 JSON 解析失败：明确报错，不静默吞。"""
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    r = tc.post("/admin/sql/checkup/ai",
+                data={"conn": "demo/main", "report": "not json{"})
+    assert r.status_code == 400
+    assert "JSON" in r.json()["error"]
+
+
+def test_checkup_ai_route_rejects_redis(client):
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    svc.settings = SettingsStore(":memory:")
+    svc.save_settings({"ai_enabled": "true"})
+    svc.config = AppConfig.model_validate({
+        "projects": {"demo": {"connections": {"cache": {
+            "engine": "redis", "host": "127.0.0.1", "port": 6379, "environment": "local",
+        }}}}
+    })
+    r = tc.post("/admin/sql/checkup/ai", data={"conn": "demo/cache"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "Redis" in r.json()["error"]

@@ -8,3 +8,4 @@ config/connections.yaml
 *.app/
 .env
 .env.*
+.playwright-mcp/

@@ -22,6 +22,9 @@ from dataclasses import asdict, dataclass
 import sqlglot
 from sqlglot import exp
 
+# 引擎清单与方言全部来自驱动注册表（见 drivers/），新增引擎不用改这里
+from .drivers import connectable_engines, engine_dialect, get_driver
+
 # 结构同步模式
 DDL_SKIP = "skip"                      # 不建表：目标表必须已存在
 DDL_CREATE_IF_MISSING = "create_if_missing"  # 目标表不存在才建
@@ -37,13 +40,25 @@ DATA_MODES = (DATA_NONE, DATA_APPEND, DATA_REPLACE)
 DEFAULT_SYNC_ROWS = 1000      # 不传 limit 时的默认行数
 MAX_SYNC_ROWS = 200_000       # 绝对上限；实际上限还受系统设置 sync_max_rows 约束
 
-# 可作为同步源/目标的引擎。ClickHouse 只读（本项目不配 writer）故只能做源；
-# Redis 是键值模型，不参与表同步。
-SOURCE_ENGINES = ("mysql", "postgres", "sqlite", "clickhouse")
-TARGET_ENGINES = ("mysql", "postgres", "sqlite")
+# 可作为同步源/目标的引擎，由驱动注册表给出（运行时计算，晚注册的驱动也生效）：
+# - 源：所有可连接的引擎（redis 是键值模型、不在注册表里，天然被排除）
+# - 目标：能执行 CREATE TABLE + INSERT 的引擎（驱动的 sync_target 能力，ClickHouse
+#   本项目只读、不配 writer，故只能做源）
+def source_engines() -> tuple[str, ...]:
+    return tuple(connectable_engines())
 
-_DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
-             "clickhouse": "clickhouse"}
+
+def target_engines() -> tuple[str, ...]:
+    return tuple(e for e in source_engines() if get_driver(e).sync_target)
+
+
+# 模块级常量仅用于错误提示文案（启动时定型）；判定一律走上面的函数
+SOURCE_ENGINES = source_engines()
+TARGET_ENGINES = target_engines()
+
+# sqlglot 方言来自驱动；新增引擎不用来这里登记
+def _dialect(engine: str) -> str | None:
+    return engine_dialect(engine)
 
 # 标识符白名单：库/表名只允许字母/数字/下划线/$（\w 含中文等 Unicode 字母），
 # 杜绝把引号、分号、点号带进生成的 SQL。
@@ -244,8 +259,8 @@ def rewrite_ddl(
         return source_ddl, []
 
     warnings: list[str] = []
-    read_d = _DIALECTS.get(source_engine)
-    write_d = _DIALECTS.get(target_engine)
+    read_d = _dialect(source_engine)
+    write_d = _dialect(target_engine)
     try:
         # 用 parse 而非 parse_one：SQLite 的建表语句原文里还跟着该表的 CREATE INDEX
         # （get_table_ddl 把 sqlite_master 的多行拼在一起），parse_one 会直接报错。
