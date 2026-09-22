@@ -47,6 +47,13 @@ class _Result:
     def fetchall(self):
         return [tuple(r) for r in self._rows]
 
+    def fetchmany(self, n):
+        return [tuple(r) for r in self._rows[:n]]
+
+    @property
+    def rowcount(self):
+        return len(self._rows)
+
 
 class _Conn:
     def __init__(self, owner):
@@ -61,8 +68,10 @@ class _Conn:
         for route in self.owner.routes:
             frag, rows = route[0], route[1]
             cols = route[2] if len(route) > 2 else None
+            filt = route[3] if len(route) > 3 else None
             if frag.lower() in low:
-                return _Result(rows, cols)
+                kept = [r for r in rows if not filt or filt(r)]
+                return _Result(kept, cols)
         raise AssertionError(f"脚本化引擎未覆盖的 SQL: {sql}")
 
     def rollback(self):
@@ -198,6 +207,22 @@ VARIABLES = {"max_connections": "100", "version": "8.0.42", "long_query_time": "
              "innodb_buffer_pool_size": "134217728"}
 
 
+def _replica_flag(rows):
+    """给复制线程/守护线程行打标：replica_io/worker（COMMAND='Connect'，INFO 恒空、
+    STATE 是复制等待）与 event_scheduler 等 Daemon。真实库里 NAME != one_connection
+    或 COMMAND='Daemon' 会被 SQL 过滤掉，脚本化引擎在客户端侧用标记模拟同样的过滤。"""
+    out = []
+    daemon_states = ("waiting on empty queue", "suspending")
+    for r in rows:
+        state = str(r[2] or "").lower()
+        drop = (not r[1]) and (
+            "coordinator" in state
+            or "waiting for source to send event" in state
+            or state in daemon_states)
+        out.append(["__DROP__" if drop else r[0]] + list(r[1:]))
+    return out
+
+
 def scripted_mysql(status=None, variables=None, extra=(), replica_rows=None):
     st = dict(STATUS_VARS, **(status or {}))
     var = dict(VARIABLES, **(variables or {}))
@@ -205,7 +230,9 @@ def scripted_mysql(status=None, variables=None, extra=(), replica_rows=None):
         ("from performance_schema.global_status", [[k, v] for k, v in st.items()]),
         ("from performance_schema.global_variables", [[k, v] for k, v in var.items()]),
         ("events_errors_summary_global_by_error", [["0"]]),
-        ("where processlist_time >= :t", []),                 # 无长查询（performance_schema.threads）
+        # 长查询（performance_schema.threads，按 NAME='thread/sql/one_connection' 过滤）
+        ("processlist_time >= :t", [],
+         None, lambda r: r[0] != "__DROP__"),
         ("from performance_schema.threads", [[37]]),          # 全部线程计数（无需 PROCESS）
         ("data_lock_waits", [[0]]),                           # 行锁等待（无需 PROCESS）
         ("innodb_trx", [[0]]),                                # 退路
@@ -222,6 +249,12 @@ def scripted_mysql(status=None, variables=None, extra=(), replica_rows=None):
 
 def mysql_report(scripted):
     return checkup.run_checkup(scripted, "mysql", schema=None)
+
+
+def _long_queries(rows):
+    """长查询路由的行：复制线程打 __REPLICA__ 标记，供过滤器识别。"""
+    return ("processlist_time >= :t", _replica_flag(rows), None,
+            lambda r: r[0] != "__DROP__")
 
 
 def by_name(rep, name):
@@ -286,8 +319,7 @@ def test_mysql_deadlocks_from_error_table():
 
 def test_mysql_long_query_critical():
     rep = mysql_report(scripted_mysql(
-        extra=[("where processlist_time >= :t",
-                [[320, "SELECT * FROM big_table", "executing"]])]))
+        extra=[_long_queries([[320, "SELECT * FROM big_table", "executing"]])]))
     long_ = by_name(rep, "long_queries")
     assert long_.status == "critical"
     assert long_.details and "320s" in long_.details[0]
@@ -299,6 +331,39 @@ def test_mysql_long_queries_no_process_needed():
     rep = mysql_report(scripted_mysql(status={"Threads_connected": "50"}))
     long_ = by_name(rep, "long_queries")
     assert long_.status == "ok"
+
+
+def test_mysql_long_queries_ignore_replica_threads():
+    """并行复制从库的误报回归：replica_io / replica_worker 的 COMMAND 是 'Connect'
+    （既非 Sleep 也非 Daemon），PROCESSLIST_TIME 是复制连接存活时长（≈从库运行时间）、
+    INFO 恒为空。按 COMMAND 过滤会把它们当成「运行 N 天、无 SQL 文本」的假 critical。
+    修复后用 NAME='thread/sql/one_connection' 精确圈定用户前台连接，复制线程不进结果。"""
+    rep = mysql_report(scripted_mysql(
+        extra=[_long_queries(
+            [[100674, "", "Waiting for an event from Coordinator"],
+             [100674, "", "Waiting for source to send event"],
+             [100674, "", "Waiting on empty queue"],            # event_scheduler（Daemon）
+             [320, "SELECT * FROM big_table", "executing"]])]))
+    long_ = by_name(rep, "long_queries")
+    # 复制线程被排除后只剩一条真实长查询（320s，仍 >= 300s critical 阈值）
+    assert long_.status == "critical", long_.status
+    assert long_.details and len(long_.details) == 1, long_.details
+    assert "320s" in long_.details[0]
+    # 被误报的复制线程存活时长不再出现
+    assert "100674" not in "".join(long_.details)
+    assert "无 SQL 文本" not in "".join(long_.details)
+
+
+def test_mysql_long_queries_replica_only_not_reported():
+    """全是复制线程/守护线程（没有真实用户长查询）时，长查询项应为 ok，
+    而不是报成 critical「100674s 无 SQL 文本」。"""
+    rep = mysql_report(scripted_mysql(
+        extra=[_long_queries(
+            [[100674, "", "Waiting for an event from Coordinator"],
+             [100674, "", "Waiting for source to send event"],
+             [100674, "", "Waiting on empty queue"]])]))
+    long_ = by_name(rep, "long_queries")
+    assert long_.status == "ok", (long_.status, long_.value, long_.details)
 
 
 def test_mysql_lock_waits_warn():

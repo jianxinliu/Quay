@@ -677,19 +677,23 @@ def _mysql_long_queries(engine: SAEngine, status: dict[str, str]) -> Check:
     实测 8.4/9.x 都如此），替代 information_schema.PROCESSLIST——后者无 PROCESS 时
     只回自己的会话，会漏掉别人的长查询。
 
-    必须排除守护线程：threads 表里有 PROCESSLIST_ID 非空但 ``PROCESSLIST_COMMAND='Daemon'``
-    的线程（event_scheduler、以及某些残留的 binlog/复制 worker），它们的
-    PROCESSLIST_TIME 随运行时间一路增长，只过滤 Sleep 会把它们误报成长查询（真实 8.4
-    库上 event_scheduler 的守护线程稳定触发假 critical）。正在执行 SQL 的用户连接
-    command 是 Query，所以按 ``NOT IN ('Sleep','Daemon')`` 圈定才准。"""
+    只看真正的用户前台连接：threads.NAME = 'thread/sql/one_connection'。**必须**用 NAME
+    精确圈定——只按 COMMAND 过滤会漏掉复制线程：MySQL 8 并行复制（replica_parallel_workers>0）
+    的 replica_io / replica_worker 线程 COMMAND 是 'Connect'（不是 Sleep、也不是 Daemon），
+    STATE 是 'Waiting for source to send event' / 'Waiting for an event from Coordinator'，
+    它们的 PROCESSLIST_TIME 是**复制连接的存活时长**（≈ 从库运行时间），而 PROCESSLIST_INFO
+    恒为空——按 ``NOT IN ('Sleep','Daemon')`` 过滤会把它们当成「运行 28 小时、无 SQL 文本」
+    的假 critical（真实 8.0.32 从库、16 个 worker 稳定复现）。同理 event_scheduler /
+    compress_gtid_table 是 Daemon，NAME 也不是 one_connection，一并排除。"""
     try:
         rows = _rows(
             engine,
             "SELECT PROCESSLIST_TIME, LEFT(COALESCE(PROCESSLIST_INFO,''), 80), PROCESSLIST_STATE"
             " FROM performance_schema.threads"
-            " WHERE PROCESSLIST_TIME >= :t"
+            " WHERE NAME = 'thread/sql/one_connection'"
             " AND PROCESSLIST_COMMAND NOT IN ('Sleep', 'Daemon')"
             " AND PROCESSLIST_ID IS NOT NULL"
+            " AND PROCESSLIST_TIME >= :t"
             " ORDER BY PROCESSLIST_TIME DESC LIMIT 5",
             {"t": LONG_QUERY_WARN_S},
         )
