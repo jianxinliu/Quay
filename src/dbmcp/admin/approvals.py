@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING
 
 import anyio.to_thread
 from starlette.requests import Request

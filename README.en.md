@@ -30,13 +30,25 @@ Passwords live in the system keyring. Config files hold only `env://` / `keyring
 ## Quick start
 
 ```bash
-uv sync --extra keyring
-cp config/connections.example.yaml config/connections.yaml   # point it at your databases
-
-DBM_ADMIN_TOKEN=some-long-random-string uv run dbm serve
+uvx --from "db-manage-mcp[keyring]" quay serve        # or: pipx install "db-manage-mcp[keyring]" && quay serve
 ```
 
+The first start writes an example config (with a bundled SQLite demo database) and a login token
+under `~/.config/db-manage-mcp/`; the startup message prints the admin URL, the MCP endpoint,
+the config and data paths, and the token.
 The admin backend is at <http://127.0.0.1:8100/admin>, the MCP endpoint at `http://127.0.0.1:8100/mcp`.
+Add your own databases under Settings → Connections; passwords go to the system keyring and the
+config file keeps only references.
+
+Optional extras: `keyring` (system keyring for passwords, recommended), `tokenizer` (real
+tokenizer for the token counts on the dashboard), `clickhouse` (ClickHouse dialect).
+
+From source:
+
+```bash
+uv sync --extra keyring --extra tokenizer
+uv run dbm serve        # config in config/connections.yaml, data in data/; both are created on first run
+```
 
 To connect any MCP client (Claude Code, Codex, Cursor, DeepSeek Harness, and others), see [Connecting agents](#connecting-agents). How agents should use the tools is in **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese).
 

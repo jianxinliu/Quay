@@ -7,7 +7,6 @@ import hashlib
 import hmac
 import html
 import os
-from typing import TYPE_CHECKING
 
 from starlette.requests import Request
 

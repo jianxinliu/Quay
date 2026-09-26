@@ -56,6 +56,7 @@ Issues = "https://github.com/jianxinliu/Quay/issues"
 
 [project.scripts]
 dbm = "dbmcp.__main__:main"
+quay = "dbmcp.__main__:main"   # 同一个入口的品牌别名：uvx --from db-manage-mcp quay serve
 
 [dependency-groups]
 dev = [

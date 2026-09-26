@@ -30,13 +30,23 @@
 ## 快速开始
 
 ```bash
-uv sync --extra keyring --extra tokenizer
-cp config/connections.example.yaml config/connections.yaml   # 改成你的库
-
-DBM_ADMIN_TOKEN=一串足够长的随机字符 uv run dbm serve
+uvx --from "db-manage-mcp[keyring]" quay serve        # 或 pipx install "db-manage-mcp[keyring]" 后 quay serve
 ```
 
+首次启动会在 `~/.config/db-manage-mcp/` 生成示例配置（内含一个随包播种的 SQLite 示例库）
+和登录 token，启动信息里会打印后台地址、MCP 端点、配置与数据目录、token。
 管理后台在 <http://127.0.0.1:8100/admin>，MCP 端点在 `http://127.0.0.1:8100/mcp`。
+在「系统设置 → 连接管理」里添加自己的库，密码进系统钥匙串、配置文件只存引用。
+
+可选 extra：`keyring`（系统钥匙串存密码，推荐）、`tokenizer`（看板上的 token 计数用真实分词器）、
+`clickhouse`（ClickHouse 方言）。
+
+从源码运行：
+
+```bash
+uv sync --extra keyring --extra tokenizer
+uv run dbm serve        # 配置在 config/connections.yaml、数据在 data/，缺了同样首次生成
+```
 
 接入任意 MCP 客户端（Claude Code / Codex / Cursor / DeepSeek Harness 等）见 [接入 Agent](#接入-agent)。用法见 **[AGENT_GUIDE.md](AGENT_GUIDE.md)**。
 
