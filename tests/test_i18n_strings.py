@@ -177,6 +177,10 @@ async def test_describe_table_missing_table_no_cjk(service):
         with pytest.raises(ToolError) as ei:
             await c.call_tool("describe_table",
                               {"project": "demo", "connection": "main", "table": "missing"})
+    # agent_error() passes ValueError through verbatim (server.py: `isinstance(e, (QueryRejected,
+    # ValueError)): return ToolError(str(e))`), so this really does exercise engines.py's
+    # translated message, not some other category text.
+    assert "does not exist" in str(ei.value)
     assert _no_cjk(str(ei.value)), str(ei.value)
 
 
