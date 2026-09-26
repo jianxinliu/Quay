@@ -322,7 +322,7 @@ class TestServiceListSessions:
         assert [s["session_id"] for s in got] == ["sess-done"]
 
     def test_bad_status_raises(self, service):
-        with pytest.raises(ValueError, match="不支持的状态"):
+        with pytest.raises(ValueError, match="Unsupported status"):
             service.list_agent_sessions(CALLER, status="success")
 
     def test_bad_date_raises(self, service):
@@ -379,7 +379,7 @@ class TestServiceSessionHistory:
         assert done["operations"][0]["row_count"] == 1
 
     def test_bad_status_rejected_with_options(self, service):
-        with pytest.raises(ValueError, match="不支持的状态"):
+        with pytest.raises(ValueError, match="Unsupported status"):
             service.session_history(CALLER, status="executed")
 
     def test_writes_only_filters_reads(self, service):
@@ -393,7 +393,7 @@ class TestServiceSessionHistory:
         long_sql = "SELECT 1 -- " + "x" * (service.HISTORY_SQL_MAX_CHARS + 500)
         service.query("demo", "main", long_sql, CALLER)
         sql = service.session_history(CALLER, fields="sql")["operations"][0]["sql"]
-        assert sql.endswith("（已截断）")
+        assert sql.endswith("... (truncated)")
         assert len(sql) < len(long_sql)
 
     def test_failed_op_detail_is_opt_in(self, service):
@@ -430,7 +430,7 @@ class TestServiceHistoryFields:
 
     def test_unknown_field_rejected_with_options(self, service):
         service.query("demo", "main", "SELECT 1", CALLER)
-        with pytest.raises(ValueError, match="不支持的字段"):
+        with pytest.raises(ValueError, match="Unsupported field"):
             service.session_history(CALLER, fields="ts,secret_column")
 
     def test_empty_values_are_omitted(self, service):

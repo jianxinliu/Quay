@@ -30,13 +30,25 @@ Passwords live in the system keyring. Config files hold only `env://` / `keyring
 ## Quick start
 
 ```bash
-uv sync --extra keyring
-cp config/connections.example.yaml config/connections.yaml   # point it at your databases
-
-DBM_ADMIN_TOKEN=some-long-random-string uv run dbm serve
+uvx --from "db-manage-mcp[keyring]" quay serve        # or: pipx install "db-manage-mcp[keyring]" && quay serve
 ```
 
+The first start writes an example config (with a bundled SQLite demo database) and a login token
+under `~/.config/db-manage-mcp/`; the startup message prints the admin URL, the MCP endpoint,
+the config and data paths, and the token.
 The admin backend is at <http://127.0.0.1:8100/admin>, the MCP endpoint at `http://127.0.0.1:8100/mcp`.
+Add your own databases under Settings → Connections; passwords go to the system keyring and the
+config file keeps only references.
+
+Optional extras: `keyring` (system keyring for passwords, recommended), `tokenizer` (real
+tokenizer for the token counts on the dashboard), `clickhouse` (ClickHouse dialect).
+
+From source:
+
+```bash
+uv sync --extra keyring --extra tokenizer
+uv run dbm serve        # config in config/connections.yaml, data in data/; both are created on first run
+```
 
 To connect any MCP client (Claude Code, Codex, Cursor, DeepSeek Harness, and others), see [Connecting agents](#connecting-agents). How agents should use the tools is in **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese).
 
@@ -140,6 +152,8 @@ Add one `@deepseek-ai/dsh-mcp-client` instance per MCP server in `cordis.yml`. T
 
 If a client speaks MCP streamable HTTP, the URL is `http://127.0.0.1:8100/mcp`. It listens on loopback with no auth — do not expose port 8100 on the LAN or the public internet.
 
+Every admin page (dashboard, approvals, audit, settings) shares one theme with the query console: dark by default, switchable to light in Settings. A fresh dashboard shows a three-step onboarding (add a connection → run a query → connect an agent), and connections that were never reached show as "unprobed" rather than "ok".
+
 ## How it's organized
 
 ```mermaid
@@ -217,6 +231,8 @@ New change requests appear in the bell in the admin UI. Bark / WeCom / Feishu ca
 
 Whichever of the three channels is used, the change request keeps a complete record. An unhandled change request expires after 60 minutes.
 
+External channels can also carry a **one-time approval link** (off by default): open it on your phone to approve or reject that single request without logging in. The link is single-use and expires with the request; the token passes through your notification provider, so read [SECURITY.md](SECURITY.md) before turning it on.
+
 ## Security model
 
 - **Deny by default**: read-only classification is done by parsing the AST with sqlglot. Parse failures, multi-statement input, DML tucked inside a CTE, `SELECT ... FOR UPDATE` — all of it is treated as a write.
@@ -273,6 +289,8 @@ Environment-variable secrets go in `~/.config/db-manage-mcp/env` (mode 600). If 
 
 Deployment is a plain local process; Docker support was deliberately left out. On a single machine, a container has to route around the network to reach the host's databases, has no keyring backend, and needs SSH key paths remapped — for this use case it only adds cost.
 
+With pipx/uvx installs, config and data live under `~/.config/db-manage-mcp/` (`DBM_HOME` moves the whole directory); `quay serve` reads the `env` file there too, and the login token generated on first run is stored in it. From a source checkout the paths are `config/connections.yaml` and `data/`.
+
 ## Docs
 
 | Who you are | What to read |
@@ -285,7 +303,7 @@ Deployment is a plain local process; Docker support was deliberately left out. O
 ## Development
 
 ```bash
-uv sync --extra keyring
+uv sync --extra keyring --extra tokenizer --extra clickhouse
 uv run pytest          # full test suite
 uv run ruff check .    # lint
 ```

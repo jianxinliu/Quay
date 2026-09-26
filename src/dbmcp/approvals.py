@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -55,7 +57,8 @@ CREATE TABLE IF NOT EXISTS change_request (
     decided_by   TEXT,
     decided_at   TEXT,
     decision_note TEXT,
-    exec_result  TEXT                 -- JSON：核销执行后的结果（行数/耗时/执行方）
+    exec_result  TEXT,                -- JSON：核销执行后的结果（行数/耗时/执行方）
+    action_token TEXT                 -- 通知里一次性审批链接的令牌 sha256；用过/决策后置 NULL
 );
 CREATE INDEX IF NOT EXISTS idx_change_status ON change_request (status);
 """
@@ -130,6 +133,8 @@ class ApprovalStore:
                 self._conn.execute("ALTER TABLE change_request ADD COLUMN rollback_note TEXT")
             if "database" not in cols:
                 self._conn.execute("ALTER TABLE change_request ADD COLUMN database TEXT")
+            if "action_token" not in cols:
+                self._conn.execute("ALTER TABLE change_request ADD COLUMN action_token TEXT")
             self._conn.commit()
 
     def create(
@@ -222,6 +227,51 @@ class ApprovalStore:
             ).fetchall()
         return {int(r["id"]): self._row_to_change(r) for r in rows}
 
+    # ---- 通知里的一次性审批链接 ----
+    # 令牌明文只出现在发出去的通知里；库里存 sha256。用一次即作废（CAS），
+    # 审批单被决策/过期后也失效（决策前置 NULL，过期由 effective_status 挡）。
+
+    @staticmethod
+    def _token_digest(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def issue_action_token(self, change_id: int) -> str:
+        """给 pending 的审批单签发令牌，返回明文（调用方拼进链接）。"""
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE change_request SET action_token = ? WHERE id = ? AND status = ?",
+                (self._token_digest(token), change_id, STATUS_PENDING),
+            )
+            self._conn.commit()
+        if cur.rowcount != 1:
+            raise ApprovalError(f"审批单 #{change_id} 不是待审批状态，无法签发操作链接")
+        return token
+
+    def action_token_matches(self, change_id: int, token: str) -> bool:
+        """只校验不作废（GET 渲染确认页用）。空令牌恒 False。"""
+        if not token:
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT action_token FROM change_request WHERE id = ?", (change_id,)
+            ).fetchone()
+        stored = row["action_token"] if row else None
+        return bool(stored) and secrets.compare_digest(stored, self._token_digest(token))
+
+    def redeem_action_token(self, change_id: int, token: str) -> bool:
+        """校验并作废：条件 UPDATE 只让 hash 匹配的那一次成功，并发重放只能成功一次。"""
+        if not token:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE change_request SET action_token = NULL"
+                " WHERE id = ? AND action_token = ? AND status = ?",
+                (change_id, self._token_digest(token), STATUS_PENDING),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
     def approve(self, change_id: int, decided_by: str, note: str = "") -> ChangeRequest:
         return self._decide(change_id, STATUS_APPROVED, decided_by, note)
 
@@ -235,9 +285,10 @@ class ApprovalStore:
             raise ApprovalError(f"审批单 #{change_id} 当前状态为 {effective}，无法再决策")
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
+            # 决策后令牌一并作废：后台批过的单，通知里的链接不该还能再点
             self._conn.execute(
                 "UPDATE change_request SET status = ?, decided_by = ?, decided_at = ?,"
-                " decision_note = ? WHERE id = ?",
+                " decision_note = ?, action_token = NULL WHERE id = ?",
                 (new_status, decided_by, now, note, change_id),
             )
             self._conn.commit()

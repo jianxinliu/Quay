@@ -24,7 +24,7 @@
 
   /* 连接表排序。默认按状态倒序——**异常的排最前**，看板上先该看见的就是它们；
      同状态内按名字排，保证顺序稳定（每 5s 重画一次，顺序抖动会很刺眼）。 */
-  const STATE_RANK = { ok: 0, unavailable: 1, exhausted: 2 };
+  const STATE_RANK = { unprobed: 0, ok: 1, unavailable: 2, exhausted: 3 };
   const CONN_COLS = [
     { key: "name", label: "连接", get: (i) => `${i.project}/${i.connection}` },
     { key: "engine", label: "引擎", get: (i) => i.engine },
@@ -176,19 +176,22 @@
     return charts[id];
   }
 
+  // 图表颜色从 CSS 变量取（admin-chrome.css 的 --chart-*），深浅主题各一套；
+  // 样式表在 <head>、本脚本在 body 末尾，初始化时变量已可读。
+  const cv = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const AXIS_STYLE = {
-    axisLine: { lineStyle: { color: "#e6e8ec" } },
+    axisLine: { lineStyle: { color: cv("--chart-axis") } },
     axisTick: { show: false },
-    axisLabel: { color: "#9aa1ac", fontSize: 11 },
+    axisLabel: { color: cv("--chart-label"), fontSize: 11 },
   };
   const GRID = { left: 8, right: 12, top: 28, bottom: 4, containLabel: true };
   const TOOLTIP_BASE = {
     trigger: "axis",
     axisPointer: { type: "shadow" },
-    backgroundColor: "rgba(20,24,31,.94)",
+    backgroundColor: cv("--chart-tip-bg"),
     borderWidth: 0,
     padding: [8, 11],
-    textStyle: { color: "#e6e8ec", fontSize: 12 },
+    textStyle: { color: cv("--chart-tip-ink"), fontSize: 12 },
     extraCssText: "border-radius:8px;box-shadow:0 6px 20px rgba(15,20,27,.22)",
   };
 
@@ -216,7 +219,7 @@
       grid: GRID,
       legend: {
         top: 0, right: 0, itemWidth: 9, itemHeight: 9, itemGap: 14,
-        textStyle: { color: "#6b7280", fontSize: 11 },
+        textStyle: { color: cv("--chart-legend"), fontSize: 11 },
         data: ["成功", "被挡下", "出错"],
       },
       tooltip: {
@@ -233,18 +236,18 @@
       xAxis: { type: "category", data: labels, ...AXIS_STYLE },
       yAxis: {
         type: "value", minInterval: 1, ...AXIS_STYLE,
-        splitLine: { lineStyle: { color: "#f1f3f5" } },
+        splitLine: { lineStyle: { color: cv("--chart-grid") } },
       },
       series: [
         { name: "成功", type: "bar", stack: "ops", data: ok,
-          itemStyle: { color: "#0d9488", borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: "#0f766e" } } },
+          itemStyle: { color: cv("--chart-ok"), borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: cv("--chart-ok-2") } } },
         { name: "被挡下", type: "bar", stack: "ops", data: rejected,
-          itemStyle: { color: "#d9a441", borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: "#c08e2c" } } },
+          itemStyle: { color: cv("--chart-blocked"), borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: cv("--chart-blocked-2") } } },
         { name: "出错", type: "bar", stack: "ops", data: errors,
-          itemStyle: { color: "#c0392b", borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: "#a5281c" } } },
+          itemStyle: { color: cv("--chart-err"), borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: cv("--chart-err-2") } } },
       ],
     }, { notMerge: true });
     chart.resize();
@@ -271,17 +274,17 @@
       yAxis: {
         type: "value", ...AXIS_STYLE,
         axisLabel: { ...AXIS_STYLE.axisLabel, formatter: (v) => bytes(v) },
-        splitLine: { lineStyle: { color: "#f1f3f5" } },
+        splitLine: { lineStyle: { color: cv("--chart-grid") } },
       },
       series: [{
         name: "读出数据量", type: "line", data: vals, smooth: true,
         showSymbol: false, symbolSize: 6,
-        lineStyle: { width: 2, color: "#0d9488" },
-        itemStyle: { color: "#0d9488" },
+        lineStyle: { width: 2, color: cv("--chart-ok") },
+        itemStyle: { color: cv("--chart-ok") },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: "rgba(13,148,136,.28)" },
-            { offset: 1, color: "rgba(13,148,136,.02)" },
+            { offset: 0, color: cv("--chart-area-0") },
+            { offset: 1, color: cv("--chart-area-1") },
           ]),
         },
       }],
@@ -320,9 +323,7 @@
       + " · 已运行 " + dur(d.uptime_s * 1000);
 
     document.getElementById("dash-tiles").innerHTML = [
-      tile("已配置连接", num(c.configured),
-           c.unhealthy ? `<b>${c.unhealthy}</b> 条连接异常` : "全部正常",
-           c.unhealthy ? "bad" : ""),
+      tile("已配置连接", num(c.configured), connTileSub(c), c.unhealthy ? "bad" : ""),
       tile("此刻占用连接", num(c.checked_out),
            `池内 ${num(c.pooled_engines)} 个引擎`),
       tile("正在执行", num(d.live.count),
@@ -345,6 +346,7 @@
     document.getElementById("dash-bytes-total").textContent = bytes(t.bytes_read);
 
     renderLive();
+    renderOnboard(c);
     renderConnections(c.items);
     renderSessions(d.sessions, d.session_days);
     renderBudgets(d.budgets || []);
@@ -418,6 +420,29 @@
     });
   }
 
+  /* 「全部正常」只有在每条连接都真的连过时才成立；从未触达过的连接是「未探测」，
+     新装实例上把示例配置里那几台不存在的库显示成正常，是首屏最大的误导。 */
+  function connTileSub(c) {
+    if (c.unhealthy) return `<b>${c.unhealthy}</b> 条连接异常`;
+    if (!c.configured) return "尚未配置";
+    if (c.unprobed === c.configured) return "均未探测";
+    if (c.unprobed) return `${c.configured - c.unprobed} 条正常 · ${c.unprobed} 条未探测`;
+    return "全部正常";
+  }
+
+  function renderOnboard(c) {
+    const box = document.getElementById("dash-onboard");
+    if (c.configured) { box.style.display = "none"; return; }
+    box.style.display = "";
+    box.innerHTML = "<h3>开始使用</h3>"
+      + "<ol>"
+      + '<li><a href="/admin/settings?tab=connections">新建连接</a>——账号密码进系统钥匙串，配置文件只存引用。</li>'
+      + '<li>在<a href="/admin/sql">查询台</a>跑第一条 SQL。</li>'
+      + '<li>把 MCP 端点 <code>/mcp</code> 接给 agent（README「接入 Agent」）；它的写操作会出现在'
+      + '<a href="/admin/approvals">审批中心</a>。</li>'
+      + "</ol>";
+  }
+
   function renderConnections(items) {
     const box = document.getElementById("dash-conns");
     if (!items.length) {
@@ -425,7 +450,7 @@
         + '<a href="/admin/settings?tab=connections">去添加 →</a></div>';
       return;
     }
-    const stateText = { ok: "正常", unavailable: "不可用", exhausted: "需人介入" };
+    const stateText = { ok: "正常", unprobed: "未探测", unavailable: "不可用", exhausted: "需人介入" };
     const arrow = (k) => (connSort.key === k
       ? `<i class="sarrow ${connSort.dir}"></i>` : '<i class="sarrow"></i>');
     const head = CONN_COLS.map((c) =>
@@ -438,7 +463,7 @@
       + sortConnections(items).map((i) => {
         const state = i.state || "ok";
         let note = "—";
-        if (state !== "ok") {
+        if (state !== "ok" && state !== "unprobed") {
           note = `<div class="muted">${esc(i.last_error || "")}</div>`
             + (i.retry_in_s ? `<div class="muted">约 ${i.retry_in_s}s 后自动重试</div>` : "");
         }
@@ -495,7 +520,7 @@
       + items.map((b) => {
         // 只在接近/超出配额时上色——平时全绿一片反而看不出哪个该管
         const pct = b.percent;
-        const color = pct >= 100 ? "#c0392b" : pct >= 75 ? "#b45309" : "";
+        const color = pct >= 100 ? cv("--danger-ink") : pct >= 75 ? cv("--warn-ink") : "";
         return "<tr>"
           + `<td><span class="mono">${esc((b.session_id || "-").slice(0, 12))}</span></td>`
           + `<td class="num">${num(b.used_chars)} 字符<br>`

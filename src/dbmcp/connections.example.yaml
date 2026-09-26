@@ -1,0 +1,62 @@
+# Quay 连接配置。首次启动自动生成这份文件；之后在管理后台「系统设置 → 连接管理」里增删改，
+# 后台会把改动写回这里（注释会丢失）。也可以直接手改，改完重启服务生效。
+#
+# 密码只写引用，不写明文：
+#   keyring://service/account   系统钥匙串（管理后台录入的密码存在这里，推荐）
+#   env://VAR_NAME              环境变量（常驻服务从 ~/.config/db-manage-mcp/env 注入）
+#   plain://xxx                 字面量，仅限本地一次性调试——不要提交、不要用于真实账号
+projects:
+  demo:
+    connections:
+      # 随包播种的示例库（customers / orders 两张表），内置示例流程「渠道ROI分析」也跑它。
+      # 不需要了直接删掉这段。
+      shop:
+        engine: sqlite
+        database: ./data/demo/shop.sqlite3
+        environment: local
+
+      # ---- 以下是各引擎的写法示例，去掉注释按需修改 ----
+      #
+      # dev-mysql:
+      #   engine: mysql
+      #   host: 127.0.0.1
+      #   port: 3306
+      #   database: demo
+      #   environment: dev            # local / dev / staging / prod；prod 的写操作强制人工审批
+      #   user: demo_reader           # 日常查询用的只读账号
+      #   password: env://DEMO_MYSQL_PW
+      #   writer:                     # 可选：仅审批通过的写操作才切换到这个账号
+      #     user: demo_writer
+      #     password: env://DEMO_MYSQL_WRITER_PW
+      #   policy:
+      #     max_rows: 1000            # 查询默认行数上限
+      #     statement_timeout_s: 30   # 读语句超时
+      #     write_timeout_s: 600      # 写语句超时
+      #     mask_columns: [salary, phone]   # 给 agent 看时脱敏的列（内置已覆盖 password/token 等）
+      #
+      # prod-postgres:
+      #   engine: postgres
+      #   host: 10.0.3.12
+      #   port: 5432
+      #   database: shop
+      #   environment: prod
+      #   user: shop_reader
+      #   password: env://SHOP_PG_READER_PW
+      #   jump_hosts: [bastion1.corp, bastion2.corp]   # SSH 多级跳板，按序经过；每跳可配独立密钥
+      #
+      # analytics-clickhouse:         # 需要安装 extra：pip install 'db-manage-mcp[clickhouse]'
+      #   engine: clickhouse
+      #   host: 127.0.0.1
+      #   port: 9000                  # native TCP 端口（不是 HTTP 的 8123）
+      #   environment: dev
+      #   user: default
+      #   password: env://CH_PW       # default 用户无密码时可省略
+      #   # database 留空则查询台先列库再选表；写上则直接进该库
+      #
+      # dev-redis:                    # Redis 只在管理后台的 Redis 控制台里用，不暴露给 agent
+      #   engine: redis
+      #   host: 127.0.0.1
+      #   port: 6379
+      #   database: "0"               # db index
+      #   environment: dev
+      #   password: env://DEV_REDIS_PW   # 无 auth 的本地实例可省略

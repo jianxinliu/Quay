@@ -324,15 +324,17 @@ class DbmService:
         """
         title = (title or "").strip()
         if not title:
-            raise ValueError("会话名字 title 不能为空")
+            raise ValueError("Session title cannot be empty")
         note = (note or "").strip()
         sid = caller.session_id
         self.store.upsert_session(sid, caller.agent or "unknown", title, note)
         return {
             "session_id": sid,
             "title": title,
-            # session_id 为空时（如某些 stdio 客户端无会话 id）无法按会话归类，明确告知
-            "note": "" if sid else "当前客户端未提供会话 id，本次会话的 SQL 将无法按会话归类回溯",
+            # When session_id is empty (e.g. some stdio clients have no session id) it
+            # can't be grouped by session — say so explicitly.
+            "note": "" if sid else "The current client did not provide a session id; "
+                                   "this session's SQL cannot be traced back by session",
         }
 
     # 审计记录的结果状态：ok=真正执行成功；rejected=被挡下（首提生成审批单、
@@ -354,13 +356,13 @@ class DbmService:
         st = (status or "").strip().lower()
         if st and st not in self.HISTORY_STATUSES:
             raise ValueError(
-                f"不支持的状态 {status!r}；可选: {', '.join(self.HISTORY_STATUSES)}"
-                "（ok=执行成功，rejected=被挡下未落库，error=执行出错）"
+                f"Unsupported status {status!r}; options: {', '.join(self.HISTORY_STATUSES)}"
+                " (ok=executed successfully, rejected=blocked without landing, error=execution failed)"
             )
         return st
 
     def _history_fields(self, fields: str) -> tuple[str, ...]:
-        """解析 fields 入参：空=默认精简列，all=全部，否则按名字取（校验白名单）。"""
+        """Parse the fields argument: empty=default compact columns, all=every column, otherwise pick by name (validated against the allow-list)."""
         raw = (fields or "").strip()
         if not raw:
             return self.HISTORY_DEFAULT_FIELDS
@@ -370,7 +372,7 @@ class DbmService:
         unknown = [f for f in wanted if f not in self.HISTORY_ALL_FIELDS]
         if unknown:
             raise ValueError(
-                f"不支持的字段 {unknown}；可选: {', '.join(self.HISTORY_ALL_FIELDS)}（或 all）"
+                f"Unsupported field(s) {unknown}; options: {', '.join(self.HISTORY_ALL_FIELDS)} (or all)"
             )
         return tuple(wanted)
 
@@ -441,8 +443,8 @@ class DbmService:
         sid = (session_id or caller.session_id or "").strip()
         if not sid:
             raise ValueError(
-                "未指定 session_id，且当前客户端没有提供会话 id；"
-                "请先用 list_sessions 找到目标会话，再把 session_id 传进来"
+                "No session_id given, and the current client did not provide a session id; "
+                "use list_sessions to find the target session first, then pass its session_id in"
             )
         want = self._history_fields(fields)
         st = self._history_status(status)
@@ -492,17 +494,18 @@ class DbmService:
             "count": len(ops),
             "status_counts": status_counts,
             "fields": list(want),
-            "order": "最近在前",
+            "order": "most recent first",
         }
         if fields.strip().lower() not in ("all",) and "sql" not in want:
-            out["hint"] = ('默认不返回 SQL 原文与错误明细；需要时用 '
-                           'fields="sql,detail"（或 all）单独取，建议配合 limit 收窄')
+            out["hint"] = ('The raw SQL and error details are not returned by default; '
+                           'ask for them separately with fields="sql,detail" (or all), '
+                           'and consider narrowing with limit')
         return out
 
     def _clip_history_sql(self, sql: str) -> str:
         if len(sql) <= self.HISTORY_SQL_MAX_CHARS:
             return sql
-        return sql[: self.HISTORY_SQL_MAX_CHARS] + "…（已截断）"
+        return sql[: self.HISTORY_SQL_MAX_CHARS] + "... (truncated)"
 
     def list_projects(self) -> list[dict]:
         # 对 agent 隐藏 Redis 连接（Redis 只供人通过 /admin/redis 操作）；
@@ -517,7 +520,7 @@ class DbmService:
     def list_connections(self, project: str) -> list[dict]:
         proj = self.config.projects.get(project)
         if proj is None:
-            raise KeyError(f"项目 {project!r} 不存在")
+            raise KeyError(f"Project {project!r} does not exist")
         return [
             {
                 "connection": name,
@@ -525,13 +528,15 @@ class DbmService:
                 "environment": c.environment,
                 "database": c.database,
                 "host": c.host,
-                # 无默认库时提示 agent 用全限定表名
-                **({"note": "此连接未绑定默认库，查询/schema 操作请用「库名.表名」全限定，"
-                            "list_tables/describe_table 需先用 SHOW DATABASES 选定库"}
+                # No default database: tell the agent to use fully-qualified table names
+                **({"note": "This connection has no default database bound; qualify "
+                            "queries/schema operations with \"database.table\", and pick "
+                            "a database first with SHOW DATABASES before calling "
+                            "list_tables/describe_table"}
                    if _get_driver(c.engine).has_schema_layer and not c.database else {}),
-                # 有意不返回 user/password/writer 等账号信息
+                # user/password/writer and other account info is deliberately not returned
             }
-            # Redis 有意不返回：agent 碰不到 Redis
+            # Redis is deliberately not returned: the agent cannot reach Redis
             for name, c in sorted(proj.connections.items()) if c.engine != "redis"
         ]
 
@@ -557,15 +562,17 @@ class DbmService:
         cfg = cfg or self.config.get_connection(project, connection)
         if cfg.engine != "postgres":
             raise ValueError(
-                f"pg_database 只适用于 PostgreSQL 连接，{project}/{connection} 是 {cfg.engine}；"
-                "MySQL/ClickHouse 的库请用 database 参数指定")
+                f"pg_database only applies to PostgreSQL connections; {project}/{connection} "
+                f"is {cfg.engine}. For MySQL/ClickHouse, specify the database with the "
+                "database parameter instead")
         if name == engines.pg_database_name(cfg):
             return None
         names = self._pg_server_databases(project, connection, cfg)
         if name not in names:
             raise ValueError(
-                f"库 {name!r} 不在 {project}/{connection} 可连接的库中"
-                f"（可选：{', '.join(names) or '无'}）。可先调 list_server_databases 查看")
+                f"Database {name!r} is not among the databases {project}/{connection} can "
+                f"connect to (options: {', '.join(names) or 'none'}). Call "
+                "list_server_databases first to see what's available")
         return name
 
     def _pg_server_databases(self, project: str, connection: str,
@@ -622,11 +629,12 @@ class DbmService:
             where = rec.detail
             if not cfg.database and _is_no_database_error(e):
                 rec.status = "error"
-                rec.detail = "未选定数据库"
+                rec.detail = "No database selected"
                 self.store.record(rec)
                 raise QueryRejected(
-                    "该连接未绑定默认库。请用「库名.表名」全限定表名查询"
-                    "（如 SELECT * FROM mydb.users），或先执行 SHOW DATABASES 查看可用库。"
+                    "This connection has no default database bound. Query with a "
+                    "fully-qualified table name (\"database.table\", e.g. SELECT * FROM "
+                    "mydb.users), or run SHOW DATABASES first to see what's available."
                 ) from e
             rec.status = "error"
             rec.detail = (f"{where} " if where else "") + f"{type(e).__name__}: {e}"
@@ -672,8 +680,10 @@ class DbmService:
             rec.detail = verdict.reason
             self.store.record(rec)
             raise QueryRejected(
-                f"无法解析该 SQL（{verdict.reason}），因而无法判定它是否只读，出于安全默认拒绝。"
-                "若确为只读查询，请改写成标准写法重试；若是数据变更，请改用 execute 工具。"
+                f"Could not parse this SQL ({verdict.reason}), so its read-only status "
+                "cannot be determined; rejected by default for safety. If it is really a "
+                "read-only query, rewrite it in standard form and retry; if it is a data "
+                "change, use the execute tool instead."
             )
         if not verdict.readonly:
             rec = self._base_record(project, connection, cfg, "query", sql, caller)
@@ -681,8 +691,8 @@ class DbmService:
             rec.detail = verdict.reason
             self.store.record(rec)
             raise QueryRejected(
-                f"已拒绝：{verdict.reason}。query 工具仅允许只读语句；"
-                "数据变更操作需人工授权的 execute 流程（M3 上线后提供）。"
+                f"Rejected: {verdict.reason}. The query tool only allows read-only "
+                "statements; data changes require the human-authorized execute flow."
             )
 
         # 兜底：缺 LIMIT 的 SELECT 注入 LIMIT max_rows+1，防大表全量缓冲把 DB/进程拖挂
@@ -692,8 +702,9 @@ class DbmService:
         out["statement_kind"] = verdict.statement_kind
         if out["truncated"]:
             out["hint"] = (
-                f"结果已截断到 {cfg.policy.max_rows} 行（连接策略 max_rows）。"
-                "如需后续数据，请在 SQL 中用 LIMIT/OFFSET（或 WHERE 条件缩小范围）自行分页。"
+                f"The result was truncated to {cfg.policy.max_rows} rows (connection "
+                "policy max_rows). For more data, paginate yourself with LIMIT/OFFSET in "
+                "the SQL (or narrow the range with a WHERE condition)."
             )
         return out
 
@@ -1175,41 +1186,44 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         pg_database = self.resolve_pg_database(project, connection, pg_database, cfg)
         if fmt not in SUPPORTED_FORMATS:
-            raise ValueError(f"不支持的导出格式 {fmt!r}，可选：{', '.join(SUPPORTED_FORMATS)}")
+            raise ValueError(f"Unsupported export format {fmt!r}, options: {', '.join(SUPPORTED_FORMATS)}")
         if limit < 1:
-            raise ValueError("导出行数必须大于 0")
+            raise ValueError("Export row count must be greater than 0")
         if limit > cfg.policy.max_rows:
             raise ValueError(
-                f"导出行数 {limit} 超过连接策略上限 {cfg.policy.max_rows}，"
-                "请减少行数或由管理员调整 max_rows"
+                f"Export row count {limit} exceeds the connection policy cap of "
+                f"{cfg.policy.max_rows}; reduce the row count or have an administrator "
+                "raise max_rows"
             )
 
-        # 兼容 table="库.表"；同时传 database 时要求两者一致，避免含糊选择。
+        # Support table="database.table"; if database is also given, require them to
+        # match, to avoid an ambiguous choice.
         if "." in table:
             table_database, plain_table = table.split(".", 1)
             if database is not None and database != table_database:
                 raise ValueError(
-                    f"表名中的库 {table_database!r} 与 database={database!r} 不一致"
+                    f"The database {table_database!r} in the table name conflicts with database={database!r}"
                 )
             database, table = table_database, plain_table
         if not table:
-            raise ValueError("表名不能为空")
+            raise ValueError("Table name cannot be empty")
         if database is None and not cfg.database and _has_schema_layer(cfg):
-            raise ValueError("此连接未绑定默认库，请通过 database 参数选择要导出的库（schema）")
+            raise ValueError("This connection has no default database bound; select the "
+                             "database (schema) to export from with the database parameter")
 
         engine = self.pool.get(project, connection, cfg, schema=database, database=pg_database)
         info = engines.describe_table(engine, table, database)
         available = [str(c["name"]) for c in info["columns"]]
         selected = fields or available
         if not selected:
-            raise ValueError(f"表 {table!r} 没有可导出的字段")
+            raise ValueError(f"Table {table!r} has no columns to export")
         if len(selected) != len(set(selected)):
-            raise ValueError("导出字段不能重复")
+            raise ValueError("Export columns cannot contain duplicates")
         unknown = [name for name in selected if name not in available]
         if unknown:
             raise ValueError(
-                f"字段不存在于表 {table}: {', '.join(unknown)}"
-                f"（可选：{', '.join(available)}）"
+                f"Column(s) not found in table {table}: {', '.join(unknown)}"
+                f" (available: {', '.join(available)})"
             )
 
         preparer = engine.dialect.identifier_preparer
@@ -1260,7 +1274,7 @@ class DbmService:
         from urllib.parse import quote
 
         if not self.data_dir:
-            raise QueryRejected("导出文件存储未启用（服务未配置 data_dir）")
+            raise QueryRejected("Export file storage is not enabled (the service has no data_dir configured)")
         root = Path(self.data_dir) / "mcp_exports"
         root.mkdir(parents=True, exist_ok=True)
         now = time.time()
@@ -1291,8 +1305,8 @@ class DbmService:
             "expires_at": int(now + self._MCP_EXPORT_TTL_S),
             "download_url": f"{base}{relative_url}" if base else relative_url,
             "agent_instruction": (
-                "必要时用程序将 download_url 直接下载到目标位置；"
-                "不要读取或把文件内容放入模型上下文。"
+                "When needed, download download_url directly to the target location with "
+                "code; do not read the file content or put it into the model's context."
             ),
         }
         metadata = {
@@ -1515,7 +1529,7 @@ class DbmService:
 
     def _require_analysis(self):
         if self.analysis is None:
-            raise QueryRejected("分析工作台未启用（需 serve 模式运行）")
+            raise QueryRejected("The analysis workbench is not enabled (requires serve mode)")
         return self.analysis
 
     def _analysis_record(self, workspace: str, tool: str, sql: str, caller: CallerInfo) -> AuditRecord:
@@ -1549,7 +1563,7 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         database = self.resolve_pg_database(project, connection, database, cfg)
         if not classify(source_sql, cfg.engine).readonly:
-            raise QueryRejected("快照导入仅支持只读查询（SELECT/SHOW/...）")
+            raise QueryRejected("Snapshot import only supports read-only queries (SELECT/SHOW/...)")
         n = min(limit or DEFAULT_SNAPSHOT_ROWS, MAX_SNAPSHOT_ROWS)
         run_sql, _, _ = engines.paginate_sql(source_sql, cfg.engine, n, 0)
         result = self._read(project, connection, cfg, run_sql, caller, n, schema=schema,
@@ -1609,7 +1623,7 @@ class DbmService:
     def _require_workflows(self):
         if self.workflows is None:
             from .workflows import WorkflowError
-            raise WorkflowError("workflow 存储未启用（需 serve 模式运行）")
+            raise WorkflowError("Workflow storage is not enabled (requires serve mode)")
         return self.workflows
 
     def workflow_save(self, name: str, workspace: str, script: str, caller: CallerInfo,
@@ -1628,8 +1642,9 @@ class DbmService:
             existing = next((w for w in self.workflow_list() if w["name"] == name.strip()), None)
             if existing and existing.get("graph"):
                 raise ValueError(
-                    f"workflow {name!r} 是管理后台画布创建的 DAG，不允许覆盖；"
-                    "请换一个名字，或让用户在后台修改")
+                    f"Workflow {name!r} is a DAG created on the admin-backend canvas and "
+                    "cannot be overwritten; use a different name, or have the user edit "
+                    "it on the backend")
         if graph:
             sources = compile_graph(graph)["sources"]  # 校验 + 配方以图为准
         else:
@@ -1660,7 +1675,7 @@ class DbmService:
             plan = compile_graph(wf.graph)
             out = self._run_plan(wf.workspace, plan["sources"], plan["steps"], caller)
         else:
-            stmts = [{"node": None, "name": f"步骤 {i}", "sql": s}
+            stmts = [{"node": None, "name": f"step {i}", "sql": s}
                      for i, s in enumerate(split_statements(wf.script), 1)]
             out = self._run_plan(wf.workspace, wf.sources, stmts, caller)
         return {"workflow": name, **out}
@@ -1754,7 +1769,7 @@ class DbmService:
         """执行计划：重拉 sources → 顺序执行 steps（带 node id 供画布标注状态）。"""
         done: list[dict] = []
         for src in sources:
-            label = f"导入 {src.get('dataset')}"
+            label = f"Import {src.get('dataset')}"
             node = src.get("node")
             try:
                 if src.get("kind") == "file":
@@ -1834,7 +1849,7 @@ class DbmService:
         """
         cfg = self.config.get_connection(project, connection)
         if self.approvals is None:
-            raise QueryRejected("审批子系统未启用，无法执行写操作")
+            raise QueryRejected("The approval subsystem is not enabled; cannot execute write operations")
 
         # 带 change_id：一律走审批单核销（指纹校验 + 原子核销），不看重新分类结果——
         # 否则可构造「首提判写→生成审批单、重提判读→走 query() 绕开 consume 的指纹与核销」（H5）。
@@ -1903,6 +1918,7 @@ class DbmService:
         from .notify import approval_deeplink  # noqa: PLC0415
         base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
         approval_url = approval_deeplink(base_url, change.id)
+        action_url = self._issue_action_link(change.id, base_url)
         # 需要人为介入 → 主动发通知（安静即正常：不通知的话可能长时间没人看到）
         # meta.deeplink 让各渠道适配跳转：Bark→url 字段、企微→markdown 链接、
         # 飞书→post 富文本 a 节点、macOS→body 附 URL 文本、站内 inbox→前端点击
@@ -1915,7 +1931,8 @@ class DbmService:
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": project, "connection": connection,
                       "risk_level": report.level,
-                      "deeplink": approval_url},
+                      "deeplink": approval_url,
+                      **({"action_url": action_url} if action_url else {})},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify approval_created failed")
@@ -1926,10 +1943,11 @@ class DbmService:
             "approval_url": approval_url,
             "risk": report_dict,
             "message": (
-                f"该操作被评估为需人工授权（风险等级 {report.level}）。"
-                f"已生成审批单 #{change.id}，请把审批链接 {approval_url} 给用户，"
-                f"并用 wait_for_change({change.id}) 等待人工决策（批准后会自动执行）。"
-                f"审批单 60 分钟内有效。"
+                f"This operation was assessed as requiring human authorization (risk level "
+                f"{report.level}). Approval ticket #{change.id} has been generated — give "
+                f"the approval link {approval_url} to the user, and use "
+                f"wait_for_change({change.id}) to wait for the human decision (it will "
+                f"auto-execute once approved). The ticket is valid for 60 minutes."
             ),
         }
 
@@ -1950,8 +1968,8 @@ class DbmService:
         # 同步型审批单存的是计划而非可执行 SQL，走这条路会把计划文本当 SQL 发给 DB
         if self.approvals.get(change_id).kind == KIND_SYNC:
             return {"status": "rejected", "change_id": change_id,
-                    "reason": f"审批单 #{change_id} 是表同步计划，"
-                              f"请用 sync_table(change_id={change_id}, ...) 执行"}
+                    "reason": f"Change #{change_id} is a table-sync plan; use "
+                              f"sync_table(change_id={change_id}, ...) to execute it"}
         try:
             change = self.approvals.consume(
                 change_id, fingerprint(sql, cfg.engine), (project, connection),
@@ -2068,21 +2086,25 @@ class DbmService:
         self.resolve_pg_database(spec.target_project, spec.target_connection,
                                  spec.target_pg_database, dst)
         if src.engine not in sync.SOURCE_ENGINES:
-            raise QueryRejected(f"引擎 {src.engine} 不支持作为同步源（支持 "
-                                f"{'/'.join(sync.SOURCE_ENGINES)}）")
+            raise QueryRejected(f"Engine {src.engine} is not supported as a sync source "
+                                f"(supported: {'/'.join(sync.SOURCE_ENGINES)})")
         if dst.engine not in sync.TARGET_ENGINES:
-            raise QueryRejected(f"引擎 {dst.engine} 不支持作为同步目标（支持 "
-                                f"{'/'.join(sync.TARGET_ENGINES)}；ClickHouse 本项目只读、"
-                                f"Redis 不参与表同步）")
+            raise QueryRejected(f"Engine {dst.engine} is not supported as a sync target "
+                                f"(supported: {'/'.join(sync.TARGET_ENGINES)}; ClickHouse is "
+                                f"read-only in this project, Redis does not participate "
+                                f"in table sync)")
         if dst.environment == "prod":
             raise QueryRejected(
-                f"拒绝向生产环境连接 {spec.target_project}/{spec.target_connection} 同步数据。"
-                "本工具用于把数据同步到本地/开发库；确需写生产请用 execute 提交具体 SQL。"
+                f"Refusing to sync data to the production connection "
+                f"{spec.target_project}/{spec.target_connection}. This tool is for "
+                "syncing data to local/dev databases; to write to production, submit the "
+                "specific SQL via execute instead."
             )
         if dst.engine != "sqlite" and dst.writer is None:
             raise QueryRejected(
-                f"目标连接 {spec.target_project}/{spec.target_connection} 未配置 writer 账号，"
-                "无法写入。请先在管理后台为它补上 writer 账号。"
+                f"Target connection {spec.target_project}/{spec.target_connection} has no "
+                "writer account configured, so it cannot be written to. Add a writer "
+                "account for it in the admin backend first."
             )
         return src, dst
 
@@ -2105,8 +2127,9 @@ class DbmService:
         target_exists = spec.target_table in target_tables
         if spec.ddl == sync.DDL_SKIP and not target_exists:
             raise QueryRejected(
-                f"目标表 {spec.target_table} 不存在，而 ddl=skip 不建表。"
-                "改用 ddl=create_if_missing 让本工具按源表结构建表，或先手工建好。"
+                f"Target table {spec.target_table} does not exist, and ddl=skip does not "
+                "create it. Use ddl=create_if_missing to have this tool create it from the "
+                "source structure, or create it manually first."
             )
 
         warnings: list[str] = []
@@ -2133,11 +2156,13 @@ class DbmService:
             columns = [c for c in src_columns if c in dst_columns]
             missing = [c for c in src_columns if c not in dst_columns]
             if missing:
-                warnings.append(f"目标表没有这些源列，将不同步：{', '.join(missing)}")
+                warnings.append(f"Target table is missing these source columns, so they "
+                                f"will not be synced: {', '.join(missing)}")
             if not columns:
                 raise QueryRejected(
-                    f"源表 {spec.source_table} 与目标表 {spec.target_table} 没有同名列，无法同步数据。"
-                    f"源列: {', '.join(src_columns)}"
+                    f"Source table {spec.source_table} and target table {spec.target_table} "
+                    f"have no columns with matching names; data cannot be synced. "
+                    f"Source columns: {', '.join(src_columns)}"
                 )
         if spec.data == sync.DATA_NONE:
             columns = []
@@ -2174,7 +2199,7 @@ class DbmService:
         - 有 change_id：核销审批单并执行**审批单里存的那份计划**（重提的 spec 只作指纹校验）。
         """
         if self.approvals is None:
-            raise QueryRejected("审批子系统未启用，无法执行表同步")
+            raise QueryRejected("The approval subsystem is not enabled; cannot execute table sync")
         # 行数上限由服务端定，且首提与重提用同一套夹取规则 → 指纹一致
         spec = replace(spec, limit=max(1, min(spec.limit, self.sync_max_rows())))
         if change_id is not None:
@@ -2215,14 +2240,16 @@ class DbmService:
         """
         if ddl not in (sync.DDL_CREATE_IF_MISSING, sync.DDL_RECREATE):
             raise ValueError(
-                f"结构同步的 ddl 只能是 {sync.DDL_CREATE_IF_MISSING} 或 {sync.DDL_RECREATE}"
-                f"（{sync.DDL_RECREATE} 会先 DROP 目标表），收到 {ddl!r}")
+                f"Structure sync's ddl must be {sync.DDL_CREATE_IF_MISSING} or "
+                f"{sync.DDL_RECREATE} ({sync.DDL_RECREATE} will DROP the target table "
+                f"first), got {ddl!r}")
         names = [t.strip() for t in tables if t and t.strip()]
         if not names:
-            raise ValueError("至少要给一个表名")
+            raise ValueError("Give at least one table name")
         if len(names) > self.MAX_SYNC_DDL_TABLES:
             raise ValueError(
-                f"一次最多同步 {self.MAX_SYNC_DDL_TABLES} 张表的结构（本次 {len(names)} 张），请分批")
+                f"Can sync the structure of at most {self.MAX_SYNC_DDL_TABLES} tables per "
+                f"call ({len(names)} given); split it into batches")
 
         results = []
         for name in names:
@@ -2284,7 +2311,7 @@ class DbmService:
         审计、执行结果回填、后台可回溯都与人工审批路径完全一致，只是省掉了等人这一步。
         """
         change = self._create_sync_change(spec, plan, reason, caller)
-        self.approvals.approve(change.id, decided_by="auto", note="目标为本地/开发库，免审批")
+        self.approvals.approve(change.id, decided_by="auto", note="Target is local/dev, approval skipped")
         change = self.approvals.consume(
             change.id, sync.spec_fingerprint(spec),
             (spec.target_project, spec.target_connection))
@@ -2313,6 +2340,7 @@ class DbmService:
         from .notify import approval_deeplink  # noqa: PLC0415
         base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
         approval_url = approval_deeplink(base_url, change.id)
+        action_url = self._issue_action_link(change.id, base_url)
         try:
             self.notifier.send(
                 title=f"新同步审批单 #{change.id} · → {spec.target_project}/{spec.target_connection}",
@@ -2320,7 +2348,8 @@ class DbmService:
                       f"{spec.target_table}\n最多 {spec.limit} 行 · 结构 {spec.ddl} · 数据 {spec.data}"),
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": spec.target_project, "connection": spec.target_connection,
-                      "risk_level": plan["risk"]["level"], "deeplink": approval_url},
+                      "risk_level": plan["risk"]["level"], "deeplink": approval_url,
+                      **({"action_url": action_url} if action_url else {})},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify sync approval_created failed")
@@ -2332,9 +2361,10 @@ class DbmService:
             "warnings": plan["warnings"],
             "risk": plan["risk"],
             "message": (
-                f"表同步需人工授权（风险等级 {plan['risk']['level']}）。已生成审批单 "
-                f"#{change.id}，请把审批链接 {approval_url} 给用户；批准后会自动按计划执行。"
-                f"审批单 60 分钟内有效。"
+                f"This table sync requires human authorization (risk level "
+                f"{plan['risk']['level']}). Approval ticket #{change.id} has been "
+                f"generated — give the approval link {approval_url} to the user; it will "
+                f"auto-execute the plan once approved. The ticket is valid for 60 minutes."
             ),
         }
 
@@ -2350,7 +2380,8 @@ class DbmService:
         change = self.approvals.get(change_id)
         if change.kind != KIND_SYNC:
             raise QueryRejected(
-                f"审批单 #{change_id} 不是表同步计划，请用 execute(change_id={change_id}) 执行")
+                f"Change #{change_id} is not a table-sync plan; use "
+                f"execute(change_id={change_id}) to execute it")
         try:
             change = self.approvals.consume(change_id, resubmit_fingerprint, connection_key)
         except ApprovalError as e:
@@ -2398,8 +2429,9 @@ class DbmService:
                 verdict = classify(select_sql, src_cfg.engine)
                 if not verdict.readonly:
                     raise QueryRejected(
-                        f"生成的取数语句被判定为非只读（{verdict.reason}），"
-                        "请检查 where / order_by 里是否夹带了分号或写操作。"
+                        f"The generated fetch statement was judged non-read-only "
+                        f"({verdict.reason}); check whether where / order_by smuggled in "
+                        "a semicolon or a write operation."
                     )
                 rows, source_truncated = self._sync_fetch(spec, src_cfg, select_sql,
                                                           columns, caller)
@@ -2428,14 +2460,17 @@ class DbmService:
             "source_truncated": source_truncated,
         }
         if source_truncated:
-            # 少于 limit 行却被截断 = 撞的是体积预算而不是行数上限，两种情况的解法不同
+            # Truncated at fewer than limit rows = hit the byte-size budget rather than
+            # the row cap; the two cases need different fixes.
             payload["note"] = (
-                f"只同步了前 {copied} 行：累计数据量达到体积上限"
-                f"（系统设置 sync_max_bytes，当前 {self.sync_max_bytes()} 字节）。"
-                "该表的行较宽，请收窄 where、减少 limit，或只挑需要的列。"
+                f"Only the first {copied} rows were synced: the cumulative data volume "
+                f"hit the byte-size cap (system setting sync_max_bytes, currently "
+                f"{self.sync_max_bytes()} bytes). This table's rows are wide — narrow "
+                "where, reduce limit, or select only the columns you need."
                 if copied < spec.limit else
-                f"源表符合条件的数据超过 {spec.limit} 行，只同步了前 {copied} 行。"
-                "如需更多请收窄 where 或调大 limit（受系统设置 sync_max_rows 约束）后重新发起。"
+                f"The source table has more than {spec.limit} matching rows; only the "
+                f"first {copied} were synced. For more, narrow where or raise limit "
+                "(bounded by the system setting sync_max_rows) and resubmit."
             )
         self.approvals.record_execution(change.id, payload)
         return payload
@@ -2575,6 +2610,19 @@ class DbmService:
 
     def _setting(self, key: str):
         return self.get_settings().get(key)
+
+    def _issue_action_link(self, change_id: int, base_url: str) -> str | None:
+        """通知里的一次性审批链接（设置 notify_action_links 开且选了外部渠道才发）。
+
+        令牌只随外部通知出去；后台铃铛/macOS 通知本就在已登录环境里，不需要它。
+        """
+        if not self._setting("notify_action_links"):
+            return None
+        if str(self._setting("notify_primary") or "none").lower() == "none":
+            return None
+        from .notify import build_admin_deeplink  # noqa: PLC0415
+        token = self.approvals.issue_action_token(change_id)
+        return build_admin_deeplink(base_url, f"/admin/approvals/{change_id}/act?t={token}")
 
     def approval_wait_seconds(self) -> int:
         """execute 首提被拒后，服务端默认等待人工决策的秒数（0 = 不等待）。"""
@@ -2732,17 +2780,17 @@ class DbmService:
 
     def approve_change(self, change_id: int, decided_by: str, note: str = ""):
         if self.approvals is None:
-            raise QueryRejected("审批子系统未启用")
+            raise QueryRejected("The approval subsystem is not enabled")
         return self.approvals.approve(change_id, decided_by, note)
 
     def reject_change(self, change_id: int, decided_by: str, note: str = ""):
         if self.approvals is None:
-            raise QueryRejected("审批子系统未启用")
+            raise QueryRejected("The approval subsystem is not enabled")
         return self.approvals.reject(change_id, decided_by, note)
 
     def get_change(self, change_id: int):
         if self.approvals is None:
-            raise QueryRejected("审批子系统未启用")
+            raise QueryRejected("The approval subsystem is not enabled")
         return self.approvals.get(change_id)
 
     def list_changes(self, status: str | None = None):
@@ -2787,7 +2835,7 @@ class DbmService:
         # 未绑定默认库时，先让用户选库（库→表→列 三级树）。MySQL/PG 不带 schema 反射会崩
         # （默认 schema 为 None）；ClickHouse 不会崩但会落到 default 库、看不到别的库 → 一并引导
         if schema is None and not cfg.database and _has_schema_layer(cfg):
-            raise ValueError("此连接未绑定默认库，请先选择一个库（schema）再列表")
+            raise ValueError("This connection has no default database bound; select a database (schema) first, then list its tables")
         engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(project, connection, cfg, "list_tables", schema or "", caller,
                              lambda: engines.list_tables(engine, schema))
@@ -2802,7 +2850,7 @@ class DbmService:
         if schema is None and "." in table:
             schema, table = table.split(".", 1)
         if schema is None and not cfg.database and _has_schema_layer(cfg):
-            raise ValueError("此连接未绑定默认库，请用「库名.表名」指定表，或先选择一个库（schema）")
+            raise ValueError("This connection has no default database bound; specify the table as \"database.table\", or select a database (schema) first")
         engine = self.pool.get(project, connection, cfg, database=database)
         detail = f"{schema}.{table}" if schema else table
         return self._audited(project, connection, cfg, "describe_table", detail, caller,
@@ -2837,7 +2885,8 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         if cfg.engine == "redis":
             raise ValueError(
-                "Redis 连接不支持体检（Redis 不对 agent 开放，请在管理后台的 Redis 控制台操作）")
+                "Redis connections do not support health checks (Redis is not exposed to "
+                "the agent; use the Redis console in the admin backend instead)")
         scope = schema or cfg.database
         return self._checkup_one(project, connection, cfg, caller, scope, database).to_dict()
 
@@ -2873,7 +2922,8 @@ class DbmService:
         cfg = self.config.get_connection(project, connection)
         if cfg.engine == "redis":
             raise ValueError(
-                "Redis 连接不支持体检（Redis 不对 agent 开放，请在管理后台的 Redis 控制台操作）")
+                "Redis connections do not support health checks (Redis is not exposed to "
+                "the agent; use the Redis console in the admin backend instead)")
         # PG 一条连接只绑一个库：换库必须另建引擎；MySQL/CH 的 schema 就是库，
         # 同一条连接按 schema 查即可，不必为每个库建引擎（实例上库可能很多）
         per_db_engine = _driver_of(cfg).needs_database_layer
@@ -2900,7 +2950,7 @@ class DbmService:
             except Exception as e:  # noqa: BLE001 - 某个库失败不废掉整份报告
                 last_err = f"{db}: {e}"
         if not reports:
-            raise QueryRejected(f"所有库体检均失败（最后错误：{last_err}）")
+            raise QueryRejected(f"Health check failed for every database (last error: {last_err})")
         return checkup.merge_reports(cfg.engine, reports).to_dict()
 
     def admin_table_sizes(
@@ -2938,11 +2988,11 @@ class DbmService:
         """
         names = [t.strip() for t in tables if t and t.strip()]
         if not names:
-            raise ValueError("至少要给一个表名")
+            raise ValueError("Give at least one table name")
         if len(names) > self.MAX_DDL_TABLES:
             raise ValueError(
-                f"一次最多取 {self.MAX_DDL_TABLES} 张表的建表语句（本次 {len(names)} 张）；"
-                "请分批取，或先用 list_tables 缩小范围")
+                f"Can fetch the DDL of at most {self.MAX_DDL_TABLES} tables per call "
+                f"({len(names)} given); fetch them in batches, or narrow the scope with list_tables first")
         out = []
         for name in names:
             try:
@@ -3337,7 +3387,9 @@ class DbmService:
                     "host": cfg.host,
                     "database": cfg.database,
                     "has_writer": cfg.writer is not None,
-                    "state": h.state if h else "ok",
+                    # 从未触达过的连接是「未探测」，不是「正常」——健康位只在第一次
+                    # 成功/失败后才有记录
+                    "state": h.state if h else "unprobed",
                     "fail_count": h.fail_count if h else 0,
                     "last_error": h.last_error if h else "",
                     # 距下次自动重连还有多少秒（健康位用单调时钟存的绝对时刻）
@@ -3354,7 +3406,8 @@ class DbmService:
             "configured": len(items),
             "by_engine": by_engine,
             "by_environment": by_env,
-            "unhealthy": sum(1 for i in items if i["state"] != "ok"),
+            "unhealthy": sum(1 for i in items if i["state"] not in ("ok", "unprobed")),
+            "unprobed": sum(1 for i in items if i["state"] == "unprobed"),
             "pooled_engines": len(pooled),
             "checked_out": sum(i["checked_out"] for i in items),
             "items": items,
@@ -3444,14 +3497,15 @@ class DbmService:
             return
         if not res.supported or res.ok:
             return
-        where = f"（第 {res.stmt_index} 条语句）" if res.stmt_index > 1 else ""
+        where = f" (statement #{res.stmt_index})" if res.stmt_index > 1 else ""
         rec = self._base_record(project, connection, cfg, tool, sql, caller)
         rec.status = "rejected"
         rec.detail = f"SQL 语法错误: {res.error}"
         self.store.record(rec)
         raise SqlSyntaxError(
-            f"[sql_syntax_error] SQL 语法错误{where}，已由目标数据库（{cfg.engine}）复核确认："
-            f"{res.error}。请修正语法后重试，不要原样重发。"
+            f"[sql_syntax_error] SQL syntax error{where}, confirmed by the target "
+            f"database ({cfg.engine}): {res.error}. Fix the syntax and retry — don't "
+            f"resend it as-is."
         )
 
     def _run_touching_db(self, project: str, connection: str, fn,  # noqa: ANN001

@@ -116,11 +116,11 @@ class TestSyncSpecPgDatabase:
 
     def test_same_table_in_other_database_is_not_self_sync(self):
         sync.validate_spec(self._spec(source_pg_database="shop", target_pg_database="billing"))
-        with pytest.raises(sync.SyncError, match="同一张表"):
+        with pytest.raises(sync.SyncError, match="same table"):
             sync.validate_spec(self._spec())
 
     def test_bad_identifier_rejected(self):
-        with pytest.raises(sync.SyncError, match="PG 库"):
+        with pytest.raises(sync.SyncError, match="PG database"):
             sync.validate_spec(self._spec(target_connection="b",
                                           target_pg_database="x; DROP"))
 
@@ -139,7 +139,7 @@ def test_pg_database_rejected_on_non_pg_connection(tmp_path):
     try:
         assert svc.resolve_pg_database("demo", "main", None) is None
         assert svc.resolve_pg_database("demo", "main", "  ") is None
-        with pytest.raises(ValueError, match="只适用于 PostgreSQL"):
+        with pytest.raises(ValueError, match="only applies to PostgreSQL"):
             svc.query("demo", "main", "SELECT 1", CALLER, database="shop")
     finally:
         svc.close()
@@ -269,7 +269,7 @@ async def test_pg_read_tools_across_databases(tmp_path):
                 "sql": "SELECT current_database()"})).data
             assert "testdb" in r
 
-            with pytest.raises(ToolError, match="可连接的库中"):
+            with pytest.raises(ToolError, match="can connect to"):
                 await c.call_tool("query", {
                     "project": "pg", "connection": "main", "pg_database": "nope",
                     "sql": "SELECT 1"})
@@ -347,7 +347,7 @@ def test_pg_sync_between_databases(tmp_path):
         assert _exec("billing", "SELECT name FROM items_copy") == [("shop-item",)]
         # 源库清单里查无此库 → 在建连接前就拒
         bad = sync.SyncSpec(**{**spec.to_dict(), "source_pg_database": "nope"})
-        with pytest.raises(ValueError, match="可连接的库中"):
+        with pytest.raises(ValueError, match="can connect to"):
             svc.sync_table(bad, CALLER)
     finally:
         _exec("billing", "DROP TABLE IF EXISTS items_copy")

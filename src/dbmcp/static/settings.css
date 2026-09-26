@@ -11,7 +11,7 @@
    设置页与查询台/看板是同一个产品，换一套调色板只会让它像另一个应用；
    差异化放在结构上。 */
 
-.set-page{--guard:#b45309;--guard-soft:#fffbeb;max-width:920px}
+.set-page{max-width:920px}
 /* 表格型 tab 要更宽：正文要控行长，表格不用 */
 .set-page.wide{max-width:1200px}
 /* 两字表头别折行——「地 / 址」读起来像两个字段 */
@@ -40,7 +40,7 @@
 .set-nav .sep{width:1px;height:16px;background:var(--border);margin:0 9px}
 .set-nav a{padding:6px 12px;border-radius:8px;color:var(--muted);font-size:13.5px;
   text-decoration:none;transition:background .12s,color .12s;white-space:nowrap}
-.set-nav a:hover{background:#eceef1;color:var(--text);text-decoration:none}
+.set-nav a:hover{background:var(--chip);color:var(--text);text-decoration:none}
 .set-nav a.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
 
 /* ---------- 分区面板 ---------- */
@@ -52,7 +52,7 @@
 
 /* 护栏区：左边一道琥珀窄条 + 极淡的底。改错护栏有后果，改错字号没有——
    这个区别应该由版式说出来，而不是靠使用者读完每一段说明才明白。 */
-.set-sec.guard{border-color:#f3ddb4;background:linear-gradient(90deg,var(--guard-soft),var(--surface) 320px)}
+.set-sec.guard{border-color:var(--guard-border);background:linear-gradient(90deg,var(--guard-soft),var(--surface) 320px)}
 .set-sec.guard>header{position:relative}
 .set-sec.guard>header h3::before{content:"";position:absolute;left:-22px;top:19px;bottom:14px;
   width:3px;border-radius:0 3px 3px 0;background:var(--guard)}
@@ -73,12 +73,12 @@
 /* ---------- 账本行 ---------- */
 .set-row{display:grid;grid-template-columns:1fr 240px;gap:14px 24px;align-items:start;
   padding:15px 0;border-top:1px solid var(--line)}
-.set-sec.guard .set-row{border-top-color:#f0e3cd}
+.set-sec.guard .set-row{border-top-color:var(--guard-line)}
 .set-row .nm{font-size:14px;font-weight:500;color:var(--text);margin:0;display:flex;
   align-items:center;gap:8px;flex-wrap:wrap}
 .set-row .desc{margin:5px 0 0;color:var(--muted);font-size:12.5px;line-height:1.55;max-width:62ch}
 .set-row .desc b{color:var(--text);font-weight:600}
-.set-row .desc code{background:#f1f3f5;padding:1px 5px;border-radius:4px;font-size:12px}
+.set-row .desc code{background:var(--code-bg);padding:1px 5px;border-radius:4px;font-size:12px}
 .set-row .ctl{justify-self:end;text-align:right;width:240px}
 /* 数字 + 单位并排：单位是数字的一部分（「40000 字符」），不该掉到下一行去 */
 .set-row .ctl:has(.unit){display:flex;flex-wrap:wrap;justify-content:flex-end;
@@ -109,7 +109,7 @@
 .set-tag{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:1px 6px;
   border-radius:5px;background:var(--accent-soft);color:var(--accent-ink);
   border:1px solid rgba(13,148,136,.22)}
-.set-sec.guard .set-tag{background:#fdf0d8;color:var(--guard);border-color:#f0d9ae}
+.set-sec.guard .set-tag{background:var(--warn-chip);color:var(--guard);border-color:var(--warn-chip-border)}
 
 /* ---------- 开关 ---------- */
 /* 二元状态就该长得像二元状态：原来用 <select> 装「开/关」，
@@ -117,7 +117,7 @@
 .sw{position:relative;display:inline-flex;align-items:center;gap:9px;cursor:pointer;
   font-size:12.5px;color:var(--muted);user-select:none}
 .sw input{position:absolute;opacity:0;width:0;height:0}
-.sw .track{width:38px;height:22px;border-radius:11px;background:#d6dae0;flex:none;
+.sw .track{width:38px;height:22px;border-radius:11px;background:var(--switch-off);flex:none;
   transition:background .16s;position:relative}
 .sw .track::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;
   border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,20,27,.25);
@@ -133,14 +133,14 @@
 .set-choice label{display:flex;align-items:flex-start;gap:10px;margin:0;padding:11px 13px;
   border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:13.5px;
   color:var(--text);font-weight:400;transition:border-color .12s,background .12s}
-.set-choice label:hover{border-color:#cfd4db;background:#fbfcfd}
+.set-choice label:hover{border-color:var(--faint);background:var(--row-hover)}
 .set-choice label:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
 .set-choice input{margin-top:2px;accent-color:var(--accent)}
 .set-choice .t{display:block;font-weight:500}
 .set-choice .h{display:block;color:var(--muted);font-size:12px;margin-top:2px}
 /* 只有选中的渠道展开自己的字段——四组表单同时摊开就是一堵墙 */
 .set-fields{margin:12px 0 0;padding:14px 16px;border:1px solid var(--border);
-  border-radius:10px;background:#fbfcfd}
+  border-radius:10px;background:var(--row-hover)}
 .set-fields .set-row:first-child{border-top:none;padding-top:0}
 
 /* ---------- 折叠的长说明 ---------- */
@@ -220,8 +220,8 @@
 .conn-tbl td.eng img,.conn-tbl td.eng svg{vertical-align:middle;margin-right:6px}
 /* 能力标签：中性灰是常态，只有「可写」和「跳板」值得着色——它们是风险面 */
 .cap{display:inline-block;padding:0 7px;margin:1px 4px 1px 0;border-radius:5px;font-size:11px;
-  background:#f1f3f5;color:var(--muted);white-space:nowrap}
-.cap-w{background:#fdf0d8;color:#b45309}
+  background:var(--chip);color:var(--muted);white-space:nowrap}
+.cap-w{background:var(--warn-chip);color:var(--warn-ink)}
 .cap-ssh{background:var(--accent-soft);color:var(--accent-ink)}
 .acts{white-space:nowrap;text-align:right}
 .acts form{display:inline}
@@ -262,3 +262,8 @@
 #hops:empty+#hop-tpl+#add-hop{margin-top:0}
 .hop-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
 .hop-row input,.hop-row select{width:auto;min-width:120px}
+
+/* 连接表单「测试」结果框：颜色走语义 token，深浅主题各自成立 */
+.test-result{padding:10px 14px;border-radius:8px;font-size:14px;border:1px solid var(--border)}
+.test-result.ok{background:var(--ok-bg);border-color:var(--ok-border);color:var(--ok-ink)}
+.test-result.bad{background:var(--danger-bg);border-color:var(--danger-border);color:var(--danger-ink)}

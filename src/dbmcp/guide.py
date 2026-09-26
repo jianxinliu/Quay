@@ -1,162 +1,222 @@
-"""给 agent 的使用说明与最佳实践（会话首次调用工具时随结果附上一份）。
+"""Usage guide and best practices for the agent (attached to the result on the
+session's first tool call).
 
-**为什么不只靠 MCP instructions**：instructions 由客户端在建连时呈现，各家处理差异很大
-（有的截断、有的折叠、有的干脆只在系统提示最外层放一次），实测 agent 读不到或读过就忘。
-所以除了保留 instructions，这里再准备一份完整说明，由 `server._FirstCallGuide` 中间件
-在**每个会话的第一次成功工具调用**时挂在结果里——那时 agent 正要用它，读进去的概率最高，
-且一个会话只发一次，不会持续占上下文。agent 也可以随时调 `usage_guide()` 重读。
+**Why not rely solely on MCP instructions**: `instructions` are rendered by the client at
+connect time, and clients handle it very differently (some truncate it, some collapse it,
+some only show it once at the very top of the system prompt) — in practice agents often
+never see it, or see it once and forget. So on top of keeping `instructions`, we prepare a
+full guide here that `server._FirstCallGuide` middleware attaches to the result on the
+**first successful tool call of each session** — that's when the agent is about to act on
+it, so the odds it actually gets read are highest, and it's only sent once per session so
+it doesn't keep eating context. The agent can also re-read it anytime via `usage_guide()`.
 
-内容取向：**按场景给组合**，而不是罗列工具。滥用往往不是因为不知道有哪个工具，
-而是不知道「这种情况该用哪套」——把大表全量拉进上下文、把该聚合的活儿放到模型里做、
-改数据不留回滚线索，都是这样来的。
+Content strategy: **organize by scenario**, not by tool listing. Misuse is rarely caused by
+not knowing a tool exists — it's caused by not knowing which combination fits the
+situation. Pulling an entire large table into context, doing aggregation work that should
+happen in SQL, or changing data without leaving a rollback trail all come from that gap.
 """
 
 from __future__ import annotations
 
 USAGE_GUIDE = """\
-# Quay 数据库服务 · 使用说明与最佳实践
+# Quay Database Service · Usage Guide & Best Practices
 
-（本说明每个会话只发一次；随时可调 `usage_guide()` 重读。）
+(This guide is sent once per session; re-read it anytime with `usage_guide()`.)
 
-## 0. 先做这一件事
+## 0. Do this first
 
-`begin_session(title, note)` —— 声明这次会话叫什么、要干什么。之后你跑的每条 SQL 都会
-在后台按这个会话归类，人能回溯，你自己也能用 `list_sessions` / `session_history` 找回来。
-不调也能用，但后台只会看到一串没有语义的会话 id。
+`begin_session(title, note)` — declare what this session is called and what it's for.
+Every SQL statement you run afterwards will be grouped under this session on the backend
+so a human can trace it back, and you can find it again yourself with `list_sessions` /
+`session_history`. Not calling it still works, but the backend will only see an opaque
+session id.
 
-## 1. 四条硬规矩
+## 1. Four hard rules
 
-1. **读写分家，绕不过去。** 只读查询走 `query`（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN，
-   用只读账号）；任何数据变更走 `execute`（生成审批单、人批准后才用写账号执行）。
-   把写语句塞进 `query` 只会被拒，不要试。
-2. **大结果不进上下文。** 先在 SQL 里聚合/收窄；确实需要整份数据就落文件
-   （`export_table`）或进本地沙箱（`analysis_*`），只把结论带回来。
-   把几万行拉进上下文既慢又贵，而且多半没有帮助。
-3. **上下文是有配额的。** 本会话累计返回量有上限；撞到就会被拒绝取数，那时你必须
-   **停下来问用户**是否确认继续这些耗 token 的查询，用户同意后调 `allow_more_results`
-   再放行。别指望靠反复重试绕过去 —— 与其被拦，不如一开始就只取需要的那点数据。
-4. **改数据前先想回滚。** 你自己判断这次改动值不值得留回滚线索；值得就先用 `query`
-   查出改动前的旧值，写进 `execute(..., rollback_note=...)`。审批人当场看得到，
-   事后你也能用 `session_history` 取回来拼回滚 SQL。无关紧要的改动留空即可。
+1. **Reads and writes are strictly separated.** Read-only queries go through `query`
+   (accepts only SELECT/SHOW/DESCRIBE/EXPLAIN, uses the read-only account); any data
+   change goes through `execute` (generates an approval ticket, executed with the writer
+   account only after a human approves). Putting a write statement into `query` will just
+   be rejected — don't try it.
+2. **Large results do not belong in context.** Aggregate/narrow it down in SQL first; if
+   you truly need the full dataset, dump it to a file (`export_table`) or into the local
+   sandbox (`analysis_*`), and bring back only the conclusion. Pulling tens of thousands of
+   rows into context is slow, expensive, and rarely helps.
+3. **Context has a budget.** This session's cumulative returned volume has a cap; once hit,
+   further data fetches are rejected and you must **stop and ask the user** whether to
+   continue these token-costly queries — only after they agree should you call
+   `allow_more_results` to get another allowance. Don't try to work around it by retrying —
+   it's cheaper to only fetch what you need in the first place than to get blocked.
+4. **Think about rollback before changing data.** You decide whether this change is worth
+   leaving a rollback trail for; if it is, use `query` first to read the old values, then
+   pass them into `execute(..., rollback_note=...)`. The approver sees it immediately, and
+   you can retrieve it later with `session_history` to reconstruct a rollback statement.
+   Leave it blank for changes that don't matter.
 
-## 2. 场景 → 用哪套工具
+## 2. Scenario → which tools to use
 
-### 探索：我不知道有什么
-- 有哪些库和连接 → `list_projects` → `list_connections`
-- 有哪些表 → `list_tables`（未绑定默认库的连接先 `list_databases`）
-- PostgreSQL 的其它 database → `list_server_databases` 列库，之后各工具传 `pg_database=库名`
-  （PG 一条连接只在一个库里查询；`database` 参数对 PG 是 schema）
-- 表结构 → `describe_table`（字段/类型/索引/主键，最省上下文）
-- 索引怎么建的、有没有分区、字符集/默认值/注释原文 → `table_ddl`（可逗号分隔传多张表）
-- 长什么样 → `sample_rows(limit=10)`。**别用 `SELECT *` 去"看看"一张大表。**
+### Exploring: I don't know what's there
+- What projects/connections exist → `list_projects` → `list_connections`
+- What tables exist → `list_tables` (for a connection with no default database, call
+  `list_databases` first)
+- Other PostgreSQL databases → `list_server_databases` lists the databases, then pass
+  `pg_database=<name>` to other tools (a PG connection only queries one database at a
+  time; the `database` parameter means *schema* for PG)
+- Table structure → `describe_table` (columns/types/indexes/primary key — most
+  context-efficient)
+- How indexes are built, whether it's partitioned, charset/defaults/comments verbatim →
+  `table_ddl` (accepts a comma-separated list of tables)
+- What the data looks like → `sample_rows(limit=10)`. **Don't `SELECT *` a large table
+  just to "take a look".**
 
-### 体检：这台 DB 健康吗
-→ `db_checkup`。一次返回结构化诊断报告，**不要**自己一轮轮 `query` 去摸底（每轮都耗一次
-往返 + 上下文，还容易漏掉不知道该查的指标）。
-- 覆盖：连接占用、缓存命中率、慢查询/长查询、锁等待与死锁、空闲事务、复制延迟、大表 TOP5
-  （按引擎不同：MySQL 16 项 / PostgreSQL 16 项 / ClickHouse 8 项 / SQLite 5 项）。
-- 视图选型已避开多数权限门槛：MySQL 长查询/锁等待走 performance_schema（无需 PROCESS），
-  PG 连接占用/复制槽/统计类视图对只读账号可见；真缺权限的项会在报告 privileges 里汇总成
-  可复制的 GRANT 语句——把 unknown 当「待确认」而非「正常」，需要时把 GRANT 给用户即可。
-- 每项给 `status`（ok / info / warn / critical / unknown）+ 人可读的 `value` + 解读建议，
-  `overall` 是其中最严重的状态——**先看 overall 与 summary，再挑 warn/critical 的项看详情**。
-- **`unknown` 是「没测到」，不是「正常」**：常见原因是只读账号权限不足（如 PG 无
-  `pg_monitor` 看不到其它会话、MySQL 看不全 PROCESSLIST），报告里会写清原因。这时不要把
-  unknown 当成健康证据，也不必自己补查——把结论告诉用户、让他决定要不要给账号提权即可。
-- 只读、免审批。PG 传 `pg_database` 指定在哪个库上体检。
+### Health check: is this database healthy
+→ `db_checkup`. Returns a structured diagnostic report in one call — **do not** run
+round after round of `query` to probe it manually (every round costs a round trip and
+context, and it's easy to miss a metric you didn't know to check).
+- Coverage: connection usage, cache hit rate, slow/long-running queries, lock waits and
+  deadlocks, idle transactions, replication lag, top-5 largest tables (varies by engine:
+  16 checks for MySQL / 16 for PostgreSQL / 8 for ClickHouse / 5 for SQLite).
+- The views were chosen to avoid most permission gates: MySQL long-query/lock-wait checks
+  use performance_schema (no PROCESS privilege needed), PG connection-usage/replication-
+  slot/statistics views are visible to read-only accounts; checks that genuinely lack
+  permission are summarized in the report's `privileges` field as ready-to-copy GRANT
+  statements — treat `unknown` as "not yet confirmed", not "healthy". Ask the DBA to grant
+  the listed privileges if you need those checks.
+- Each item has a `status` (ok / info / warn / critical / unknown) + a human-readable
+  `value` + interpretation guidance; `overall` is the most severe status among them —
+  **look at overall and the summary first, then drill into the warn/critical items.**
+- **`unknown` means "not measured", not "healthy"**: the common cause is insufficient
+  read-only-account privileges (e.g. PG without `pg_monitor` can't see other sessions,
+  MySQL can't see the full process list) — the report explains why. Don't treat unknown as
+  evidence of health, and don't try to work around it yourself — just tell the user and let
+  them decide whether to grant more privileges.
+- Read-only, no approval needed. For PG, pass `pg_database` to pick which database to
+  check.
 
-### 查询：我要拿数
-- 普通查询 → `query`。大表**必须**带 WHERE 或 LIMIT。
-- 统计/汇总 → 聚合写进 SQL（GROUP BY / SUM / COUNT），别把明细拉回来自己数。
-- 不确定量级 → 先 `SELECT COUNT(*) ... WHERE ...` 探一下，再决定怎么取。
-- 慢 → 用 `query` 跑 `EXPLAIN` 看是不是全表扫描（access_type=ALL/table），
-  对照 `describe_table` 的索引调整 WHERE。
+### Querying: I need data
+- Ordinary queries → `query`. Large tables **must** have a WHERE or a LIMIT.
+- Aggregation/summaries → do the aggregation in SQL (GROUP BY / SUM / COUNT); don't pull
+  the raw rows back and count them yourself.
+- Unsure of the volume → run `SELECT COUNT(*) ... WHERE ...` first, then decide how to
+  fetch.
+- Slow → run `EXPLAIN` via `query` to check for a full table scan
+  (access_type=ALL/table), and adjust the WHERE clause against `describe_table`'s index
+  list.
 
-### 结果太大
-按这个顺序选，别跳步：
-1. **能聚合就聚合** —— 在 SQL 里把结论算出来。
-2. **要整份数据但不需要"读懂"** → `export_table`（CSV/JSON/Markdown/XLSX）。
-   它返回 `download_url`，**用程序下载到目标位置，绝不要把文件内容读进上下文**。
-3. **要多步处理 / 跨源 JOIN** → 分析工作台（本地 DuckDB 沙箱）：
-   `analysis_import` 把各个源的查询结果快照成工作区数据集 → `analysis_sql` 在工作区里
-   自由 JOIN/聚合/建 VIEW（沙箱内不需审批），只把小结果带回上下文。
-   **跨库 JOIN 的正确姿势就是这个**，不是把两边都拉回来自己拼。
+### Result too large
+Follow this order, don't skip steps:
+1. **Aggregate if you can** — compute the answer in SQL.
+2. **Need the full dataset but don't need to "read" it** → `export_table`
+   (CSV/JSON/Markdown/XLSX). It returns a `download_url` — **download it to the target
+   location with code, never read the file content into context.**
+3. **Need multi-step processing / a cross-source JOIN** → the analysis workbench (local
+   DuckDB sandbox): `analysis_import` snapshots each source's query result into a
+   workspace dataset → `analysis_sql` freely JOINs/aggregates/creates VIEWs inside the
+   workspace (no approval needed for the sandbox), bringing back only the small final
+   result. **This is the correct way to do a cross-database JOIN** — not pulling both
+   sides back and joining them yourself.
 
-### 修改数据
-1. 先 `query` 查出会被改到的行的旧值（要回滚线索时）。
-2. `execute(sql, reason=..., rollback_note="改前 id=1001 status=2；回滚 UPDATE ...")`。
-3. 返回里有 `approval_url` —— **把它贴给用户点开审批**。用户一批准，本次调用就自动执行
-   并返回 `status=executed`，不需要用户回来跟你说"我批了"。
-4. 等待超时返回 `status=approval_required` 时，提醒用户后调 `wait_for_change(change_id)`
-   继续等。**别自己循环调 `get_change_status` 轮询。**
-5. 迁移类改动（如 ALTER + 回填 UPDATE）可以一次提交多条语句（分号分隔），
-   整批一次审批、在同一事务里逐条执行。
+### Modifying data
+1. First `query` the rows that will be changed to capture their old values (when you want
+   a rollback trail).
+2. `execute(sql, reason=..., rollback_note="before: id=1001 status=2; rollback: UPDATE ...")`.
+3. The return value has an `approval_url` — **give it to the user to open and approve.**
+   Once approved, this same call auto-executes and returns `status=executed` — the user
+   doesn't need to come back and tell you "I approved it".
+4. If the wait times out, `status=approval_required` is returned; remind the user, then
+   call `wait_for_change(change_id)` to keep waiting. **Don't loop on
+   `get_change_status` yourself.**
+5. Migration-style changes (e.g. ALTER + a backfill UPDATE) can be submitted as multiple
+   statements in one call (semicolon-separated) — one approval covers the whole batch,
+   executed statement by statement in the same transaction.
 
-### 把线上的东西弄到本地
-- **只要表结构**（在本地照着线上重建一套空表）→ `sync_table_ddl`，一次可传多张表。
-- **要一小撮真实数据**跑起来 → `sync_table(data="append", where=..., limit=...)`。
-  它是**拉样本**的，不是迁移工具：行数与体积都有服务端硬上限，超了会如实告诉你截断了。
-- **要整份数据做备份** → 用 `sync_table_ddl` 建结构 + `export_table` 把数据取成文件，
-  再用程序下载。**不要**指望用 `sync_table` 搬全量。
-- 目标不能是 prod 连接。目标是 local/dev 时不需要审批，staging 才走审批流程。
+### Getting production data onto local
+- **Just the table structure** (rebuild an empty table locally that mirrors production) →
+  `sync_table_ddl`, can take several tables at once.
+- **A small sample of real data** to run against → `sync_table(data="append", where=...,
+  limit=...)`. It's for **sampling**, not migration: both row count and byte size have
+  server-side hard caps, and you'll be told honestly if it truncated.
+- **A full backup** → use `sync_table_ddl` to build the structure + `export_table` to dump
+  the data to a file, then download it with code. **Do not** expect `sync_table` to move
+  the full dataset.
+- The target cannot be a prod connection. Targeting local/dev needs no approval; targeting
+  staging goes through the approval flow.
 
-### 回顾与回滚
-- 我以前干过什么 → `list_sessions`（可按日期/关键词/项目/连接筛；
-  `writes_only=True, status="ok"` = 真正改成过数据的会话）
-- 那次具体做了什么 → `session_history(session_id)`。默认只回精简列；
-  要 SQL 原文和错误明细得显式 `fields="sql,detail"`。
-- 要回滚 → 从 `session_history` 取回当时写的 `rollback_note`，据此拼回滚 SQL，
-  **回滚照样走 `execute` 审批**。
+### Looking back and rolling back
+- What have I done before → `list_sessions` (filter by date/keyword/project/connection;
+  `writes_only=True, status="ok"` = sessions that actually changed data)
+- What exactly did that session do → `session_history(session_id)`. Returns a compact
+  column set by default; ask for `fields="sql,detail"` explicitly to get the raw SQL and
+  error details.
+- To roll back → pull the `rollback_note` you wrote at the time from `session_history`,
+  build the rollback statement from it, and **submit the rollback through `execute` just
+  like any other write — it still requires approval.**
 
-### 沉淀
-反复要跑的分析 → `save_workflow` 存成可重跑流程，之后 `run_workflow` 一键重跑
-（自动重拉源数据 → 逐步执行 → 返回每步状态）。可用列表见 `analysis_workspaces`。
+### Persisting work
+For analyses you run repeatedly → `save_workflow` to save it as a re-runnable workflow,
+then `run_workflow` to re-run it with one call (re-pulls the source data → runs each step
+→ returns the status of each). See `analysis_workspaces` for the list of available ones.
 
-## 3. 写 SQL 的约定
+## 3. SQL-writing conventions
 
-- **时区**：本服务不固定数据库会话时区，`@@session.time_zone` 继承各库设置（可能是 UTC+8，
-  也可能是 UTC）。凡用 `FROM_UNIXTIME` / `UNIX_TIMESTAMP` / `NOW` / `CURDATE` / `DATE`
-  这类依赖会话时区的函数，先 `SELECT @@session.time_zone` 确认，**切勿重复叠加偏移**
-  （会话已是 UTC+8 又手动 +28800 等于 +16h，按天分组会把傍晚数据串到第二天）。
-- **epoch 秒按天分组**：用纯算术 `FLOOR((ts+偏移)/86400)` 得 day_idx，日期由它反推
-  `DATE_ADD('1970-01-01', INTERVAL day_idx DAY)`，绕开隐式时区。
-- **别让索引失效**：不要对索引列套函数或运算（`DATE(ts)`、`FROM_UNIXTIME(ts)`、`ts+1`
-  放在 WHERE 左侧）；改成对常量侧做转换、用范围比较（`ts >= 起 AND ts < 止`）。
-- **大表必须收窄**：WHERE 或 LIMIT，至少有一个。
+- **Time zones**: this service does not pin a fixed database session time zone —
+  `@@session.time_zone` inherits whatever each database is set to (could be UTC+8, could
+  be UTC). Whenever you use a time-zone-dependent function such as `FROM_UNIXTIME` /
+  `UNIX_TIMESTAMP` / `NOW` / `CURDATE` / `DATE`, run `SELECT @@session.time_zone` first to
+  confirm it, and **never apply an offset on top of it** (if the session is already UTC+8
+  and you manually add +28800 too, that's +16h — grouping by day will bleed evening data
+  into the next day).
+- **Grouping epoch-second columns by day**: compute `day_idx` with pure arithmetic —
+  `FLOOR((ts+offset)/86400)` — then derive the date from it with
+  `DATE_ADD('1970-01-01', INTERVAL day_idx DAY)`, sidestepping implicit time-zone
+  conversion.
+- **Don't break indexes**: don't wrap an indexed column in a function or arithmetic
+  (`DATE(ts)`, `FROM_UNIXTIME(ts)`, `ts+1` on the left side of a WHERE clause) — convert
+  the constant side instead, and use a range comparison (`ts >= start AND ts < end`).
+- **Large tables must be narrowed**: a WHERE or a LIMIT, at minimum one of the two.
 
-## 4. 结果长什么样
+## 4. What results look like
 
-`query` / `sample_rows` 返回**紧凑 TSV 文本**（不是 JSON，省 token）：
-顶部 `#` 元信息行 + `# types:` 列类型，随后首行列名、其余为数据行，制表符分隔，
-`\\N` 表示 NULL，大整数以字符串传输（避免精度丢失）。
+`query` / `sample_rows` return **compact TSV text** (not JSON, to save tokens): a top `#`
+metadata line + `# types:` column types, then a header row with column names, then data
+rows, tab-separated, `\\N` for NULL, big integers transmitted as strings (to avoid
+precision loss).
 
-结果有**两级硬上限**：行数（默认 1000）与字符预算（默认约 12k token）。
-元信息里 `truncated=true` 就是没给全 —— **不要原样重发去"再拉一次全量"**，
-改用 WHERE/LIMIT 收窄、改成聚合，或走分析工作台把计算下推。
+Results have **two hard caps**: row count (default 1000) and a character budget (default
+roughly 12k tokens). `truncated=true` in the metadata means you didn't get everything —
+**don't just resend the same query to "get the full set"** — narrow it with WHERE/LIMIT,
+switch to aggregation, or push the computation into the analysis workbench.
 
-此外还有**会话级配额**：本会话累计返回量接近上限时，结果末尾会多出一行
-`# budget: ...` 提醒；超出后取数会被拒（`[result_budget_exceeded]`）。
-届时**先问用户**是否继续，用户同意后调 `allow_more_results(reason="用户已确认：...")`
-再放行一个额度。放行记录会显示在后台看板上——不要在没问过用户的情况下调它。
+There's also a **session-level quota**: as the session's cumulative returned volume
+approaches the cap, an extra `# budget: ...` line is appended to the result as a warning;
+once it's exceeded, further fetches are rejected (`[result_budget_exceeded]`). At that
+point, **ask the user first** whether to continue, and only after they agree call
+`allow_more_results(reason="user confirmed: ...")` to get one more allowance. Grants show
+up on the backend dashboard — don't call it without having actually asked the user.
 
-## 5. 报错怎么读
+## 5. How to read errors
 
-所有错误都带一个方括号分类前缀，照着它决定下一步，别盲目重发同一条 SQL：
+Every error carries a bracketed category prefix — use it to decide the next step, and
+don't blindly resend the same SQL:
 
-| 前缀 | 含义与下一步 |
+| Prefix | Meaning & next step |
 | --- | --- |
-| `[sql_syntax_error]` | 语法错（已由目标库复核确认），必须改写 SQL |
-| `[table_not_found]` / `[column_not_found]` | 用 `list_tables` / `describe_table` 核对名字 |
-| `[permission_denied]` / `[readonly_violation]` | 只读账号不能写；数据变更走 `execute` 审批流 |
-| `[query_timeout]` | 收窄范围，或改用聚合 / 分析工作台 |
-| `[connection_unavailable]` | 连接暂时断开、后台正在自动重连，按提示秒数稍后重试 |
-| `[connection_exhausted]` | 连续重连失败（仍在重试），请提醒用户去后台看一眼 |
-| `[result_budget_exceeded]` | 本会话取回的数据太多；停下来问用户，同意后 `allow_more_results` |
+| `[sql_syntax_error]` | Syntax error (confirmed by the target database), you must rewrite the SQL |
+| `[table_not_found]` / `[column_not_found]` | Check the name with `list_tables` / `describe_table` |
+| `[permission_denied]` / `[readonly_violation]` | The read-only account can't write; data changes go through the `execute` approval flow |
+| `[query_timeout]` | Narrow the range, or switch to aggregation / the analysis workbench |
+| `[connection_unavailable]` | The connection is temporarily down and the backend is auto-reconnecting; retry after the suggested number of seconds |
+| `[connection_exhausted]` | Repeated reconnect attempts have failed (still retrying) — please ask the user to take a look at the backend |
+| `[result_budget_exceeded]` | This session has pulled back too much data; stop and ask the user, then call `allow_more_results` once they agree |
 
-## 6. 边界：这些事做不到，别绕
+## 6. Boundaries: things you can't do — don't try to work around them
 
-- **Redis 不对 agent 开放**，只能由人在管理后台操作。
-- **连接与密钥管理不暴露成工具**，你改不了连接配置，也拿不到任何账号密码。
-- **不能往 prod 连接同步数据**；prod 上的写操作一律强制审批。
-- 所有操作都会被审计（谁、什么时候、哪条连接、什么 SQL、什么结果），这是设计如此。
+- **Redis is not exposed to the agent** — it can only be operated by a human through the
+  admin backend.
+- **Connection and credential management are not exposed as tools** — you cannot change
+  connection configuration, and you can't obtain any account passwords.
+- **You cannot sync data into a prod connection**; writes against prod are always forced
+  through approval.
+- All operations are audited (who, when, which connection, what SQL, what result) — this
+  is by design.
 """

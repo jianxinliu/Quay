@@ -382,11 +382,23 @@ def test_unknown_change_404(client):
     assert tc.get("/admin/approvals/9999").status_code == 404
 
 
+def test_theme_class_follows_setting(client, tmp_path):
+    """服务端渲染页跟随系统设置的主题：默认深色，切浅色后 <html> 换类名。
+    以前后台页恒为浅色、查询台恒为深色，像两个产品。"""
+    from dbmcp.settings import SettingsStore
+    tc, svc = client
+    assert 'class="theme-dark"' in tc.get("/admin/dashboard").text   # 没有设置库也按默认深色
+    svc.settings = SettingsStore(tmp_path / "settings.sqlite3")
+    svc.save_settings({"theme": "light"})
+    for path in ("/admin/dashboard", "/admin/approvals", "/admin/audit", "/admin/settings"):
+        assert 'class="theme-light"' in tc.get(path).text, path
+
+
 def test_index_redirects(client):
     tc, _ = client
     resp = tc.get("/admin", follow_redirects=False)
     assert resp.status_code in (307, 302, 303)
-    assert "/admin/approvals" in resp.headers["location"]
+    assert "/admin/dashboard" in resp.headers["location"]
 
 
 class TestSshIdentitiesAndHops:

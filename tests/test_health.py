@@ -131,7 +131,7 @@ class TestHealthMonitor:
         assert ei.value.state == "exhausted"
         # 不再是"永久放弃"：仍给出下次重试时间，且文案说明在自动重试
         assert ei.value.retry_after_s > 0
-        assert "自动重试" in str(ei.value)
+        assert "auto-retrying" in str(ei.value)
         m.stop()
 
 
@@ -220,6 +220,17 @@ class TestCircuitBreakerHalfOpen:
         assert m.get("p", "c").state == "unavailable"
         m.force_clear("p", "c")
         assert m.get("p", "c") is None
+        m.stop()
+
+    def test_first_success_creates_ok_entry(self):
+        """从未触达过的连接与健康的连接是两种状态：第一次成功要留下记录，
+        看板才能把「从没连过」显示成「未探测」而不是「正常」。"""
+        m = HealthMonitor(probe=lambda p, c: None)
+        assert m.get("p", "c") is None
+        m.mark_ok("p", "c")
+        h = m.get("p", "c")
+        assert h is not None and h.state == "ok" and h.last_ok_at > 0
+        m.check("p", "c")  # 仍放行
         m.stop()
 
     def test_mark_ok_from_unavailable(self):

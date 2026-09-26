@@ -501,7 +501,6 @@ name = "db-manage-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "clickhouse-sqlalchemy" },
     { name = "duckdb" },
     { name = "fastmcp" },
     { name = "msgpack" },
@@ -516,6 +515,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+clickhouse = [
+    { name = "clickhouse-sqlalchemy" },
+]
 keyring = [
     { name = "keyring" },
 ]
@@ -526,6 +528,7 @@ tokenizer = [
 [package.dev-dependencies]
 dev = [
     { name = "anyio" },
+    { name = "clickhouse-sqlalchemy" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-anyio" },
@@ -534,7 +537,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "clickhouse-sqlalchemy", specifier = ">=0.3" },
+    { name = "clickhouse-sqlalchemy", marker = "extra == 'clickhouse'", specifier = ">=0.3" },
     { name = "duckdb", specifier = ">=1.1" },
     { name = "fastmcp", specifier = ">=2.0" },
     { name = "keyring", marker = "extra == 'keyring'", specifier = ">=25.0" },
@@ -549,11 +552,12 @@ requires-dist = [
     { name = "sqlglot", specifier = ">=25.0" },
     { name = "tiktoken", marker = "extra == 'tokenizer'", specifier = ">=0.7" },
 ]
-provides-extras = ["keyring", "tokenizer"]
+provides-extras = ["keyring", "clickhouse", "tokenizer"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio", specifier = ">=4.14.1" },
+    { name = "clickhouse-sqlalchemy", specifier = ">=0.3" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-anyio", specifier = ">=0.0.0" },

@@ -75,7 +75,7 @@ _DROP_CONSTRAINTS = (
 
 
 class SyncError(ValueError):
-    """同步计划非法（模式/引擎/表名不合规等）。对 agent 是可修正的输入错误。"""
+    """The sync plan is invalid (bad mode/engine/table name, etc.). A fixable input error for the agent."""
 
 
 @dataclass(frozen=True)
@@ -115,30 +115,31 @@ class SyncSpec:
 
 
 def validate_spec(spec: SyncSpec) -> None:
-    """校验模式取值、标识符合法性与自我同步。不碰 DB，纯输入校验。"""
+    """Validate mode values, identifier legality, and self-sync. Pure input validation, no DB access."""
     if spec.ddl not in DDL_MODES:
-        raise SyncError(f"ddl 只能是 {'/'.join(DDL_MODES)}，收到 {spec.ddl!r}")
+        raise SyncError(f"ddl must be one of {'/'.join(DDL_MODES)}, got {spec.ddl!r}")
     if spec.data not in DATA_MODES:
-        raise SyncError(f"data 只能是 {'/'.join(DATA_MODES)}，收到 {spec.data!r}")
+        raise SyncError(f"data must be one of {'/'.join(DATA_MODES)}, got {spec.data!r}")
     if spec.ddl == DDL_SKIP and spec.data == DATA_NONE:
-        raise SyncError("ddl=skip 且 data=none：这次同步什么都不做")
-    for label, name in (("源表", spec.source_table), ("目标表", spec.target_table)):
+        raise SyncError("ddl=skip and data=none: this sync would do nothing")
+    for label, name in (("source table", spec.source_table), ("target table", spec.target_table)):
         if not _IDENT_RE.match(name or ""):
             raise SyncError(
-                f"{label}名 {name!r} 不是合法标识符（只允许字母、数字、下划线、$）")
-    for label, name in (("源库", spec.source_database), ("目标库", spec.target_database),
-                        ("源 PG 库", spec.source_pg_database),
-                        ("目标 PG 库", spec.target_pg_database)):
+                f"{label} name {name!r} is not a valid identifier (only letters, digits, underscore, $ allowed)")
+    for label, name in (("source database", spec.source_database),
+                        ("target database", spec.target_database),
+                        ("source PG database", spec.source_pg_database),
+                        ("target PG database", spec.target_pg_database)):
         if name and not _IDENT_RE.match(name):
-            raise SyncError(f"{label}名 {name!r} 不是合法标识符")
+            raise SyncError(f"{label} name {name!r} is not a valid identifier")
     if not 1 <= spec.limit <= MAX_SYNC_ROWS:
-        raise SyncError(f"limit 必须在 1..{MAX_SYNC_ROWS} 之间，收到 {spec.limit}")
+        raise SyncError(f"limit must be between 1..{MAX_SYNC_ROWS}, got {spec.limit}")
     same_conn = (spec.source_project, spec.source_connection) == (
         spec.target_project, spec.target_connection)
     same_place = ((spec.source_database or "") == (spec.target_database or "")
                   and (spec.source_pg_database or "") == (spec.target_pg_database or ""))
     if same_conn and same_place and spec.source_table == spec.target_table:
-        raise SyncError("源表与目标表是同一张表，无需同步")
+        raise SyncError("Source and target are the same table; there is nothing to sync")
 
 
 def spec_fingerprint(spec: SyncSpec) -> str:
@@ -187,7 +188,7 @@ def _table_node(create: exp.Create) -> exp.Table:
     node = create.this
     node = node.this if isinstance(node, exp.Schema) else node
     if not isinstance(node, exp.Table):
-        raise SyncError("源建表语句里找不到表名节点，无法改写")
+        raise SyncError("Could not find the table-name node in the source CREATE TABLE statement; cannot rewrite it")
     return node
 
 
@@ -209,7 +210,8 @@ def _clean_column(col: exp.ColumnDef, warnings: list[str]) -> None:
     for cons in col.constraints:
         if isinstance(cons.kind, _DROP_CONSTRAINTS):
             if isinstance(cons.kind, exp.AutoIncrementColumnConstraint):
-                warnings.append(f"跨引擎建表已去掉列 {col.name} 的自增属性（数据带原值复制）")
+                warnings.append(f"Cross-engine table creation dropped the AUTO_INCREMENT "
+                                f"attribute on column {col.name} (data is copied with its original values)")
             continue
         kept.append(cons)
     col.set("constraints", kept)
@@ -229,7 +231,8 @@ def _strip_dialect_specifics(create: exp.Create, warnings: list[str]) -> None:
     for e in schema.expressions:
         if isinstance(e, exp.IndexColumnConstraint):
             name = e.this.name if e.this is not None else "?"
-            warnings.append(f"跨引擎建表未同步二级索引 {name}（如需请在目标库自行创建）")
+            warnings.append(f"Cross-engine table creation did not sync secondary index "
+                            f"{name} (create it manually on the target if needed)")
             continue
         if isinstance(e, exp.UniqueColumnConstraint) and isinstance(e.this, exp.Schema):
             # MySQL 的 `UNIQUE KEY 名字 (列)` 会渲染成 `UNIQUE "名字" (列)`——PG/SQLite 都不认
@@ -253,7 +256,7 @@ def rewrite_ddl(
     """
     source_ddl = (source_ddl or "").strip().rstrip(";")
     if not source_ddl:
-        raise SyncError("源表建表语句为空，无法同步结构")
+        raise SyncError("Source table CREATE TABLE statement is empty; cannot sync structure")
     same_engine = source_engine == target_engine
     if same_engine and source_table == target_table:
         return source_ddl, []
@@ -262,27 +265,31 @@ def rewrite_ddl(
     read_d = _dialect(source_engine)
     write_d = _dialect(target_engine)
     try:
-        # 用 parse 而非 parse_one：SQLite 的建表语句原文里还跟着该表的 CREATE INDEX
-        # （get_table_ddl 把 sqlite_master 的多行拼在一起），parse_one 会直接报错。
+        # Use parse rather than parse_one: SQLite's raw CREATE TABLE text can be followed
+        # by that table's CREATE INDEX statements (get_table_ddl concatenates sqlite_master
+        # rows), and parse_one would error out on that.
         statements = [st for st in sqlglot.parse(source_ddl, read=read_d) if st is not None]
     except sqlglot.errors.SqlglotError as e:
-        raise SyncError(f"无法解析源表建表语句（{type(e).__name__}: {e}），"
-                        f"请改用 ddl=skip 并先在目标库手工建表") from e
+        raise SyncError(f"Could not parse the source table's CREATE TABLE statement "
+                        f"({type(e).__name__}: {e}); use ddl=skip and create the table "
+                        f"manually on the target instead") from e
     creates = [st for st in statements if isinstance(st, exp.Create) and st.kind == "TABLE"]
     if not creates:
-        raise SyncError("源表建表语句里找不到 CREATE TABLE，拒绝改写")
+        raise SyncError("No CREATE TABLE found in the source table's DDL; refusing to rewrite it")
     tree = creates[0]
     if len(statements) > 1:
-        warnings.append("改写表名时丢弃了源建表语句里附带的其它语句（如独立的 CREATE INDEX）")
+        warnings.append("Rewriting the table name discarded other statements bundled with "
+                        "the source DDL (such as a standalone CREATE INDEX)")
 
     table = _table_node(tree)
     table.set("this", exp.to_identifier(target_table, quoted=True))
-    table.set("db", None)       # 库由目标连接/引擎绑定，DDL 里不再限定
+    table.set("db", None)       # the database is bound to the target connection/engine, not qualified in the DDL
     table.set("catalog", None)
     if not same_engine:
         _strip_dialect_specifics(tree, warnings)
-        warnings.insert(0, f"跨引擎建表（{source_engine} → {target_engine}）：以下为 sqlglot "
-                           f"转写的近似 DDL，请在批准前确认类型映射")
+        warnings.insert(0, f"Cross-engine table creation ({source_engine} -> {target_engine}): "
+                           f"the following is an approximate DDL rewritten by sqlglot — "
+                           f"confirm the type mapping before approving")
     return tree.sql(dialect=write_d, pretty=True), warnings
 
 
@@ -291,23 +298,23 @@ def render_plan(
     columns: list[str], ddl_sql: str, warnings: list[str],
     target_exists: bool, source_row_estimate: int | None,
 ) -> str:
-    """把计划渲染成审批页/会话里给人看的一段文本（审批单的 sql 字段存的就是它）。"""
+    """Render the plan as a text block shown on the approval page/to the session (this is what the approval record's sql field stores)."""
     src_db = "".join(f".{x}" for x in (spec.source_pg_database, spec.source_database) if x)
     tgt_db = "".join(f".{x}" for x in (spec.target_pg_database, spec.target_database) if x)
-    est = "未知" if source_row_estimate is None else f"约 {source_row_estimate:,} 行"
+    est = "unknown" if source_row_estimate is None else f"~{source_row_estimate:,} rows"
     lines = [
-        "-- 表同步计划（批准后按本计划重新取数执行）",
-        f"-- 源  : {spec.source_project}/{spec.source_connection}{src_db}.{spec.source_table}"
-        f"  [{source_env} · {source_engine} · 全表{est}]",
-        f"-- 目标: {spec.target_project}/{spec.target_connection}{tgt_db}.{spec.target_table}"
-        f"  [{target_env} · {target_engine} · {'已存在' if target_exists else '不存在'}]",
-        f"-- 结构: {spec.ddl}    数据: {spec.data}    最多 {spec.limit:,} 行",
+        "-- Table sync plan (data is re-fetched and executed against this plan once approved)",
+        f"-- source: {spec.source_project}/{spec.source_connection}{src_db}.{spec.source_table}"
+        f"  [{source_env} · {source_engine} · full table {est}]",
+        f"-- target: {spec.target_project}/{spec.target_connection}{tgt_db}.{spec.target_table}"
+        f"  [{target_env} · {target_engine} · {'exists' if target_exists else 'does not exist'}]",
+        f"-- structure: {spec.ddl}    data: {spec.data}    up to {spec.limit:,} rows",
     ]
     if spec.where.strip():
         lines.append(f"-- WHERE: {spec.where.strip()}")
     if spec.order_by.strip():
         lines.append(f"-- ORDER BY: {spec.order_by.strip()}")
-    lines.append(f"-- 列({len(columns)}): {', '.join(columns) if columns else '—'}")
+    lines.append(f"-- columns({len(columns)}): {', '.join(columns) if columns else '-'}")
     for w in warnings:
         lines.append(f"-- ⚠ {w}")
     lines.append("--")
@@ -316,14 +323,15 @@ def render_plan(
     if ddl_sql:
         lines.append(ddl_sql.rstrip(";") + ";")
     elif spec.ddl != DDL_SKIP:
-        lines.append("-- 目标表已存在，跳过建表")
+        lines.append("-- target table already exists, skipping table creation")
     if spec.data == DATA_REPLACE:
-        lines.append(f"DELETE FROM {quote_ident(target_engine, spec.target_table)};  -- 清空目标表")
+        lines.append(f"DELETE FROM {quote_ident(target_engine, spec.target_table)};  -- clear the target table")
     if spec.data != DATA_NONE:
         lines.append(
             build_select_sql(source_engine, spec.source_table, columns, spec.limit,
                              spec.where, spec.order_by, spec.source_database)
-            + ";  -- 在源库取数（实际多取 1 行用于判断源侧是否还有更多），参数化批量写入目标表"
+            + ";  -- fetch from the source (one extra row is actually requested to detect "
+              "more rows on the source side), written to the target in a parameterized batch"
         )
     return "\n".join(lines)
 
@@ -334,20 +342,22 @@ def assess_plan(spec: SyncSpec, target_env: str, source_env: str) -> dict:
     不走 risk.assess——那是给单条 SQL 用的解析式评估，对「计划」只会得到 Unparseable。
     """
     level = "MEDIUM"
-    reasons = [f"跨连接表同步：{spec.source_project}/{spec.source_connection} → "
+    reasons = [f"Cross-connection table sync: {spec.source_project}/{spec.source_connection} -> "
                f"{spec.target_project}/{spec.target_connection}"]
     warnings: list[str] = []
     if spec.ddl == DDL_RECREATE:
         level = "HIGH"
-        reasons.append(f"ddl=recreate：会先 DROP 目标表 {spec.target_table}，表上原有数据全部丢失")
+        reasons.append(f"ddl=recreate: will DROP the target table {spec.target_table} first, "
+                       f"destroying all existing data in it")
     if spec.data == DATA_REPLACE:
         level = "HIGH"
-        reasons.append(f"data=replace：写入前会清空目标表 {spec.target_table}")
+        reasons.append(f"data=replace: the target table {spec.target_table} will be cleared before writing")
     if target_env in ("staging", "prod"):
         level = "HIGH"
-        reasons.append(f"目标是 {target_env} 环境，非本地/开发库")
+        reasons.append(f"Target is a {target_env} environment, not local/dev")
     if source_env == "prod":
-        warnings.append("数据来自生产库：同步后目标库会持有一份生产数据副本（不脱敏，按原值复制）")
+        warnings.append("Data comes from production: after syncing, the target will hold a copy "
+                        "of production data (not masked, copied with original values)")
     return {
         "level": level,
         "statement_kind": "TableSync",

@@ -191,7 +191,7 @@ async def test_execute_wait_reports_backend_execution(tmp_path):
             })
         assert r.data["status"] == "executed"
         assert r.data["affected_rows"] == 1
-        assert "管理后台" in r.data["message"]
+        assert "admin backend" in r.data["message"]
         assert active_of(svc, 1) == 0
         # 只执行了一次：审批单已核销，agent 再重提会被拒
         again = svc.execute("demo", "main", WRITE_SQL, CALLER, change_id=r.data["change_id"])

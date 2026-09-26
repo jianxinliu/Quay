@@ -63,6 +63,7 @@ class Health:
     last_change_at: float = 0.0     # 供通知去重用
     probing: bool = False           # 半开：已放行一个探路请求（或后台线程正在探测）
     probe_started_at: float = 0.0   # 探路开始时刻，用于租约过期判定
+    last_ok_at: float = 0.0         # 最近一次成功触达（0 = 从未成功过）
     _thread: threading.Thread | None = field(default=None, repr=False)
 
 
@@ -102,16 +103,19 @@ class HealthMonitor:
             wait = max(0, int(h.next_retry_at - now))
             if h.state == "exhausted":
                 raise ConnectionUnavailable(
-                    f"连接 {project}/{connection} 持续不可用（已连续 {h.fail_count} 次重连失败，"
-                    f"仍在每 {BACKOFF_STEPS_S[-1]} 秒自动重试，约 {wait} 秒后再试）。"
-                    f"长时间不恢复通常需要人工检查网络/账号/隧道配置。"
-                    f"最近错误：{h.last_error or '未知'}",
+                    f"Connection {project}/{connection} has been unavailable for a while "
+                    f"({h.fail_count} consecutive reconnect failures), still auto-retrying "
+                    f"every {BACKOFF_STEPS_S[-1]}s (try again in about {wait}s). "
+                    f"If it doesn't recover soon, a human usually needs to check the "
+                    f"network/credentials/tunnel configuration. "
+                    f"Last error: {h.last_error or 'unknown'}",
                     retry_after_s=max(wait, 5), state="exhausted",
                 )
-            # unavailable：告诉 agent 大约多久后可以重试
+            # unavailable: tell the agent roughly how long until it can retry
             raise ConnectionUnavailable(
-                f"连接 {project}/{connection} 暂时不可用，后台正在自动重连"
-                f"（约 {wait} 秒后重试）。请稍后再试。最近错误：{h.last_error or '未知'}",
+                f"Connection {project}/{connection} is temporarily unavailable; the "
+                f"backend is auto-reconnecting (try again in about {wait}s). "
+                f"Last error: {h.last_error or 'unknown'}",
                 retry_after_s=max(wait, 5), state="unavailable",
             )
 
@@ -124,7 +128,7 @@ class HealthMonitor:
             return Health(state=h.state, fail_count=h.fail_count,
                           next_retry_at=h.next_retry_at, last_error=h.last_error,
                           last_change_at=h.last_change_at, probing=h.probing,
-                          probe_started_at=h.probe_started_at)
+                          probe_started_at=h.probe_started_at, last_ok_at=h.last_ok_at)
 
     def snapshot(self) -> dict[tuple[str, str], Health]:
         """全量健康快照（供管理后台/查询台渲染状态灯）。只含非 ok 的记录才有意义，但全给。"""
@@ -132,22 +136,30 @@ class HealthMonitor:
             return {
                 k: Health(state=h.state, fail_count=h.fail_count,
                           next_retry_at=h.next_retry_at, last_error=h.last_error,
-                          last_change_at=h.last_change_at, probing=h.probing)
+                          last_change_at=h.last_change_at, probing=h.probing,
+                          last_ok_at=h.last_ok_at)
                 for k, h in self._entries.items()
             }
 
     def mark_ok(self, project: str, connection: str) -> None:
         """执行成功后调：清失败计数并转 ok。"""
         with self._lock:
+            now = time.monotonic()
             h = self._entries.get((project, connection))
-            if h is None or (h.state == "ok" and not h.probing):
+            if h is None:
+                # 第一次成功也要记下来：看板据此区分「正常」与「从没连过」（unprobed）——
+                # 一条从未触达的连接不能显示成正常，那只是「还没失败过」。
+                self._entries[(project, connection)] = Health(last_ok_at=now)
+                return
+            h.last_ok_at = now
+            if h.state == "ok" and not h.probing:
                 return
             h.state = "ok"
             h.fail_count = 0
             h.last_error = ""
             h.next_retry_at = 0.0
             h.probing = False
-            h.last_change_at = time.monotonic()
+            h.last_change_at = now
 
     def mark_failed(self, project: str, connection: str, error: str) -> None:
         """捕到连接级异常时调：进入 unavailable / 推进退避，并确保后台重连线程在跑。"""

@@ -133,7 +133,7 @@ class TestService:
         assert rec["project"] == "analysis" and rec["connection"] == "ws1"
 
     def test_import_rejects_write_sql(self, service):
-        with pytest.raises(QueryRejected, match="只读"):
+        with pytest.raises(QueryRejected, match="read-only"):
             service.analysis_import("ws1", "x", "demo", "main",
                                     "DELETE FROM users", CALLER)
 
@@ -179,7 +179,7 @@ class TestWorkflow:
         # 重跑:重拉 + 逐步执行,输出为最后的 SELECT
         out = svc.workflow_run("adults", CALLER)
         assert out["ok"] is True
-        assert out["steps"][0]["step"].startswith("导入 u") and out["steps"][0]["rows"] == 3
+        assert out["steps"][0]["step"].startswith("Import u") and out["steps"][0]["rows"] == 3
         assert out["output"]["rows"][0][0] == 2
         # 源数据变化后重跑结果随之更新(模拟:直接改工作区数据不行——改源库)
         import sqlite3
@@ -635,10 +635,35 @@ class TestGraph:
         # 人画的 DAG：agent 同名保存被拒
         g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT 1")], "edges": []}
         svc.workflow_save("human-dag", "ws1", "", CALLER, graph=g)
-        with pytest.raises(ValueError, match="不允许覆盖"):
+        with pytest.raises(ValueError, match="cannot be overwritten"):
             svc.workflow_save("human-dag", "ws1", "SELECT 1", CALLER, allow_replace_graph=False)
         # 后台侧（默认 allow_replace_graph=True）不受限
         svc.workflow_save("human-dag", "ws1", "", CALLER, graph=g)
+
+    def test_seeded_example_runs_on_fresh_install(self, tmp_path):
+        """示例流程必须在全新安装上就能跑通：它引用的 demo/shop 连接与示例库一起播种，
+        以前引用的是本机 e2e 才有的 MySQL 库，新用户点 ▶ 必然报连接不存在。"""
+        from dbmcp.approvals import ApprovalStore
+        from dbmcp.examples import EXAMPLE_NAME, seed_demo_db, seed_examples
+        from dbmcp.workflows import WorkflowStore
+        db = seed_demo_db(tmp_path)
+        cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"shop": {
+            "engine": "sqlite", "database": str(db), "environment": "local"}}}}})
+        svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"),
+                         ApprovalStore(tmp_path / "a.sqlite3"))
+        svc.analysis = AnalysisStore(tmp_path / "analysis")
+        svc.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        try:
+            assert seed_examples(svc.workflows, tmp_path) is True
+            out = svc.workflow_run(EXAMPLE_NAME, CALLER)
+            assert out["ok"] is True, out["steps"]
+            cols = out["output"]["columns"]
+            rows = out["output"]["rows"]
+            assert "roi" in cols and len(rows) == 5          # 五个渠道各一行
+            roi = [r[cols.index("roi")] for r in rows]
+            assert roi == sorted(roi, reverse=True) and all(v > 0 for v in roi)
+        finally:
+            svc.close()
 
     def test_seed_examples(self, tmp_path):
         """首次启动播种内置示例；已有 workflow 或已播种过则不动。"""
@@ -649,6 +674,7 @@ class TestGraph:
         wf = store.get(EXAMPLE_NAME)
         assert wf.graph and len(wf.graph["nodes"]) == 8 and wf.chart["type"] == "bar"
         assert (tmp_path / "demo" / "channel_cost.csv").exists()
+        assert (tmp_path / "demo" / "shop.sqlite3").exists()   # 示例库随流程一起播种
         assert seed_examples(store, tmp_path) is False  # 幂等
         store.delete(EXAMPLE_NAME)
         store.save("mine", "ws", "SELECT 1", [])

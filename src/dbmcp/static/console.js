@@ -1250,10 +1250,43 @@
           self.connections = (d && d.connections) || [];
           self.workspaces = (d && d.workspaces) || [];
           self.aiEnabled = !!(d && d.ai_enabled);
+          self.reconcileTabs();
           self.loadWorkflows();
           if (!self.tabs.length) self.newTab({});
           else if (self.activeTab) self.loadTree();
         });
+      },
+      // 连接是否还在配置里（analysis/<ws> 按工作区列表算）
+      connKnown: function (conn) {
+        if (!conn) return true;
+        if (conn.indexOf("analysis/") === 0) return this.workspaces.indexOf(conn.slice(9)) >= 0;
+        return this.connections.some(function (c) { return c.value === conn; });
+      },
+      tabHasPending: function (t) {
+        return !!(t && ((t.edits && Object.keys(t.edits).length) ||
+                        (t.dels && Object.keys(t.dels).length) || (t.adds && t.adds.length)));
+      },
+      // 存档里的 tab 可能指向已经从配置里删掉的连接（另一台实例的存档、连接被改名/删除）。
+      // 没有任何未保存内容的直接关掉；有未保存 SQL / 暂存改动 / 被固定的留下并在组头标「已删除」——
+      // 一刀切删除会把人写了一半的 SQL 也带走。
+      reconcileTabs: function () {
+        var self = this, dropped = 0;
+        this.tabs.slice().forEach(function (t) {
+          if (self.connKnown(t.conn)) { t.connMissing = false; return; }
+          t.connMissing = true;
+          if (t.pinned || t.dirty || self.tabHasPending(t)) return;
+          var i = self.tabs.indexOf(t);
+          if (i < 0) return;
+          self.tabs.splice(i, 1);
+          var m = models.get(t.id); if (m) { m.dispose(); models.delete(t.id); }
+          viewStates.delete(t.id);
+          dropped++;
+        });
+        if (!dropped) return;
+        if (!this.tabs.length) this.newTab({});
+        else if (!this.tabs.some(function (t) { return t.id === self.activeId; })) this.switchTab(this.tabs[0].id);
+        this.persist();
+        this.flash("已关闭 " + dropped + " 个引用了已删除连接的 tab");
       },
       // 选连接 = 切到「该连接的组」：已有该连接的 tab 就激活最近一个，否则在它自己的组里新建空编辑器。
       // 当前 tab 原地不动、留在自己组里——绝不把它的连接改掉搬进别的组（否则打开新连接会把当前编辑器混进目标组）。
@@ -4389,6 +4422,7 @@
           <span class="car">{{ tabGroupCollapsed[g.conn] ? '▸' : '▾' }}</span>
           <img v-if="g.meta.ic" class="dg-eng" :src="g.meta.ic.src" :title="g.meta.ic.label" alt="">
           <span class="gnm">{{ g.meta.name }}</span>
+          <span v-if="!connKnown(g.conn)" class="dg-hgone" title="这条连接已不在配置里；tab 因有未保存内容或被固定而保留">已删除</span>
           <!-- 该连接不健康时打个状态点：不用切到那个 tab 也知道哪条连接断了 -->
           <span v-if="healthOf(g.conn)" class="dg-hdot"
                 :class="{gone: healthOf(g.conn).state==='exhausted'}"

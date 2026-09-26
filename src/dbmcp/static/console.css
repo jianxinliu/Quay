@@ -1107,6 +1107,8 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-tabgrp-hd .car { font-size: 9px; opacity: .7; }
 .dg-tabgrp-hd .gnm { font-family: var(--dg-mono); max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
 .dg-tabgrp-hd .gcount { font-size: 9px; padding: 0 4px; border-radius: 7px; background: var(--dg-border); color: var(--dg-faint); }
+/* 连接已从配置里删掉、但 tab 因未保存内容而保留：组头标一下，免得人在一条不存在的连接上继续写 */
+.dg-tabgrp-hd .dg-hgone { font-size: 9px; padding: 0 5px; border-radius: 7px; background: var(--dg-red); color: #fff; opacity: .85; }
 .dg-tabgrp-hd.collapsed { color: var(--dg-faint); }
 .dg-tabgrp-hd.drag { opacity: .4; }
 .dg-tabgrp-hd.env-prod { border-left-color: var(--dg-red); color: #ff8f8f; }

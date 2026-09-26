@@ -151,7 +151,7 @@ async def test_elicitation_deny_rejects(tmp_path):
                 "sql": "DELETE FROM users WHERE id = 2",
             })
             assert r.data["status"] == "rejected"
-            assert "会话内拒绝" in svc.get_change(r.data["change_id"]).decision_note
+            assert "declined in-session" in svc.get_change(r.data["change_id"]).decision_note
             # 数据没被删
             q = await c.call_tool("query", {"project": "demo", "connection": "main",
                                             "sql": "SELECT count(*) FROM users"})
@@ -217,7 +217,7 @@ async def test_export_table_returns_download_link_without_file_content(tmp_path)
                 "http://127.0.0.1:8100/exports/"
             )
             assert result.data["byte_size"] > 0
-            assert "不要读取" in result.data["agent_instruction"]
+            assert "do not read" in result.data["agent_instruction"]
             assert all(block.type != "resource" for block in result.content)
             # tool 文本/结构化结果都不能夹带导出正文
             assert all("id,name" not in getattr(block, "text", "") for block in result.content)

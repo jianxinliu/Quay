@@ -11,8 +11,9 @@
 ## 开发环境
 
 ```bash
-uv sync --extra keyring     # 安装依赖（含可选 keyring）
-uv run pytest               # 全量测试 —— 改动后必须全过
+uv sync --extra keyring --extra tokenizer --extra clickhouse   # 安装依赖（三个 extra 都是可选能力，测试需要）
+uv run pytest               # 全量测试 —— 改动后必须全过（约 30 秒）
+uv run ruff check src/ tests/
 ```
 
 - **本机测本地服务要绕过代理**：若 shell 设了 SOCKS 代理，127.0.0.1 请求会被发进代理得到 502。
@@ -32,7 +33,11 @@ service.py  核心逻辑（与传输解耦、可直接单测）—— 新功能�
    ↓
 engines.py  SQLAlchemy 适配 + 引擎池（reader/writer 双角色、SSH 隧道托管）
 audit/      classify.py 只读判定 + 指纹 · risk.py 风险评估 · log.py 操作审计
+admin/      管理后台包：common（认证/页面外壳）· context（共享状态）· 按页面/接口分的路由模块，每个 mount(ctx)
+drivers/    可插拔数据库驱动（加一种数据库 = 加一个模块）
 ```
+
+踩过的坑与原因记在 [`docs/LESSONS.md`](docs/LESSONS.md)，功能实现细节在 [`docs/HISTORY.md`](docs/HISTORY.md)。
 
 新增 MCP 工具时：逻辑放 service 层，server 层只注册。完整模块地图见 [`DESIGN.md`](DESIGN.md)
 与 `CLAUDE.md`。

@@ -71,7 +71,7 @@ class TestGetTableDdls:
         assert len(service.get_table_ddls("demo", "prod", ["users", "  ", ""], CALLER)) == 1
 
     def test_empty_rejected(self, service):
-        with pytest.raises(ValueError, match="至少要给一个表名"):
+        with pytest.raises(ValueError, match="Give at least one table name"):
             service.get_table_ddls("demo", "prod", [], CALLER)
 
     def test_too_many_rejected_with_hint(self, service):
@@ -110,7 +110,7 @@ async def test_table_ddl_tool(service):
         # 批量里的坏表名如实标出来，不静默跳过
         mixed = (await c.call_tool("table_ddl", {
             "project": "demo", "connection": "prod", "table": "users,nope"})).data
-        assert "取建表语句失败" in mixed
+        assert "Failed to fetch DDL" in mixed
 
 
 # ---------------- 结构同步 ----------------
@@ -155,12 +155,12 @@ class TestSyncTableDdls:
                                     ["users"], CALLER, ddl="skip")
 
     def test_too_many_tables_rejected(self, service):
-        with pytest.raises(ValueError, match="分批"):
+        with pytest.raises(ValueError, match="batches"):
             service.sync_table_ddls("demo", "prod", "demo", "local",
                                     [f"t{i}" for i in range(60)], CALLER)
 
     def test_empty_rejected(self, service):
-        with pytest.raises(ValueError, match="至少要给一个表名"):
+        with pytest.raises(ValueError, match="Give at least one table name"):
             service.sync_table_ddls("demo", "prod", "demo", "local", [], CALLER)
 
     def test_prod_target_refused(self, service):
@@ -256,4 +256,4 @@ class TestSyncByteBudget:
         out = service.sync_table(spec, CALLER)
         assert out["status"] == "executed"
         assert out["source_truncated"] is True
-        assert "体积上限" in out["note"] and "sync_max_bytes" in out["note"]
+        assert "byte-size cap" in out["note"] and "sync_max_bytes" in out["note"]

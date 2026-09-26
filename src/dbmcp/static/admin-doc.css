@@ -24,14 +24,14 @@ th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vert
 th{font-family:var(--mono);font-weight:600;font-size:11px;letter-spacing:.6px;text-transform:uppercase;
   color:var(--faint);border-bottom:1px solid var(--border)}
 tr:last-child td{border-bottom:none}
-tbody tr{transition:background .1s} tbody tr:hover{background:#fafbfc}
-td code{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border-radius:5px}
+tbody tr{transition:background .1s} tbody tr:hover{background:var(--row-hover)}
+td code{font-size:12.5px;color:var(--code-ink);background:var(--code-bg);padding:1px 6px;border-radius:5px}
 .cell-sql{display:inline-block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle}
-.sql-toggle:hover{background:#e6faf6;color:var(--accent-ink)}
-.sql-full td{background:#0f141b;padding:0} .sql-full pre{margin:0;border-radius:0;border:none}
+.sql-toggle:hover{background:var(--accent-soft);color:var(--accent-ink)}
+.sql-full td{background:var(--pre-bg);padding:0} .sql-full pre{margin:0;border-radius:0;border:none}
 .cell-detail{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;margin-top:2px}
-.detail-toggle:hover{background:#e6faf6;color:var(--accent-ink);border-radius:4px}
-.detail-full td{background:#0f141b;padding:0} .detail-full pre{margin:0;border-radius:0;border:none;white-space:pre-wrap;word-break:break-word}
+.detail-toggle:hover{background:var(--accent-soft);color:var(--accent-ink);border-radius:4px}
+.detail-full td{background:var(--pre-bg);padding:0} .detail-full pre{margin:0;border-radius:0;border:none;white-space:pre-wrap;word-break:break-word}
 .pager{display:flex;align-items:center;gap:14px;margin-top:16px}
 .pager-info{font-size:13px;color:var(--muted)}
 .btn.pg{padding:6px 13px;font-size:13px}
@@ -40,29 +40,29 @@ td code{font-size:12.5px;color:#334155;background:#f6f7f9;padding:1px 6px;border
 .badge{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
   font-family:var(--mono);letter-spacing:.3px}
 .pill{display:inline-block;padding:1px 10px;border-radius:6px;font-size:12px;font-weight:600;font-family:var(--mono)}
-.pill-yes{background:#dcfce7;color:#166534} .pill-no{background:#f1f5f9;color:#475569}
-.pill-na{background:#fef3c7;color:#92400e}
+.pill-yes{background:var(--ok-bg);color:var(--ok-ink)} .pill-no{background:var(--chip);color:var(--muted)}
+.pill-na{background:var(--warn-chip);color:var(--warn-ink)}
 .tag{display:inline-block;background:var(--accent-soft);color:var(--accent-ink);padding:1px 8px;
   border-radius:5px;font-size:12px;font-family:var(--mono);margin-right:4px}
 /* 代码 / 计划 */
-pre{background:var(--ink);color:#e2e8f0;padding:14px 16px;border-radius:10px;overflow-x:auto;
-  font-size:12.5px;line-height:1.55;border:1px solid #262d38}
+pre{background:var(--pre-bg);color:var(--pre-ink);padding:14px 16px;border-radius:10px;overflow-x:auto;
+  font-size:12.5px;line-height:1.55;border:1px solid var(--pre-border)}
 /* EXPLAIN 计划表：列多值短，等宽紧凑 + 横向滚动；列名保留原始大小写（MySQL 的 select_type 等） */
 .plan-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
 .plan-tbl{width:auto;min-width:100%;font-family:var(--mono);font-size:12px}
 .plan-tbl th,.plan-tbl td{padding:7px 11px;text-transform:none;white-space:pre-wrap;word-break:break-word}
-.plan-tbl th{font-size:11px;background:#fafbfc}
+.plan-tbl th{font-size:11px;background:var(--row-hover)}
 /* 按钮 */
 .btn{display:inline-block;padding:9px 17px;border-radius:8px;border:1px solid transparent;
   font-size:13.5px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .12s,transform .04s;
   background:var(--ink);color:#fff;font-family:var(--sans)}
 .btn:hover{filter:brightness(1.15);text-decoration:none} .btn:active{transform:translateY(1px)}
 .btn-primary{background:var(--accent)} .btn-approve{background:#16794f} .btn-reject{background:#c0392b}
-.btn-ghost{background:#fff;color:var(--text);border-color:var(--border)}
-.btn-ghost:hover{background:#f6f7f9;filter:none}
+.btn-ghost{background:var(--surface);color:var(--text);border-color:var(--border)}
+.btn-ghost:hover{background:var(--chip);filter:none}
 /* 表单（去原生观感：下拉自绘箭头、checkbox 主题色） */
 input,textarea,select{font-family:var(--sans);font-size:13.5px;padding:9px 11px;border:1px solid var(--border);
-  border-radius:8px;background:#fff;transition:border-color .12s,box-shadow .12s;color:var(--text)}
+  border-radius:8px;background:var(--input-bg);transition:border-color .12s,box-shadow .12s;color:var(--text)}
 input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);
   box-shadow:0 0 0 3px rgba(13,148,136,.14)}
 input::placeholder{color:var(--faint)}
@@ -74,18 +74,18 @@ input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px;cursor:po
 .modalbg{position:fixed;inset:0;background:rgba(15,20,27,.5);display:none;z-index:70;
   align-items:flex-start;justify-content:center;padding:36px 20px;overflow:auto}
 .modalbg.open{display:flex}
-.modalbg .modalbox{background:#fff;border-radius:14px;padding:24px 28px;max-width:800px;width:100%;
+.modalbg .modalbox{background:var(--surface);border-radius:14px;padding:24px 28px;max-width:800px;width:100%;
   box-shadow:0 24px 70px rgba(0,0,0,.35);position:relative}
 .modalbox .mclose{position:absolute;top:14px;right:16px;border:none;background:none;font-size:18px;
   color:var(--faint);cursor:pointer;padding:4px} .modalbox .mclose:hover{color:var(--text)}
 label{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-weight:500}
-.errbar{background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;padding:11px 15px;border-radius:9px;
+.errbar{background:var(--danger-bg);border:1px solid var(--danger-border);color:var(--danger-ink);padding:11px 15px;border-radius:9px;
   margin-bottom:16px;font-size:13.5px}
 /* 通用 */
 .muted{color:var(--muted);font-size:13px} .row{display:flex;gap:22px;flex-wrap:wrap}
 .filters{margin-bottom:14px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13px}
 .filters a{padding:3px 10px;border-radius:6px;color:var(--muted)}
-.filters a:hover{background:#eceef1;text-decoration:none;color:var(--text)}
+.filters a:hover{background:var(--chip);text-decoration:none;color:var(--text)}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:4px 0;align-items:center;font-size:13.5px}
 .kv dt{color:var(--muted);min-width:0}
 /* min-width:0 必需：grid 子项默认 min-width:auto，dd 里的长单行（回滚参考的 pre）会把

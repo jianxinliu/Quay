@@ -41,6 +41,22 @@ class TestClickhousePureFunctions:
         # ClickHouse 的删改是 ALTER ... DELETE/UPDATE（mutation），必须判为写
         assert classify("ALTER TABLE t DELETE WHERE id = 1", "clickhouse").readonly is False
 
+    def test_missing_dialect_extra_gives_install_hint(self, monkeypatch):
+        """clickhouse-sqlalchemy 是可选 extra：没装时 SQLAlchemy 只会说 plugin not found，
+        建连必须换成「装哪个 extra」的一句话。"""
+        from sqlalchemy.exc import NoSuchModuleError
+
+        from dbmcp.drivers import UnsupportedEngineError, get_driver
+
+        def _boom(*_a, **_kw):
+            raise NoSuchModuleError("Can't load plugin: sqlalchemy.dialects:clickhouse.native")
+
+        monkeypatch.setattr(engines, "create_engine", _boom)
+        cfg = ConnectionConfig(engine="clickhouse", host="127.0.0.1", user="default",
+                               password="plain://x", environment="dev")
+        with pytest.raises(UnsupportedEngineError, match=r"db-manage-mcp\[clickhouse\]"):
+            get_driver("clickhouse").build_engine(cfg, "reader", "127.0.0.1", 9000)
+
     def test_paginate_injects_limit(self):
         out, paged, _ = engines.paginate_sql("SELECT * FROM t", "clickhouse", 100, 0)
         assert paged is True

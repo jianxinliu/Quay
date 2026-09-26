@@ -288,6 +288,15 @@ class TestDashboardSnapshot:
         item = service.dashboard_snapshot()["connections"]["items"][0]
         assert before == 0 and item["engines"] == 1 and item["state"] == "ok"
 
+    def test_never_touched_connection_is_unprobed_not_ok(self, service):
+        """新装实例上示例配置里的库一台都没连过，首屏不能写「全部正常」。"""
+        conns = service.dashboard_snapshot()["connections"]
+        assert conns["items"][0]["state"] == "unprobed"
+        assert conns["unprobed"] == 1 and conns["unhealthy"] == 0
+        service.query("demo", "main", "SELECT 1", CALLER)
+        conns = service.dashboard_snapshot()["connections"]
+        assert conns["items"][0]["state"] == "ok" and conns["unprobed"] == 0
+
     def test_unhealthy_connection_reported(self, service):
         service.health.mark_failed("demo", "main", "OperationalError: gone away")
         conns = service.dashboard_snapshot()["connections"]

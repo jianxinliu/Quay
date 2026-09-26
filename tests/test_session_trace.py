@@ -153,7 +153,7 @@ class TestServiceBeginSession:
         caller = CallerInfo(agent="claude/1.0", session_id="")
         out = service.begin_session(caller, "无会话id")
         assert out["session_id"] == ""
-        assert "无法按会话归类" in out["note"]
+        assert "cannot be traced back by session" in out["note"]
 
     def test_session_associates_subsequent_sql(self, service):
         """begin_session 后跑的 query 自动按 session_id 归到该会话名下。"""

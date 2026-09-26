@@ -75,7 +75,7 @@ class TestSessionBudget:
         with pytest.raises(ResultBudgetExceeded) as ei:
             b.check("s1")
         msg = str(ei.value)
-        assert "问用户" in msg
+        assert "ask the user" in msg
         assert "allow_more_results" in msg
         assert "export_table" in msg and "analysis_" in msg   # 同时给出更省的做法
 
@@ -232,12 +232,12 @@ async def test_first_call_carries_the_guide(service):
     async with Client(mcp) as c:
         first = await c.call_tool("list_projects", {})
         texts = [b.text for b in first.content if hasattr(b, "text")]
-        assert any("使用说明与最佳实践" in t for t in texts)
+        assert any("Usage Guide & Best Practices" in t for t in texts)
         # 结构化返回值不受影响：按 schema 消费的客户端读到的还是原来的东西
         assert first.data == [{"project": "demo", "connections": ["main"]}]
 
         second = await c.call_tool("list_projects", {})
-        assert not any("使用说明与最佳实践" in b.text
+        assert not any("Usage Guide & Best Practices" in b.text
                        for b in second.content if hasattr(b, "text"))
 
 
@@ -252,7 +252,7 @@ async def test_guide_can_be_switched_off(service, tmp_path):
     mcp = build_mcp(service)
     async with Client(mcp) as c:
         r = await c.call_tool("list_projects", {})
-        assert not any("使用说明与最佳实践" in b.text
+        assert not any("Usage Guide & Best Practices" in b.text
                        for b in r.content if hasattr(b, "text"))
 
 

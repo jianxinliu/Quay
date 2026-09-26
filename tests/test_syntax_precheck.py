@@ -153,9 +153,9 @@ class TestQueryPrecheck:
             service.query("demo", "main", "selct 1", CALLER)
         msg = str(ei.value)
         assert "[sql_syntax_error]" in msg
-        assert "语法" in msg
+        assert "syntax error" in msg
         # 不再是误导性的「仅允许只读语句」
-        assert "仅允许只读语句" not in msg
+        assert "only allows read-only statements" not in msg
 
     def test_unparseable_but_db_accepts_still_rejected_honestly(self, service, monkeypatch):
         """DB 认这条语法但解析器不认：判定不了只读性，仍按默认拒绝红线拒——但说实话。"""
@@ -164,7 +164,7 @@ class TestQueryPrecheck:
         with pytest.raises(QueryRejected) as ei:
             service.query("demo", "main", "selct 1", CALLER)
         assert not isinstance(ei.value, SqlSyntaxError)
-        assert "无法判定它是否只读" in str(ei.value)
+        assert "read-only status cannot be determined" in str(ei.value)
 
     def test_syntax_error_is_audited_as_rejected(self, service):
         with pytest.raises(SqlSyntaxError):
