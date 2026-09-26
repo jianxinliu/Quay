@@ -9,10 +9,20 @@ from __future__ import annotations
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine as SAEngine
+from sqlalchemy.exc import NoSuchModuleError
 
 from ..config import ConnectionConfig
 from ..secrets import resolve_secret
-from .base import DB_CLIENT_NAME, DbDriver, Role, SyntaxCheck, register, resolve_account, role_timeouts
+from .base import (
+    DB_CLIENT_NAME,
+    DbDriver,
+    Role,
+    SyntaxCheck,
+    UnsupportedEngineError,
+    register,
+    resolve_account,
+    role_timeouts,
+)
 
 _CH_EXPLAINABLE_HEADS = ("select", "with")
 
@@ -68,16 +78,24 @@ class ClickhouseDriver(DbDriver):
             database=schema or cfg.database or "default",
             query=query,
         )
-        return engines.create_engine(
-            url,
-            pool_pre_ping=True,
-            **engines._sa_pool_kwargs(pool_size),
-            connect_args={
-                "connect_timeout": 5,
-                # 展示在 system.processes / system.query_log 的 client_name 中
-                "client_name": DB_CLIENT_NAME,
-            },
-        )
+        try:
+            return engines.create_engine(
+                url,
+                pool_pre_ping=True,
+                **engines._sa_pool_kwargs(pool_size),
+                connect_args={
+                    "connect_timeout": 5,
+                    # 展示在 system.processes / system.query_log 的 client_name 中
+                    "client_name": DB_CLIENT_NAME,
+                },
+            )
+        except NoSuchModuleError as e:
+            # 方言是可选依赖（extra "clickhouse"）：SQLAlchemy 到 create_engine 才按 URL 找
+            # dialect，找不到的报错只说「plugin not found」，这里换成能照做的一句
+            raise UnsupportedEngineError(
+                "ClickHouse 驱动未安装：pip install 'db-manage-mcp[clickhouse]'"
+                "（源码安装用 uv sync --extra clickhouse）"
+            ) from e
 
     def search_tables(self, engine: SAEngine, q: str, limit: int = 50) -> list[dict]:
         like = f"%{q}%"

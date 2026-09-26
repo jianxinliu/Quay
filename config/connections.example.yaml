@@ -6,9 +6,10 @@
 projects:
   demo:
     connections:
-      local-sqlite:
+      shop:
         engine: sqlite
-        database: ./data/demo.sqlite3
+        # 首次启动自动生成的示例库（customers / orders），内置示例流程「渠道ROI分析」也跑它
+        database: ./data/demo/shop.sqlite3
         environment: local
 
       dev-mysql:
