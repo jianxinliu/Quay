@@ -2088,14 +2088,16 @@ def _pg_replication_lag(engine: SAEngine, can_see: bool) -> Check:
                      t("checkup.pg.replication_lag.value_none"),
                      t("checkup.pg.replication_lag.msg_none"),
                      dimension="replication")
-    worst = max(float(r[3] or 0) for r in rows)
+    # 查询只有三列（application_name, client_addr, 三段延迟之和），之前取 r[3] 会在真有
+    # 复制从库的 PG 上直接 IndexError
+    worst = max(float(r[2] or 0) for r in rows)
     level: Status = "critical" if worst >= REPL_LAG_CRIT_S else "warn" if worst >= REPL_LAG_WARN_S else "ok"
     return Check(
         "replication_lag", t("checkup.pg.replication_lag.title"), level,
         t("checkup.pg.replication_lag.value", secs=f"{worst:.0f}"),
         t("checkup.pg.replication_lag.msg_warn") if level != "ok"
         else t("checkup.pg.replication_lag.msg_ok"),
-        [t("checkup.pg.replication_lag.detail", name=r[0], addr=r[1], secs=f"{float(r[3] or 0):.0f}")
+        [t("checkup.pg.replication_lag.detail", name=r[0], addr=r[1], secs=f"{float(r[2] or 0):.0f}")
          for r in rows],
         dimension="replication",
     )

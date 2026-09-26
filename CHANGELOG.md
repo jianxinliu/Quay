@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### Added
+- **判定文案按读者选语言**：风险判定理由、审批单错误、「表不存在」、体检报告、流程/分析错误这类与 agent 共享的文案，agent 通过 MCP 看到的恒为英文，管理后台按系统设置「判定文案语言」（`text_language`，默认中文）显示；界面本身仍是中文。agent 创建的审批单落库时按后台语言存风险报告，审批页不会夹英文。
+
 ### Changed
 - 文档：`/mcp` 端点不做 Host 校验作为设计边界写进 SECURITY.md「不在威胁模型内」（本机进程模式下 MCP 端点只服务本机 agent，接入 `DBM_ADMIN_ALLOWED_HOSTS` 之外的网络不是设计用法），不再列为 Known Issue。
 
