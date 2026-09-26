@@ -1,15 +1,18 @@
-r"""把查询结果 dict 渲染成给 agent 的紧凑 TSV 文本块（省 token）。
+r"""Render a query-result dict into a compact TSV text block for the agent (saves tokens).
 
-相比 columnar JSON，TSV 去掉了每行的 [ ] 引号逗号，宽/长结果省 ~25-30% token。
-格式（工具描述里同步说明，agent 据此解析）：
+Compared to columnar JSON, TSV drops the per-row `[ ]`, quotes, and commas, saving
+roughly 25-30% tokens on wide/long results.
+Format (documented in the tool descriptions too, so the agent knows how to parse it):
     # shown=200 truncated=true reason=char_budget elapsed_ms=103 stmt=Select
     # types: number, string, number, string, date
-    # note: 结果被截断……（仅 truncated 时出现）
-    id\tchannel\tamount\tstatus\tcreated_at        ← 首行列名
-    1726...\torganic\t12.5\t\N\t2026-07-01          ← 数据行
-- 制表符分隔；NULL 记作 `\N`（与空字符串区分）；bool 记作 true/false；
-  dict/list 值转紧凑 JSON；值里的 \\ \t \n \r 做反斜杠转义（保证一行一条记录）。
-- 字符预算：逐行累加，超预算即停止加行并标 truncated=char_budget（硬限，防吃爆上下文）。
+    # note: result was truncated... (only present when truncated)
+    id\tchannel\tamount\tstatus\tcreated_at        <- header row (column names)
+    1726...\torganic\t12.5\t\N\t2026-07-01          <- data row
+- Tab-separated; NULL is written as `\N` (distinct from an empty string); bool is written
+  as true/false; dict/list values become compact JSON; `\ \t \n \r` in values are
+  backslash-escaped (guaranteeing one record per line).
+- Character budget: accumulated row by row; once the budget is hit, no more rows are
+  added and the result is marked truncated=char_budget (a hard cap, to protect context).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ _NULL = "\\N"
 
 
 def _cell(v: object) -> str:
-    """把单个值渲染成一个 TSV 字段（转义分隔符，NULL→\\N）。"""
+    """Render a single value as one TSV field (escape separators, NULL -> \\N)."""
     if v is None:
         return _NULL
     if isinstance(v, bool):
@@ -34,9 +37,10 @@ def _cell(v: object) -> str:
 
 
 def render_agent_result(result: dict, char_budget: int) -> str:
-    """把 query/sample_rows 的结果 dict 渲染成紧凑 TSV 文本块。
+    """Render a query/sample_rows result dict into a compact TSV text block.
 
-    char_budget：输出的近似字符上限（≈ token×4）。逐行累加超限即停，标 truncated。
+    char_budget: the approximate character cap for the output (~token x4). Rows are
+    accumulated one by one; once the cap is exceeded, stop and mark truncated.
     """
     cols = result.get("columns") or []
     rows = result.get("rows") or []
@@ -84,8 +88,9 @@ def render_agent_result(result: dict, char_budget: int) -> str:
     if type_line:
         out.append(type_line)
     if truncated:
-        out.append("# note: 结果被截断（" + reason + "）。别重复拉全量——用 WHERE/LIMIT/聚合"
-                   "收窄，或用分析工作台（analysis_*）下推计算后只取小结果。")
+        out.append("# note: result truncated (" + reason + "). Don't re-fetch the full set —"
+                   " narrow it with WHERE/LIMIT/aggregation, or push the computation into"
+                   " the analysis workbench (analysis_*) and bring back only the small result.")
     out.append(col_line)
     out.extend(body)
     return "\n".join(out)

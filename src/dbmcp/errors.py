@@ -52,10 +52,10 @@ class DbErrorInfo:
     hint: str      # 一句「该怎么办」
 
     def as_text(self) -> str:
-        """拼成给 agent 的一行文案：`[kind] 摘要。建议：…`"""
+        """Assemble a one-line message for the agent: `[kind] summary. Hint: ...`"""
         out = f"[{self.kind}] {self.message}"
         if self.hint:
-            out += f" 建议：{self.hint}"
+            out += f" Hint: {self.hint}"
         return out
 
 
@@ -66,40 +66,42 @@ _RULES: tuple[tuple[str, frozenset[int], tuple[str, ...], str], ...] = (
         "sql_syntax_error",
         frozenset({1064, 1149}),              # MySQL
         ("syntax error at or near",           # PostgreSQL
-         "error in your sql syntax",           # MySQL 1064 原文
-         "syntax error",                      # SQLite / 通用
+         "error in your sql syntax",           # MySQL 1064 original wording
+         "syntax error",                      # SQLite / generic
          "code: 62"),                         # ClickHouse SYNTAX_ERROR
-        "SQL 语法有误，请对照目标库方言修正后重试；不要原样重发。",
+        "The SQL has a syntax error; fix it against the target dialect and retry — don't resend it as-is.",
     ),
     (
         "table_not_found",
         frozenset({1146, 1051}),
         ("doesn't exist", "does not exist", "no such table", "code: 60"),
-        "先用 list_tables / describe_table 确认表名与库名（未绑定默认库时用「库名.表名」）。",
+        "Confirm the table and database name with list_tables / describe_table "
+        "(use \"database.table\" when there is no default database bound).",
     ),
     (
         "column_not_found",
         frozenset({1054}),
         ("unknown column", "no such column", "code: 47"),
-        "用 describe_table 确认列名后重写 SQL。",
+        "Confirm the column name with describe_table, then rewrite the SQL.",
     ),
     (
         "unknown_database",
         frozenset({1049}),
         ("unknown database", "database \"", "code: 81"),
-        "用 list_databases 确认库名。",
+        "Confirm the database name with list_databases.",
     ),
     (
         "permission_denied",
         frozenset({1142, 1143, 1044, 1045}),
         ("permission denied", "access denied", "command denied", "code: 497"),
-        "当前账号无此权限。只读账号不能写；写操作请走 execute 的审批流程。",
+        "The current account lacks this permission. The read-only account cannot write; "
+        "use the execute tool's approval flow for writes.",
     ),
     (
         "readonly_violation",
         frozenset({1792}),
         ("read only transaction", "read-only transaction", "readonly mode", "code: 164"),
-        "该连接的只读账号禁止写操作。数据变更请用 execute 工具走审批流程。",
+        "This connection's read-only account is not allowed to write. Use the execute tool's approval flow for data changes.",
     ),
     (
         "query_timeout",
@@ -109,51 +111,52 @@ _RULES: tuple[tuple[str, frozenset[int], tuple[str, ...], str], ...] = (
          "query execution was interrupted",
          "read operation timed out",
          "code: 159"),
-        "查询超时。请用 WHERE 收窄范围、加索引命中的过滤条件，或改用聚合/分析工作台下推计算。",
+        "The query timed out. Narrow it with a WHERE clause that hits an index, or switch "
+        "to aggregation / push the computation into the analysis workbench.",
     ),
     (
         "query_canceled",
         frozenset(),
-        ("canceling statement due to user request",   # PG：pg_cancel_backend（查询台取消/管理员中断）
+        ("canceling statement due to user request",   # PG: pg_cancel_backend (console cancel / admin interrupt)
          "query was cancelled"),
-        "查询被取消（人工取消或管理员中断），不是 SQL 本身的问题；需要结果可重发。",
+        "The query was canceled (manually or by an administrator), not a SQL problem; resend it if you still need the result.",
     ),
     (
         "deadlock",
         frozenset({1213, 1614}),
         ("deadlock",),
-        "发生死锁，可稍后重试；反复出现请缩小事务范围。",
+        "A deadlock occurred; retry later. If it keeps happening, narrow the transaction scope.",
     ),
     (
         "lock_timeout",
         frozenset({1205}),
         ("lock wait timeout", "could not obtain lock"),
-        "等锁超时，稍后重试；长事务占锁时需人工介入。",
+        "Timed out waiting for a lock; retry later. If a long-running transaction is holding the lock, it needs human intervention.",
     ),
     (
         "duplicate_key",
         frozenset({1062}),
         ("duplicate entry", "duplicate key value"),
-        "唯一键冲突，检查待写入数据或改用 UPSERT 语义。",
+        "Unique-key conflict; check the data being written or switch to UPSERT semantics.",
     ),
     (
         "constraint_violation",
         frozenset({1451, 1452, 1048}),
         ("foreign key constraint", "violates foreign key", "cannot be null",
          "violates not-null"),
-        "违反约束（外键/非空）。先确认关联数据与必填列。",
+        "A constraint was violated (foreign key / not-null). Check the related data and required columns first.",
     ),
     (
         "data_too_long",
         frozenset({1406, 1264}),
         ("data too long", "out of range value", "value too long"),
-        "值超出列定义范围，检查数据或列类型。",
+        "The value exceeds the column definition; check the data or the column type.",
     ),
     (
         "result_too_large",
         frozenset(),
         ("result set too large", "memory limit", "code: 241"),
-        "结果集/内存超限。用聚合或 LIMIT 收窄，或改用分析工作台。",
+        "Result set / memory limit exceeded. Narrow it with aggregation or LIMIT, or switch to the analysis workbench.",
     ),
 )
 
@@ -303,5 +306,5 @@ def translate_db_error(exc: BaseException) -> DbErrorInfo:
             hint = h
             break
     if kind == "db_error":
-        hint = "这是数据库返回的错误，重发相同 SQL 通常仍会失败；请据错误信息调整。"
+        hint = "This is an error returned by the database; resending the same SQL will usually fail again — adjust it based on the message."
     return DbErrorInfo(kind=kind, message=message, hint=hint)
