@@ -92,6 +92,28 @@ def _open_approvals(data_dir: str) -> ApprovalStore:
     return ApprovalStore(db)
 
 
+def _startup_banner(args: argparse.Namespace, config, token_note: str) -> str:  # noqa: ANN001
+    """启动时打给人看的一段话：版本、后台/MCP 地址、配置与数据在哪。
+
+    替代 FastMCP 自带的横幅（那是它自己的品牌与升级提醒），三种认证分支都打印，
+    否则设置了 DBM_ADMIN_TOKEN 的正常启动反而什么都不说。
+    """
+    from . import __version__
+
+    host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
+    n_conn = sum(len(p.connections) for p in config.projects.values())
+    lines = [
+        f"Quay {__version__}",
+        f"  管理后台  http://{host}:{args.port}/admin",
+        f"  MCP 端点  http://{host}:{args.port}/mcp",
+        f"  连接配置  {Path(args.config).resolve()}（{n_conn} 条连接）",
+        f"  数据目录  {Path(args.data_dir).resolve()}",
+    ]
+    if token_note:
+        lines.append("  " + token_note)
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
     from .inbox import InboxNotifier, InboxStore
     from .notify import NotifierRouter, build_from_settings
@@ -135,21 +157,23 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 
     try:
         if args.stdio:
-            mcp.run(transport="stdio")
+            mcp.run(transport="stdio", show_banner=False)
         else:
             from .admin import mount_admin
 
             admin_token = os.environ.get("DBM_ADMIN_TOKEN") or secrets.token_urlsafe(24)
             if args.no_auth:
-                print(f"\n[Quay] --no-auth 模式：管理后台无需登录。**仅供本机测试**\n"
-                      f"    http://{args.host}:{args.port}/admin/approvals\n", file=sys.stderr)
+                token_note = "登录      --no-auth 模式，后台无需登录（仅供本机测试）"
             elif not os.environ.get("DBM_ADMIN_TOKEN"):
-                # 未设置则一次性生成，打印到 stderr 方便本地登录；生产应显式注入
-                print(f"\n[Quay] 未设置 DBM_ADMIN_TOKEN，本次生成管理 token：\n"
-                      f"    {admin_token}\n"
-                      f"    登录 http://{args.host}:{args.port}/admin/login\n", file=sys.stderr)
+                # 未设置则一次性生成，打印到 stderr 方便本地登录；常驻部署应显式注入
+                token_note = f"登录 token  {admin_token}（本次随机生成；常驻请设置 DBM_ADMIN_TOKEN）"
+            else:
+                token_note = "登录 token  来自 DBM_ADMIN_TOKEN"
+            print(_startup_banner(args, config, token_note), file=sys.stderr)
             mount_admin(mcp, service, admin_token, no_auth=args.no_auth)
-            mcp.run(transport="http", host=args.host, port=args.port)
+            # show_banner=False：不打 FastMCP 的品牌横幅，也就不跑它的 PyPI 版本自检——
+            # 那次自检在带 SOCKS 代理的 shell 里会因缺 socksio 直接把进程拖死（见 CLAUDE.md）
+            mcp.run(transport="http", host=args.host, port=args.port, show_banner=False)
     finally:
         service.close()
 

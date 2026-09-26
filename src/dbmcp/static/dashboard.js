@@ -24,7 +24,7 @@
 
   /* 连接表排序。默认按状态倒序——**异常的排最前**，看板上先该看见的就是它们；
      同状态内按名字排，保证顺序稳定（每 5s 重画一次，顺序抖动会很刺眼）。 */
-  const STATE_RANK = { ok: 0, unavailable: 1, exhausted: 2 };
+  const STATE_RANK = { unprobed: 0, ok: 1, unavailable: 2, exhausted: 3 };
   const CONN_COLS = [
     { key: "name", label: "连接", get: (i) => `${i.project}/${i.connection}` },
     { key: "engine", label: "引擎", get: (i) => i.engine },
@@ -320,9 +320,7 @@
       + " · 已运行 " + dur(d.uptime_s * 1000);
 
     document.getElementById("dash-tiles").innerHTML = [
-      tile("已配置连接", num(c.configured),
-           c.unhealthy ? `<b>${c.unhealthy}</b> 条连接异常` : "全部正常",
-           c.unhealthy ? "bad" : ""),
+      tile("已配置连接", num(c.configured), connTileSub(c), c.unhealthy ? "bad" : ""),
       tile("此刻占用连接", num(c.checked_out),
            `池内 ${num(c.pooled_engines)} 个引擎`),
       tile("正在执行", num(d.live.count),
@@ -345,6 +343,7 @@
     document.getElementById("dash-bytes-total").textContent = bytes(t.bytes_read);
 
     renderLive();
+    renderOnboard(c);
     renderConnections(c.items);
     renderSessions(d.sessions, d.session_days);
     renderBudgets(d.budgets || []);
@@ -418,6 +417,29 @@
     });
   }
 
+  /* 「全部正常」只有在每条连接都真的连过时才成立；从未触达过的连接是「未探测」，
+     新装实例上把示例配置里那几台不存在的库显示成正常，是首屏最大的误导。 */
+  function connTileSub(c) {
+    if (c.unhealthy) return `<b>${c.unhealthy}</b> 条连接异常`;
+    if (!c.configured) return "尚未配置";
+    if (c.unprobed === c.configured) return "均未探测";
+    if (c.unprobed) return `${c.configured - c.unprobed} 条正常 · ${c.unprobed} 条未探测`;
+    return "全部正常";
+  }
+
+  function renderOnboard(c) {
+    const box = document.getElementById("dash-onboard");
+    if (c.configured) { box.style.display = "none"; return; }
+    box.style.display = "";
+    box.innerHTML = "<h3>开始使用</h3>"
+      + "<ol>"
+      + '<li><a href="/admin/settings?tab=connections">新建连接</a>——账号密码进系统钥匙串，配置文件只存引用。</li>'
+      + '<li>在<a href="/admin/sql">查询台</a>跑第一条 SQL。</li>'
+      + '<li>把 MCP 端点 <code>/mcp</code> 接给 agent（README「接入 Agent」）；它的写操作会出现在'
+      + '<a href="/admin/approvals">审批中心</a>。</li>'
+      + "</ol>";
+  }
+
   function renderConnections(items) {
     const box = document.getElementById("dash-conns");
     if (!items.length) {
@@ -425,7 +447,7 @@
         + '<a href="/admin/settings?tab=connections">去添加 →</a></div>';
       return;
     }
-    const stateText = { ok: "正常", unavailable: "不可用", exhausted: "需人介入" };
+    const stateText = { ok: "正常", unprobed: "未探测", unavailable: "不可用", exhausted: "需人介入" };
     const arrow = (k) => (connSort.key === k
       ? `<i class="sarrow ${connSort.dir}"></i>` : '<i class="sarrow"></i>');
     const head = CONN_COLS.map((c) =>
@@ -438,7 +460,7 @@
       + sortConnections(items).map((i) => {
         const state = i.state || "ok";
         let note = "—";
-        if (state !== "ok") {
+        if (state !== "ok" && state !== "unprobed") {
           note = `<div class="muted">${esc(i.last_error || "")}</div>`
             + (i.retry_in_s ? `<div class="muted">约 ${i.retry_in_s}s 后自动重试</div>` : "");
         }

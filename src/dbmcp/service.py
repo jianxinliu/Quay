@@ -3337,7 +3337,9 @@ class DbmService:
                     "host": cfg.host,
                     "database": cfg.database,
                     "has_writer": cfg.writer is not None,
-                    "state": h.state if h else "ok",
+                    # 从未触达过的连接是「未探测」，不是「正常」——健康位只在第一次
+                    # 成功/失败后才有记录
+                    "state": h.state if h else "unprobed",
                     "fail_count": h.fail_count if h else 0,
                     "last_error": h.last_error if h else "",
                     # 距下次自动重连还有多少秒（健康位用单调时钟存的绝对时刻）
@@ -3354,7 +3356,8 @@ class DbmService:
             "configured": len(items),
             "by_engine": by_engine,
             "by_environment": by_env,
-            "unhealthy": sum(1 for i in items if i["state"] != "ok"),
+            "unhealthy": sum(1 for i in items if i["state"] not in ("ok", "unprobed")),
+            "unprobed": sum(1 for i in items if i["state"] == "unprobed"),
             "pooled_engines": len(pooled),
             "checked_out": sum(i["checked_out"] for i in items),
             "items": items,

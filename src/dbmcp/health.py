@@ -63,6 +63,7 @@ class Health:
     last_change_at: float = 0.0     # 供通知去重用
     probing: bool = False           # 半开：已放行一个探路请求（或后台线程正在探测）
     probe_started_at: float = 0.0   # 探路开始时刻，用于租约过期判定
+    last_ok_at: float = 0.0         # 最近一次成功触达（0 = 从未成功过）
     _thread: threading.Thread | None = field(default=None, repr=False)
 
 
@@ -124,7 +125,7 @@ class HealthMonitor:
             return Health(state=h.state, fail_count=h.fail_count,
                           next_retry_at=h.next_retry_at, last_error=h.last_error,
                           last_change_at=h.last_change_at, probing=h.probing,
-                          probe_started_at=h.probe_started_at)
+                          probe_started_at=h.probe_started_at, last_ok_at=h.last_ok_at)
 
     def snapshot(self) -> dict[tuple[str, str], Health]:
         """全量健康快照（供管理后台/查询台渲染状态灯）。只含非 ok 的记录才有意义，但全给。"""
@@ -132,22 +133,30 @@ class HealthMonitor:
             return {
                 k: Health(state=h.state, fail_count=h.fail_count,
                           next_retry_at=h.next_retry_at, last_error=h.last_error,
-                          last_change_at=h.last_change_at, probing=h.probing)
+                          last_change_at=h.last_change_at, probing=h.probing,
+                          last_ok_at=h.last_ok_at)
                 for k, h in self._entries.items()
             }
 
     def mark_ok(self, project: str, connection: str) -> None:
         """执行成功后调：清失败计数并转 ok。"""
         with self._lock:
+            now = time.monotonic()
             h = self._entries.get((project, connection))
-            if h is None or (h.state == "ok" and not h.probing):
+            if h is None:
+                # 第一次成功也要记下来：看板据此区分「正常」与「从没连过」（unprobed）——
+                # 一条从未触达的连接不能显示成正常，那只是「还没失败过」。
+                self._entries[(project, connection)] = Health(last_ok_at=now)
+                return
+            h.last_ok_at = now
+            if h.state == "ok" and not h.probing:
                 return
             h.state = "ok"
             h.fail_count = 0
             h.last_error = ""
             h.next_retry_at = 0.0
             h.probing = False
-            h.last_change_at = time.monotonic()
+            h.last_change_at = now
 
     def mark_failed(self, project: str, connection: str, error: str) -> None:
         """捕到连接级异常时调：进入 unavailable / 推进退避，并确保后台重连线程在跑。"""

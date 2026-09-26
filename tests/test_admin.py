@@ -386,7 +386,7 @@ def test_index_redirects(client):
     tc, _ = client
     resp = tc.get("/admin", follow_redirects=False)
     assert resp.status_code in (307, 302, 303)
-    assert "/admin/approvals" in resp.headers["location"]
+    assert "/admin/dashboard" in resp.headers["location"]
 
 
 class TestSshIdentitiesAndHops:

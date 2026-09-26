@@ -75,6 +75,14 @@ th.sortable:hover .sarrow{border-bottom-color:var(--faint)}
   max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .dot-ok{background:#16794f} .dot-unavailable{background:#d97706} .dot-exhausted{background:#c0392b}
+.dot-unprobed{background:var(--faint)}
+/* 首次使用引导：只在一条连接都没有时出现 */
+.dash-onboard{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);
+  border-radius:12px;padding:14px 18px 10px;margin-bottom:18px}
+.dash-onboard h3{margin:0 0 6px;font-size:15px}
+.dash-onboard ol{margin:0;padding-left:20px;font-size:13px;color:var(--muted);line-height:1.8}
+.dash-onboard a{color:var(--accent-ink);font-weight:500}
+.dash-onboard code{font-family:var(--mono);font-size:12px}
 /* 排行条：长度即占比，一眼看出谁是大头，不必读数字 */
 .rank{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;margin-bottom:9px}
 .rank .nm{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

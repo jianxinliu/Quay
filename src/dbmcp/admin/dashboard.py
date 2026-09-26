@@ -34,6 +34,7 @@ def _dashboard_body() -> str:
   <span class="dash-meta" id="dash-updated">加载中…</span>
  </div>
  <div class="errbar" id="dash-err" style="display:none"></div>
+ <div class="dash-onboard" id="dash-onboard" style="display:none"></div>
  <div class="dash-tiles" id="dash-tiles"></div>
  <div class="dash-charts">
   <div class="card">
@@ -71,7 +72,8 @@ def mount(ctx: AdminContext) -> None:
     @mcp.custom_route("/admin", methods=["GET"])
     @guard
     async def _index(_req: Request) -> RedirectResponse:
-        return RedirectResponse(url="/admin/approvals")
+        # 首屏是看板：新装实例上它有引导，而审批中心在没有 agent 提交前只是一张空表
+        return RedirectResponse(url="/admin/dashboard")
 
     @mcp.custom_route("/admin/dashboard", methods=["GET"])
     @guard
