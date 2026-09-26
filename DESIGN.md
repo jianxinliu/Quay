@@ -235,6 +235,10 @@ resources：`dbm://projects/...` 暴露连接元数据（不含密钥）。
 
 ## 十四、待办 / 未做（有意推迟）
 
+### 产品化（对照 DBX，不改品类）
+
+同期桌面客户端 [DBX](https://github.com/t8y2/dbx) 的完善感主要来自安装路径、工作流文档、MCP 策略页和从 DataGrip 迁入，不是引擎数量。Quay 继续做「人和 agent 共用 + 写操作审批」，不走 90 库 / 插件市场 / 用确认框替代审批单。具体对照与建议顺序见 **[LEARN_FROM_DBX.md](LEARN_FROM_DBX.md)**。
+
 ### Redis Cluster（集群）支持 — 待有真实集群环境再做
 
 当前 Redis 实现只覆盖**单机 / 主从 / 哨兵**（`redis.Redis(host, port, db=...)`）。集群模式与现有实现有**结构性冲突**，不是改连接串就行，故推迟到有真实集群 e2e 环境后再做（红线：不写无法验证的集成代码）。

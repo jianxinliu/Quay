@@ -279,7 +279,7 @@ Deployment is a plain local process; Docker support was deliberately left out. O
 |---|---|
 | Using the backend | **[USER_GUIDE.md](USER_GUIDE.md)** (Chinese) — query console / Redis / analysis / approvals |
 | An agent being integrated (or the person writing its prompts) | This README, [Connecting agents](#connecting-agents) (Claude Code / Codex / Cursor / DeepSeek Harness, …) · **[AGENT_GUIDE.md](AGENT_GUIDE.md)** (Chinese) for the tool map and approval flow |
-| Working on the code | **[DESIGN.md](DESIGN.md)** architecture & security · **[ANALYSIS.md](ANALYSIS.md)** analysis workbench · **[CONTRIBUTING.md](CONTRIBUTING.md)** |
+| Working on the code | **[DESIGN.md](DESIGN.md)** architecture & security · **[ANALYSIS.md](ANALYSIS.md)** analysis workbench · **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[LEARN_FROM_DBX.md](LEARN_FROM_DBX.md)** product notes vs DBX |
 | Found a vulnerability | **[SECURITY.md](SECURITY.md)** — please don't open a public issue |
 
 ## Development
