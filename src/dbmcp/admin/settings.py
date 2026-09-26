@@ -283,6 +283,11 @@ def _settings_notify_body(s: dict) -> str:
         + _text_setting("通知里的跳转地址", "admin_base_url", s, "http://127.0.0.1:8100",
                         "通知里「前往处理」用的 URL 前缀。走反向代理或 Docker 时填对外地址，"
                         "本机运行保持默认即可。", wide=True)
+        + _bool_setting("通知里附一次性审批链接", "notify_action_links", s, False,
+                        "开启", "关闭",
+                        "外部渠道的通知多带一个链接，点开就能批准或拒绝这一张单，不用登录后台。"
+                        "链接用一次即作废、随审批单一起过期；令牌会经过你选的通知服务商，"
+                        "且只有「跳转地址」能从收通知的设备访问时才可用。")
         + _bool_setting("macOS 本地通知", "notify_macos_enabled", s, False,
                         "开启", "关闭", macos_hint))
 

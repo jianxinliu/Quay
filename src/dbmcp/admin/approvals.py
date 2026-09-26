@@ -6,11 +6,51 @@ from functools import partial
 
 import anyio.to_thread
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse
+from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from ..approvals import ApprovalError
-from .common import _STATUS_COLOR, _badge, _env_badge, _esc, _fmt_ts, _page, _pagehead
+from .common import (
+    _FAVICON_LINK,
+    _STATUS_COLOR,
+    _badge,
+    _env_badge,
+    _esc,
+    _fmt_ts,
+    _local_request_ok,
+    _page,
+    _pagehead,
+)
 from .context import AdminContext
+
+# 一次性审批页上 SQL / 计划的展示上限：这一页是在手机上看的，超出的去后台审批页看全文
+_ACT_SQL_MAX_LINES = 30
+_ACT_SQL_MAX_CHARS = 2000
+
+
+def _act_page(title: str, inner: str, theme: str) -> str:
+    """通知链接落地页：没有侧栏（点进来的人没登录，导航到哪都是登录页），
+    只有一张卡片；样式复用后台的 chrome/doc 两份 CSS 与主题。"""
+    theme_cls = "theme-light" if theme == "light" else "theme-dark"
+    return f"""<!doctype html>
+<html lang="zh" class="{theme_cls}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_esc(title)} · Quay</title>{_FAVICON_LINK}
+<link rel="stylesheet" href="/admin/static/admin-chrome.css">
+<link rel="stylesheet" href="/admin/static/admin-doc.css">
+<style>main{{max-width:720px;margin:0 auto;padding:32px 20px}} .act-btns{{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}}
+.act-btns form{{display:inline}} .act-note{{width:100%;margin-top:10px}}</style>
+</head><body><main>{inner}</main></body></html>"""
+
+
+def _clip_sql(sql: str) -> tuple[str, bool]:
+    lines = sql.splitlines()
+    clipped = False
+    if len(lines) > _ACT_SQL_MAX_LINES:
+        lines, clipped = lines[:_ACT_SQL_MAX_LINES], True
+    text = "\n".join(lines)
+    if len(text) > _ACT_SQL_MAX_CHARS:
+        text, clipped = text[:_ACT_SQL_MAX_CHARS], True
+    return text, clipped
 
 _LEVEL_COLOR = {
     "CRITICAL": "#b00020",
@@ -241,6 +281,87 @@ def mount(ctx: AdminContext) -> None:
                 status_code=500,
             )
         return RedirectResponse(url=f"/admin/approvals/{change_id}", status_code=303)
+
+    # ---- 通知里的一次性审批链接：不走 cookie 认证（收通知的手机上没登录），
+    #      靠审批单上的一次性令牌鉴权；Host/Origin 校验照旧，GET 只展示、POST 才决策 ----
+
+    @mcp.custom_route("/admin/approvals/{change_id:int}/act", methods=["GET"])
+    async def _act_form(req: Request) -> Response:
+        if not _local_request_ok(req):
+            return Response("forbidden: request must originate from an allowed host", status_code=403)
+        change_id = req.path_params["change_id"]
+        token = str(req.query_params.get("t") or "")
+        theme = _theme()
+        if not service.approvals.action_token_matches(change_id, token):
+            return HTMLResponse(_act_page("链接无效", "<div class='card'><h2>链接无效</h2>"
+                                          "<p class='muted'>这个审批链接不存在、已经用过，或审批单已被处理。"
+                                          "请登录后台查看审批中心。</p></div>", theme), status_code=403)
+        c = service.approvals.get(change_id)
+        st = c.effective_status()
+        if st != "pending":
+            return HTMLResponse(_act_page("审批单已处理", f"<div class='card'><h2>审批单 #{c.id} 已处理</h2>"
+                                          f"<p>当前状态：{_badge(st, _STATUS_COLOR)}</p></div>", theme))
+        sql, clipped = _clip_sql(c.sql)
+        risk = c.risk_report or {}
+        reasons = "".join(f"<li>{_esc(r)}</li>" for r in risk.get("reasons", [])[:6])
+        rollback = (f"<div class='sec-title'>回滚参考</div><pre>{_esc(c.rollback_note)}</pre>"
+                    if c.rollback_note else "")
+        inner = f"""<div class='card'>
+ <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">{_badge(c.risk_level, _LEVEL_COLOR)} <span class="tag">{_esc(c.engine)}</span></div>
+ <h2>审批单 #{c.id}</h2>
+ <dl class="kv">
+  <dt>连接</dt><dd><code>{_esc(c.project)}/{_esc(c.connection)}</code> · {_env_badge(c.environment)}</dd>{_db_row(c)}
+  <dt>提交 agent</dt><dd>{_esc(c.agent)}</dd>
+  <dt>有效期至</dt><dd>{_esc(_fmt_ts(c.expires_at))}</dd>
+  <dt>变更原因</dt><dd>{_esc(c.reason) or '—'}</dd>
+ </dl>
+ <div class="sec-title">{"同步计划" if c.kind == "sync" else "SQL"}</div><pre>{_esc(sql)}</pre>
+ {"<p class='muted'>已截断，完整内容登录后台在审批页查看。</p>" if clipped else ""}
+ {"<div class='sec-title'>判定依据</div><ul>" + reasons + "</ul>" if reasons else ""}
+ {rollback}
+ <div class="act-btns">
+  <form method='post' action='/admin/approvals/{c.id}/act'>
+   <input type='hidden' name='t' value='{_esc(token)}'><input type='hidden' name='decision' value='approve'>
+   <button class='btn btn-approve' type='submit'>批准（由 agent 执行）</button>
+  </form>
+  <form method='post' action='/admin/approvals/{c.id}/act'>
+   <input type='hidden' name='t' value='{_esc(token)}'><input type='hidden' name='decision' value='reject'>
+   <input class='act-note' name='note' placeholder='拒绝理由（可选，会返回给 agent）'>
+   <button class='btn btn-reject' type='submit' style='margin-top:8px'>拒绝</button>
+  </form>
+ </div>
+ <p class="muted" style="margin-top:14px">这个链接只对这一张审批单有效，点过一次即作废。</p>
+</div>"""
+        return HTMLResponse(_act_page(f"审批单 #{c.id}", inner, theme))
+
+    @mcp.custom_route("/admin/approvals/{change_id:int}/act", methods=["POST"])
+    async def _act_decide(req: Request) -> Response:
+        if not _local_request_ok(req):
+            return Response("forbidden: request must originate from an allowed host", status_code=403)
+        change_id = req.path_params["change_id"]
+        form = await req.form()
+        token = str(form.get("t") or "")
+        decision = str(form.get("decision") or "")
+        note = str(form.get("note") or "")
+        theme = _theme()
+        # 先作废令牌再决策：并发重放同一链接只有一次能走到这里
+        if decision not in ("approve", "reject") or not service.approvals.redeem_action_token(change_id, token):
+            return HTMLResponse(_act_page("链接无效", "<div class='card'><h2>链接无效</h2>"
+                                          "<p class='muted'>这个审批链接已经用过、已过期，或审批单已被处理。</p></div>",
+                                          theme), status_code=403)
+        by = "notify-link"
+        try:
+            if decision == "approve":
+                c = service.approve_change(change_id, decided_by=by, note=note or "经通知里的一次性链接批准")
+                msg = (f"<h2>已批准审批单 #{c.id}</h2><p>等待中的 agent 会自动执行审批单里存的"
+                       f"{'计划' if c.kind == 'sync' else 'SQL'}；若它已超时退出，会在下次续等时拿到结果。</p>")
+            else:
+                c = service.reject_change(change_id, decided_by=by, note=note or "经通知里的一次性链接拒绝")
+                msg = f"<h2>已拒绝审批单 #{c.id}</h2><p>拒绝理由会返回给 agent。</p>"
+        except ApprovalError as e:
+            return HTMLResponse(_act_page("无法决策", f"<div class='card'><h2>无法决策</h2><p>{_esc(e)}</p></div>",
+                                          theme), status_code=409)
+        return HTMLResponse(_act_page(f"审批单 #{change_id}", f"<div class='card'>{msg}</div>", theme))
 
     @mcp.custom_route("/admin/approvals/{change_id:int}/reject", methods=["POST"])
     @guard

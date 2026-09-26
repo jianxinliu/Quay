@@ -1903,6 +1903,7 @@ class DbmService:
         from .notify import approval_deeplink  # noqa: PLC0415
         base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
         approval_url = approval_deeplink(base_url, change.id)
+        action_url = self._issue_action_link(change.id, base_url)
         # 需要人为介入 → 主动发通知（安静即正常：不通知的话可能长时间没人看到）
         # meta.deeplink 让各渠道适配跳转：Bark→url 字段、企微→markdown 链接、
         # 飞书→post 富文本 a 节点、macOS→body 附 URL 文本、站内 inbox→前端点击
@@ -1915,7 +1916,8 @@ class DbmService:
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": project, "connection": connection,
                       "risk_level": report.level,
-                      "deeplink": approval_url},
+                      "deeplink": approval_url,
+                      **({"action_url": action_url} if action_url else {})},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify approval_created failed")
@@ -2313,6 +2315,7 @@ class DbmService:
         from .notify import approval_deeplink  # noqa: PLC0415
         base_url = str(self._setting("admin_base_url") or "http://127.0.0.1:8100")
         approval_url = approval_deeplink(base_url, change.id)
+        action_url = self._issue_action_link(change.id, base_url)
         try:
             self.notifier.send(
                 title=f"新同步审批单 #{change.id} · → {spec.target_project}/{spec.target_connection}",
@@ -2320,7 +2323,8 @@ class DbmService:
                       f"{spec.target_table}\n最多 {spec.limit} 行 · 结构 {spec.ddl} · 数据 {spec.data}"),
                 meta={"kind": "approval_created", "change_id": change.id,
                       "project": spec.target_project, "connection": spec.target_connection,
-                      "risk_level": plan["risk"]["level"], "deeplink": approval_url},
+                      "risk_level": plan["risk"]["level"], "deeplink": approval_url,
+                      **({"action_url": action_url} if action_url else {})},
             )
         except Exception:  # noqa: BLE001
             logger.exception("notify sync approval_created failed")
@@ -2575,6 +2579,19 @@ class DbmService:
 
     def _setting(self, key: str):
         return self.get_settings().get(key)
+
+    def _issue_action_link(self, change_id: int, base_url: str) -> str | None:
+        """通知里的一次性审批链接（设置 notify_action_links 开且选了外部渠道才发）。
+
+        令牌只随外部通知出去；后台铃铛/macOS 通知本就在已登录环境里，不需要它。
+        """
+        if not self._setting("notify_action_links"):
+            return None
+        if str(self._setting("notify_primary") or "none").lower() == "none":
+            return None
+        from .notify import build_admin_deeplink  # noqa: PLC0415
+        token = self.approvals.issue_action_token(change_id)
+        return build_admin_deeplink(base_url, f"/admin/approvals/{change_id}/act?t={token}")
 
     def approval_wait_seconds(self) -> int:
         """execute 首提被拒后，服务端默认等待人工决策的秒数（0 = 不等待）。"""

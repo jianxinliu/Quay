@@ -89,43 +89,51 @@ def _escape_applescript(s: str) -> str:
 
 
 def build_bark_payload(title: str, body: str, url: str | None = None,
-                       group: str = "Quay") -> dict:
+                       group: str = "Quay", action_url: str | None = None) -> dict:
     """Bark（iOS 推送）payload。POST 到 {server}/{device_key}。
 
-    url 若给出，Bark 点击通知会打开该 URL（Bark 官方 `url` 字段）。
+    url 若给出，Bark 点击通知会打开该 URL（Bark 官方 `url` 字段）。Bark 只有一个可点的
+    URL：有一次性审批链接时优先用它（那一页本身链回完整审批页）。
     """
     p = {"title": title, "body": body, "group": group}
-    if url:
-        p["url"] = url
+    if action_url or url:
+        p["url"] = action_url or url
     return p
 
 
-def build_wecom_payload(title: str, body: str, url: str | None = None) -> dict:
+def build_wecom_payload(title: str, body: str, url: str | None = None,
+                        action_url: str | None = None) -> dict:
     """企业微信群机器人 payload。
 
     有 URL 时用 markdown 类型嵌入超链接；无则退回 text 类型（更兼容）。
     """
-    if url:
+    if url or action_url:
+        links = "".join(
+            [f"\n\n[前往处理]({url})" if url else "",
+             f"\n[一键批准 / 拒绝]({action_url})" if action_url else ""])
         return {
             "msgtype": "markdown",
-            "markdown": {"content": f"**{title}**\n\n{body}\n\n[前往处理]({url})"},
+            "markdown": {"content": f"**{title}**\n\n{body}{links}"},
         }
     return {"msgtype": "text", "text": {"content": f"{title}\n{body}"}}
 
 
-def build_feishu_payload(title: str, body: str, url: str | None = None) -> dict:
+def build_feishu_payload(title: str, body: str, url: str | None = None,
+                         action_url: str | None = None) -> dict:
     """飞书自定义机器人 payload。
 
     有 URL 时用 post 富文本类型嵌入超链接；无则退回 text 类型。
     """
-    if url:
+    if url or action_url:
+        nodes: list[dict] = [{"tag": "text", "text": body}]
+        if url:
+            nodes += [{"tag": "text", "text": "\n"}, {"tag": "a", "text": "前往处理", "href": url}]
+        if action_url:
+            nodes += [{"tag": "text", "text": "\n"},
+                      {"tag": "a", "text": "一键批准 / 拒绝", "href": action_url}]
         return {
             "msg_type": "post",
-            "content": {"post": {"zh_cn": {"title": title, "content": [[
-                {"tag": "text", "text": body},
-                {"tag": "text", "text": "\n"},
-                {"tag": "a", "text": "前往处理", "href": url},
-            ]]}}},
+            "content": {"post": {"zh_cn": {"title": title, "content": [nodes]}}},
         }
     return {"msg_type": "text", "content": {"text": f"{title}\n{body}"}}
 
@@ -195,19 +203,21 @@ class WebhookNotifier(Notifier):
 
     def send(self, title: str, body: str, meta: dict | None = None) -> None:
         deeplink = (meta or {}).get("deeplink") or None
+        action_url = (meta or {}).get("action_url") or None
         threading.Thread(
-            target=self._send_sync, args=(title, body, deeplink),
+            target=self._send_sync, args=(title, body, deeplink, action_url),
             daemon=True, name=f"dbm-notify-{self._provider}",
         ).start()
 
-    def _send_sync(self, title: str, body: str, deeplink: str | None = None) -> None:
+    def _send_sync(self, title: str, body: str, deeplink: str | None = None,
+                   action_url: str | None = None) -> None:
         url_fn, payload_fn = _WEBHOOK_PROVIDERS[self._provider]
         try:
             url = url_fn(self._config)
         except ValueError as e:
             logger.warning("%s webhook 未生效: %s", self._provider, e)
             return
-        payload = payload_fn(title, body, url=deeplink) if deeplink else payload_fn(title, body)
+        payload = payload_fn(title, body, url=deeplink, action_url=action_url)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             url, data=data, method="POST",
