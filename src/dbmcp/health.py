@@ -102,16 +102,19 @@ class HealthMonitor:
             wait = max(0, int(h.next_retry_at - now))
             if h.state == "exhausted":
                 raise ConnectionUnavailable(
-                    f"连接 {project}/{connection} 持续不可用（已连续 {h.fail_count} 次重连失败，"
-                    f"仍在每 {BACKOFF_STEPS_S[-1]} 秒自动重试，约 {wait} 秒后再试）。"
-                    f"长时间不恢复通常需要人工检查网络/账号/隧道配置。"
-                    f"最近错误：{h.last_error or '未知'}",
+                    f"Connection {project}/{connection} has been unavailable for a while "
+                    f"({h.fail_count} consecutive reconnect failures), still auto-retrying "
+                    f"every {BACKOFF_STEPS_S[-1]}s (try again in about {wait}s). "
+                    f"If it doesn't recover soon, a human usually needs to check the "
+                    f"network/credentials/tunnel configuration. "
+                    f"Last error: {h.last_error or 'unknown'}",
                     retry_after_s=max(wait, 5), state="exhausted",
                 )
-            # unavailable：告诉 agent 大约多久后可以重试
+            # unavailable: tell the agent roughly how long until it can retry
             raise ConnectionUnavailable(
-                f"连接 {project}/{connection} 暂时不可用，后台正在自动重连"
-                f"（约 {wait} 秒后重试）。请稍后再试。最近错误：{h.last_error or '未知'}",
+                f"Connection {project}/{connection} is temporarily unavailable; the "
+                f"backend is auto-reconnecting (try again in about {wait}s). "
+                f"Last error: {h.last_error or 'unknown'}",
                 retry_after_s=max(wait, 5), state="unavailable",
             )
 

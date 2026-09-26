@@ -68,11 +68,11 @@ class TestValidateSpec:
 
     @pytest.mark.parametrize("table", ['users"; DROP TABLE x --', "a.b", "has space", ""])
     def test_rejects_non_identifier_table(self, table):
-        with pytest.raises(SyncError, match="不是合法标识符"):
+        with pytest.raises(SyncError, match="not a valid identifier"):
             validate_spec(_spec(source_table=table))
 
     def test_rejects_self_sync(self):
-        with pytest.raises(SyncError, match="同一张表"):
+        with pytest.raises(SyncError, match="same table"):
             validate_spec(_spec(target_connection="prod"))
 
     def test_same_table_name_on_other_connection_is_fine(self):
@@ -129,8 +129,8 @@ class TestRewriteDdl:
         assert "BIGINT" in ddl
         assert 'PRIMARY KEY ("id")' in ddl
         assert "idx_channel" not in ddl        # 二级索引不跨引擎同步
-        assert any("近似 DDL" in w for w in warns)
-        assert any("二级索引" in w for w in warns)
+        assert any("approximate DDL" in w for w in warns)
+        assert any("secondary index" in w for w in warns)
 
     def test_cross_engine_result_is_executable_on_sqlite(self):
         """转写不是「看着像」就行——MySQL 的 `UNIQUE KEY 名字 (列)` 直译过来 SQLite 不认。"""
@@ -146,7 +146,7 @@ class TestRewriteDdl:
         ddl, warns = rewrite_ddl(src, "sqlite", "sqlite", "t", "t2")
         assert ddl.startswith("CREATE TABLE")
         assert "t2" in ddl
-        assert any("其它语句" in w for w in warns)
+        assert any("other statements" in w for w in warns)
 
     def test_rejects_non_create_table(self):
         with pytest.raises(SyncError):
@@ -170,7 +170,7 @@ class TestAssessPlan:
 
     def test_prod_source_warns_about_data_copy(self):
         report = assess_plan(_spec(), "local", "prod")
-        assert any("生产数据副本" in w for w in report["warnings"])
+        assert any("copy of production data" in w for w in report["warnings"])
 
 
 # ---------------------------------------------------------------- 服务层
@@ -288,11 +288,11 @@ class TestSyncGuards:
     def test_rejects_prod_target(self, service):
         spec = _spec(source_connection="local", source_table="users",
                      target_connection="prod", target_table="users_copy")
-        with pytest.raises(QueryRejected, match="拒绝向生产环境"):
+        with pytest.raises(QueryRejected, match="Refusing to sync"):
             service.sync_table(spec, CALLER, dry_run=True)
 
     def test_ddl_skip_needs_existing_target(self, service):
-        with pytest.raises(QueryRejected, match="不存在"):
+        with pytest.raises(QueryRejected, match="does not exist"):
             service.sync_table(_spec(ddl=DDL_SKIP), CALLER, dry_run=True)
 
     def test_unknown_connection_is_key_error(self, service):
@@ -301,7 +301,7 @@ class TestSyncGuards:
 
     def test_where_cannot_smuggle_a_write(self, service):
         """WHERE 是自由文本：拼出来的整条 SQL 必须仍被 classify 判为只读。"""
-        with pytest.raises(QueryRejected, match="非只读"):
+        with pytest.raises(QueryRejected, match="non-read-only"):
             service.sync_table(_spec(where="1=1; DROP TABLE users"), CALLER)
         assert _dst_rows(service) == []   # 目标表已建但没被写坏
 
@@ -326,7 +326,7 @@ class TestSyncGuards:
         conn.execute("CREATE TABLE users (other INTEGER)")
         conn.commit()
         conn.close()
-        with pytest.raises(QueryRejected, match="没有同名列"):
+        with pytest.raises(QueryRejected, match="no columns with matching names"):
             service.sync_table(_spec(ddl=DDL_SKIP), CALLER, dry_run=True)
 
 
@@ -405,7 +405,7 @@ class TestSyncApprovalContract:
         out = service.execute("demo", "staging", "SELECT 1", CALLER,
                               change_id=submitted["change_id"])
         assert out["status"] == "rejected"
-        assert "表同步计划" in out["reason"]
+        assert "table-sync plan" in out["reason"]
 
     def test_admin_approve_and_execute_runs_the_sync(self, service):
         """后台「批准并立即执行」对同步单同样走计划执行路径。"""
@@ -473,7 +473,7 @@ class TestSyncAdminPage:
         page = tc.get(f"/admin/approvals/{cid}")
         assert page.status_code == 200
         assert "同步计划" in page.text
-        assert "表同步计划" in page.text          # 计划正文渲染进了 <pre>
+        assert "Table sync plan" in page.text          # 计划正文渲染进了 <pre>
 
         # 「批准并立即执行」对同步单同样当场落地
         done = tc.post(f"/admin/approvals/{cid}/approve",

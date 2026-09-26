@@ -1,6 +1,7 @@
-"""MCP 接口层：把 DbmService 注册为 FastMCP 工具。
+"""MCP interface layer: registers DbmService as FastMCP tools.
 
-工具描述会直接进入 agent 的上下文，写清楚约束能减少 agent 撞墙。
+Tool descriptions go straight into the agent's context, so spelling out the
+constraints reduces the number of walls the agent walks into.
 """
 
 from __future__ import annotations
@@ -30,28 +31,35 @@ from .health import ConnectionUnavailable
 from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
 from .sync import SyncSpec
 
-# 等待人工审批：每 1s 复查一次审批单状态。用轮询而非进程内条件变量，是因为决策也可能
-# 来自别的进程（`dbm approve` CLI），条件变量覆盖不到；1s 延迟对「人点批准」无感。
+# Waiting on human approval: re-check the approval ticket's status every 1s. We poll
+# instead of using an in-process condition variable because the decision can also come
+# from a different process (the `dbm approve` CLI), which a condition variable can't
+# reach; a 1s delay is imperceptible to a human clicking "approve".
 logger = logging.getLogger(__name__)
 
 _WAIT_POLL_S = 1.0
-_WAIT_HEARTBEAT_S = 10.0   # 每 10s 报一次 progress，防客户端把长调用判超时
+_WAIT_HEARTBEAT_S = 10.0   # report progress every 10s so clients don't time out the long call
 _WAIT_MAX_S = 3600
 
-# elicitation 弹窗要「一屏能看完、一下能点」：客户端把 message 原样渲染在终端里，
-# 超长内容（典型是 sync_table 的整份计划带 CREATE TABLE）会把 Accept/Decline 顶出屏幕，
-# 人根本无从操作。这里只放摘要，完整语句/计划让人去审批页看。
+# The elicitation dialog must fit on one screen and be clickable: the client renders the
+# message verbatim in a terminal, and overly long content (typically sync_table's full
+# plan with a CREATE TABLE) pushes the Accept/Decline buttons off screen, leaving the
+# human with nothing to click. So we only show a summary here; the full statement/plan
+# is on the approval page.
 _ELICIT_MAX_LINES = 8
 _ELICIT_MAX_CHARS = 480
 _ELICIT_MAX_LINE_CHARS = 100
 
 
 class ApprovalDecision(BaseModel):
-    """elicitation 的回填结构。
+    """The elicitation response schema.
 
-    **必须给默认值**：无默认值的字段会进 JSON Schema 的 required，客户端（如 Claude Code）
-    就要求人先把字段填上才允许 Accept，弹窗上出现「Value: not set / This field is required」，
-    多一步且看着像出错。给了默认值后 Accept 直接可点，含义即「批准」。
+    **Every field must have a default**: a field with no default ends up in the JSON
+    Schema's `required` list, and clients (e.g. Claude Code) then force the human to fill
+    it in before Accept is even clickable — the dialog shows a red "Value: not set / This
+    field is required", one extra step that also looks like an error. With a default,
+    Accept is clickable right away and means "approve"; the field is still there for
+    someone who wants to explicitly choose deny.
     """
 
     decision: Literal["approve", "deny"] = Field(
@@ -118,43 +126,52 @@ def build_elicit_message(
 
 
 def _tool_error_from_unavailable(e: ConnectionUnavailable) -> ToolError:
-    """把 ConnectionUnavailable 转成给 agent 的清晰 ToolError 文案。
+    """Turn ConnectionUnavailable into a clear ToolError message for the agent.
 
-    文案里包含 state（unavailable/exhausted）与建议重试秒数，agent 据此决定
-    是稍等重试还是提示用户去后台处理，而不是把 pymysql 2013 之类的原始错误抛给 agent。
+    The message includes the state (unavailable/exhausted) and a suggested retry delay,
+    so the agent can decide whether to wait and retry or tell the user to check the
+    backend, instead of the agent receiving a raw error like pymysql 2013.
     """
     if e.state == "exhausted":
         return ToolError(f"[connection_exhausted] {e}")
-    hint = f"（建议 {e.retry_after_s} 秒后重试）" if e.retry_after_s else ""
+    hint = f" (retry in about {e.retry_after_s}s)" if e.retry_after_s else ""
     return ToolError(f"[connection_unavailable] {e}{hint}")
 
 
 def agent_error(e: BaseException) -> ToolError:
-    """**agent 侧唯一的错误出口**：任何异常在这里被翻译成分类化、已脱敏的 ToolError。
+    """**The single error exit point on the agent side**: every exception is translated here
+    into a categorized, sanitized ToolError.
 
-    错误控制必须收在服务内部——不能让驱动异常（含 DSN 里的账号密码、绑定参数、
-    SQLAlchemy 的 traceback 与背景链接）冒泡到 agent 上下文，也不能变成传输层 500。
-    分类前缀让 agent 一眼知道下一步：
+    Error handling must be contained inside the service — driver exceptions (which can
+    embed account passwords in a DSN, bound parameters, SQLAlchemy tracebacks and
+    background-info links) must never bubble up into the agent's context, and must never
+    turn into a transport-layer 500. The category prefix lets the agent tell at a glance
+    what to do next:
 
-    - `[connection_unavailable]` / `[connection_exhausted]`：连接问题，稍后重试 / 需人介入
-    - `[sql_syntax_error]` 等 DB 错误分类（见 errors.py）：改 SQL，别原样重发
-    - `[result_budget_exceeded]`：本会话取回的数据太多，去问用户要不要继续
-    - 其余业务拒绝（审批/只读限制/参数错）：原样透传服务层已经写好的人话
+    - `[connection_unavailable]` / `[connection_exhausted]`: a connection problem — retry
+      later / needs human attention
+    - `[sql_syntax_error]` and other DB error categories (see errors.py): fix the SQL,
+      don't resend it as-is
+    - `[result_budget_exceeded]`: this session has pulled back too much data — go ask the
+      user whether to continue
+    - Everything else (approval/read-only restriction/bad argument rejections): pass
+      through the human-readable text the service layer already produced
 
-    ToolError 本身直接放行（上游已经组织好文案）。
+    A ToolError is passed straight through (its message is already well-formed upstream).
     """
     if isinstance(e, ToolError):
         return e
     if isinstance(e, ConnectionUnavailable):
         return _tool_error_from_unavailable(e)
     if isinstance(e, ResultBudgetExceeded):
-        # 配额是治理规则，不是数据库错误——别让它落进 translate_db_error 的兜底分类
+        # The quota is a governance rule, not a database error — don't let it fall into
+        # translate_db_error's fallback category.
         return ToolError(f"[result_budget_exceeded] {e}")
     if isinstance(e, (QueryRejected, ValueError)):
         return ToolError(str(e))
     if isinstance(e, KeyError):
-        # KeyError 的 str() 是带引号的 repr，取原始消息更可读
-        return ToolError(str(e.args[0]) if e.args else "未找到指定资源")
+        # KeyError's str() is a quoted repr; the raw message is more readable
+        return ToolError(str(e.args[0]) if e.args else "Requested resource not found")
     return ToolError(translate_db_error(e).as_text())
 
 
@@ -191,16 +208,20 @@ def _decision_of(answer: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-# PG 跨库参数。PG 一条连接只能绑一个 database（服务端不支持跨库引用），要在别的库里
-# 操作只能另开连接——这个参数就是告诉服务端「这次连哪个库」。已有的 `database` 参数
-# 对 PG 指的是 schema，沿用不改，免得已接入的 agent 行为突变。
+# PG cross-database parameter. A PG connection is bound to exactly one database (the
+# server has no cross-database references), so operating on a different one requires a
+# separate connection — this parameter tells the service which database to connect to
+# this time. The existing `database` parameter keeps meaning schema for PG, unchanged, so
+# already-integrated agents don't see a behavior change.
 PgDatabase = Annotated[
     str | None,
-    Field(description="仅 PostgreSQL：在服务器上的哪个 database 里操作（PG 一条连接只绑一个库，"
-                      "跨库必须用它切换）；不传用连接绑定的库，可选值见 list_server_databases。"
-                      "注意：database 参数对 PG 指的是 schema"),
+    Field(description="PostgreSQL only: which database on the server to operate on (a PG "
+                      "connection is bound to one database; use this to switch); "
+                      "omit to use the connection's bound database, see "
+                      "list_server_databases for the options. "
+                      "Note: the `database` parameter means schema for PG"),
 ]
-_SCHEMA_DESC = "库/schema（MySQL/ClickHouse 为库，PostgreSQL 为 schema）；不传时使用连接默认库"
+_SCHEMA_DESC = "Database/schema (MySQL/ClickHouse: database, PostgreSQL: schema); omit to use the connection's default database"
 
 
 async def _maybe_elicit_approval(
@@ -245,10 +266,10 @@ async def _maybe_elicit_approval(
     decided_by = f"elicitation:{caller.agent}"
     try:
         if getattr(answer, "action", None) == "accept" and _decision_of(answer) != "deny":
-            service.approve_change(cid, decided_by=decided_by, note="会话内确认")
+            service.approve_change(cid, decided_by=decided_by, note="confirmed in-session")
             return await anyio.to_thread.run_sync(resubmit, cid)
-        service.reject_change(cid, decided_by=decided_by, note="会话内拒绝")
-        return {"status": "rejected", "change_id": cid, "reason": "用户在会话内拒绝了该操作"}
+        service.reject_change(cid, decided_by=decided_by, note="declined in-session")
+        return {"status": "rejected", "change_id": cid, "reason": "The user declined this operation in-session"}
     except ApprovalError as e:
         # 竞态（如后台已同时决策）：把最新状态告知 agent
         return {"status": "rejected", "change_id": cid, "reason": str(e)}
@@ -281,7 +302,7 @@ async def _wait_for_decision(
             try:
                 await ctx.report_progress(
                     progress=now - start, total=timeout_s,
-                    message=f"等待人工审批（审批单 #{change_id}）",
+                    message=f"Waiting for human approval (change #{change_id})",
                 )
             except Exception:  # noqa: BLE001 - 客户端不支持进度通知，不影响等待
                 pass
@@ -306,15 +327,16 @@ async def _wait_then_execute(
     if status == STATUS_APPROVED:
         return await anyio.to_thread.run_sync(resubmit, cid)
     if status == STATUS_CONSUMED:
-        # 后台按了「批准并立即执行」：变更已落地，这里只把结果转达给 agent（再重提会被拒）
+        # The approver clicked "approve and execute now" on the backend: the change has
+        # already landed; just relay the result to the agent (resubmitting would be rejected)
         executed = decision.get("exec_result") or {}
         return {"status": "executed", "change_id": cid, **executed,
-                "message": "已由审批人在管理后台批准并直接执行"}
-    if status == STATUS_PENDING:  # 等待超时，审批单仍有效
+                "message": "Approved and executed directly by the approver on the admin backend"}
+    if status == STATUS_PENDING:  # wait timed out, the approval ticket is still valid
         return {**result, "waited_seconds": wait_seconds,
-                "message": f"{result.get('message', '')} 已等待 {int(wait_seconds)}s 仍无人决策，"
-                           f"可再调 wait_for_change({cid}) 继续等待。"}
-    reason = decision.get("decision_note") or f"审批单当前状态为 {status}"
+                "message": f"{result.get('message', '')} Waited {int(wait_seconds)}s with no "
+                           f"decision yet; call wait_for_change({cid}) again to keep waiting."}
+    reason = decision.get("decision_note") or f"Change ticket is currently in status {status}"
     return {"status": "rejected", "change_id": cid, "reason": reason}
 
 
@@ -383,88 +405,133 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @asynccontextmanager
     async def _lifespan(_server: FastMCP):
-        # 启动即把并发/连接池设置应用到运行时（线程池上限需在事件循环内才设得上）
+        # Apply concurrency/pool settings to the runtime at startup (the thread-pool cap
+        # can only be set from inside the event loop)
         service.apply_runtime_settings()
         yield {}
 
     mcp = FastMCP(
-        name="db-manage-mcp",
+        name="Quay",
         lifespan=_lifespan,
         instructions=(
-            "统一的数据库访问服务。开始跑 SQL 前，建议先调 begin_session(title, note) 声明本次"
-            "会话的名字和背景，之后本会话跑过的 SQL 会在后台按此会话归类、方便人回溯。"
-            "要回顾自己以前做过什么，用 list_sessions（可按日期 since/until、关键词、"
-            "项目/连接筛选，writes_only=True 只看改过数据的会话）找到会话，"
-            "再用 session_history(session_id) 看那次会话的具体操作——写操作会带上审批单号与"
-            "提交时写下的 rollback_note（改动前的值/回滚办法），据此可以拼出回滚 SQL；"
-            "它默认只回精简列，SQL 原文与错误明细要用 fields=\"sql,detail\" 显式点名才给；"
-            "只看真正落地的改动加 writes_only=True, status=\"ok\"。"
-            "先用 list_projects / list_connections 找到目标连接，"
-            "用 list_tables / describe_table / sample_rows 探索 schema。"
-            "想知道「这台 DB 健康吗」用 db_checkup：一次返回结构化诊断报告"
-            "（连接占用/缓存命中率/长查询/锁等待/复制延迟/大表等，按引擎提供不同项），"
-            "不必自己多轮 SQL 摸底；逐项容错，取不到数据的项标 unknown 并写明原因"
-            "（如只读账号无 pg_monitor 权限），overall 是最严重项的状态。"
-            "按库、表、字段、行数导出文件用 export_table（支持 CSV/JSON/Markdown/XLSX）。"
-            "PostgreSQL 一条连接只能在一个 database 里查询：用 list_server_databases 看有哪些库，"
-            "再给 query/execute/list_tables 等工具传 pg_database=库名 即在该库操作"
-            "（database 参数对 PG 指的是 schema）。"
-            "必要时可用程序把 export_table 返回的 download_url 直接下载到目标位置，"
-            "不要读取或把文件内容放入模型上下文。"
-            "只读查询用 query（仅接受 SELECT/SHOW/DESCRIBE/EXPLAIN）。"
-            "数据变更（INSERT/UPDATE/DELETE/DDL）用 execute：**你自己判断这次改动以后有没有"
-            "回溯/回滚的必要，认为有就先用 query 查出改动前的旧值、写进 rollback_note 参数**"
-            "（随审批单存下来，审批人看得到，事后用 session_history 能取回；"
-            "不必每次都写，无关紧要的改动留空即可）。首次提交会生成审批单，"
-            "并在服务端等待人工决策——把返回的 approval_url 贴给用户让其点开审批，"
-            "用户一批准本次调用就自动执行并返回 status=executed，不必让用户回来说「已批准」。"
-            "若等待超时返回 status=approval_required，提醒用户后调 wait_for_change(change_id) "
-            "继续等（别自己循环调 get_change_status 轮询）。"
-            "把一张表从一个库同步到另一个库（典型：线上库 → 本地库）用 sync_table："
-            "可同步表结构（按源表建表，跨引擎会转写成近似 DDL）和数据"
-            "（按 where/order_by/limit 取一小撮，默认 1000 行、有服务端硬上限——它是拉样本"
-            "数据用的，不是全量迁移工具）；目标不能是 prod 连接。目标是 local/dev 连接时"
-            "不需要审批、直接执行（仍有审计），只有目标是 staging 才走 execute 那套审批流程；"
-            "先用 dry_run=True 可以只看计划。"
-            "跨源 JOIN、大结果集聚合、多步分析请用分析工作台（DuckDB 本地沙箱）："
-            "analysis_import 把各源查询结果快照为工作区数据集（reader 拉取、带行数上限），"
-            "analysis_sql 在工作区自由 JOIN/聚合/建 VIEW（不需审批），只把小结果带回上下文。"
-            "做完的分析可用 save_workflow 沉淀为可重跑流程，"
-            "人或 agent 沉淀的流程（多语句脚本或后台画布 DAG）用 run_workflow 一键重跑："
-            "自动重拉源数据 → 逐步执行 → 返回每步状态与输出，"
-            "可用列表见 analysis_workspaces。所有操作都会被审计记录。"
-            "\n【写 SQL 的约定，务必遵守】"
-            "① 时区：本服务不固定数据库会话时区，@@session.time_zone 继承各库设置"
-            "（可能是 UTC+8，也可能是 UTC 或其它）。凡用 FROM_UNIXTIME / UNIX_TIMESTAMP / "
-            "NOW / CURDATE / DATE 等依赖会话时区的函数，先 `SELECT @@session.time_zone` 确认，"
-            "切勿重复叠加时区偏移——典型坑：会话已是 UTC+8 却又手动 +28800，等于 +16h，"
-            "按天分组会把傍晚的数据串到第二天、同一天裂成两行。"
-            "② epoch 秒列按天分组：优先纯算术 `FLOOR((ts+偏移)/86400)` 得 day_idx，"
-            "日期由 day_idx 反推 `DATE_ADD('1970-01-01', INTERVAL day_idx DAY)`，绕开隐式时区，"
-            "day_idx 唯一决定日期、不必把日期再放进 GROUP BY。"
-            "③ 大表 SELECT 必须带 LIMIT 或 WHERE 收窄，别全表拉取。"
-            "④ 尽量走索引：WHERE / JOIN / ORDER BY 的过滤列尽量命中索引，先用 describe_table "
-            "看有哪些索引，不确定就用 query 跑 EXPLAIN（access_type=ALL/table 即全表扫描）。"
-            "别对索引列套函数或运算（如 `DATE(ts)`、`FROM_UNIXTIME(ts)`、`ts+1` 放在 WHERE 左侧）"
-            "——会使索引失效；应改成对常量侧做转换、用范围比较（如 `ts >= 起 AND ts < 止`）。"
-            "⑤ execute 支持多语句批量（分号分隔，如 ALTER + 回填 UPDATE 的迁移），"
-            "整批一次审批、按语句拆开在同一事务逐条执行。"
-            "⑥ query/sample_rows 返回**紧凑 TSV 文本**（非 JSON，省 token）：顶部 `#` 元信息行 + "
-            "`# types:` 列类型，随后首行列名、其余数据行，制表符分隔，`\\N`=NULL，大整数为字符串。"
-            "结果有**两级硬上限**：行数（默认 1000）+ 字符预算（默认 ≈12k token）；元信息里 "
-            "`truncated=true` 即没给全——**别重复拉全量**，用 WHERE/LIMIT/聚合收窄，或用分析工作台下推计算。"
-            "\n【错误怎么读】所有错误都带一个方括号分类前缀，照着它决定下一步，别盲目重发同一条 SQL："
-            "`[sql_syntax_error]` = 语法错（发到 DB 前就被拦下并由 DB 复核确认），必须改写 SQL；"
-            "`[table_not_found]`/`[column_not_found]` = 先用 list_tables / describe_table 核对名字；"
-            "`[permission_denied]`/`[readonly_violation]` = 只读账号不能写，数据变更走 execute 审批流；"
-            "`[query_timeout]` = 收窄范围或改用聚合/分析工作台；"
-            "`[connection_unavailable]` = 连接暂时断开、后台正在自动重连，按提示的秒数稍后重试即可；"
-            "`[connection_exhausted]` = 连续重连失败（仍在自动重试），提醒用户去后台看一眼连接；"
-            "`[result_budget_exceeded]` = 本会话累计返回的数据已达配额——**停下来问用户**是否"
-            "确认继续这些耗 token 的查询，用户同意后调 allow_more_results(reason=...) 再放行，"
-            "别靠重试绕过去。"
-            "\n完整使用说明（各场景该用哪套工具组合、边界在哪）会在本会话第一次调用工具时"
-            "随结果附上一份，也可随时调 usage_guide() 重读。"
+            "A governed database access service. Before running SQL, call "
+            "begin_session(title, note) to name this session and describe what it's for — "
+            "afterwards the backend groups every SQL statement this session runs under it, "
+            "so a human can trace it back. "
+            "To review what you did before, use list_sessions (filter by date since/until, "
+            "keyword, project/connection; writes_only=True shows only sessions that changed "
+            "data) to find the session, then session_history(session_id) to see that "
+            "session's operations — write operations carry their change ticket id and the "
+            "rollback_note written at submission time (the value before the change / how to "
+            "roll back), which you can use to build a rollback statement; it returns a "
+            "compact column set by default, ask for fields=\"sql,detail\" explicitly to get "
+            "the raw SQL and error details; add writes_only=True, status=\"ok\" to see only "
+            "changes that actually landed. "
+            "Use list_projects / list_connections to find the target connection, then "
+            "list_tables / describe_table / sample_rows to explore the schema. "
+            "To check whether a database is healthy, use db_checkup: it returns a structured "
+            "diagnostic report in one call (connection usage/cache hit rate/long-running "
+            "queries/lock waits/replication lag/large tables, varying by engine) so you don't "
+            "have to probe it manually across multiple rounds of SQL; each item degrades "
+            "gracefully — items that can't be measured are marked unknown with a reason "
+            "(e.g. the read-only account lacks pg_monitor), and overall reflects the most "
+            "severe item. "
+            "Export data by database, table, columns, and row count with export_table "
+            "(supports CSV/JSON/Markdown/XLSX). "
+            "A PostgreSQL connection can only query one database at a time: use "
+            "list_server_databases to see what databases exist, then pass "
+            "pg_database=<name> to query/execute/list_tables and other tools to operate on "
+            "that database (the `database` parameter means schema for PG). "
+            "When needed, download export_table's returned download_url directly to the "
+            "target location with code — never read the file content into the model's "
+            "context. "
+            "Use query for read-only queries (accepts only SELECT/SHOW/DESCRIBE/EXPLAIN). "
+            "Use execute for data changes (INSERT/UPDATE/DELETE/DDL): **you decide whether "
+            "this change is worth a rollback trail — if so, first use query to read the old "
+            "values and pass them via the rollback_note parameter** (it's stored with the "
+            "approval ticket, visible to the approver, and retrievable later via "
+            "session_history; not required every time — leave it blank for changes that "
+            "don't matter). The first submission generates an approval ticket and the "
+            "server waits for the human decision — give the returned approval_url to the "
+            "user so they can open and approve it; once they approve, this same call "
+            "auto-executes and returns status=executed, without the user needing to come "
+            "back and say \"approved\". "
+            "If the wait times out, status=approval_required is returned; remind the user "
+            "and call wait_for_change(change_id) to keep waiting (don't write your own "
+            "polling loop around get_change_status). "
+            "Use sync_table to sync a table from one connection to another (typically: "
+            "production -> local): it can sync the table structure (built from the source "
+            "table, rewritten into an approximate DDL across engines) and data (a sample "
+            "taken via where/order_by/limit, defaulting to 1000 rows with a server-side hard "
+            "cap — it's for pulling a sample, not full migration); the target cannot be a "
+            "prod connection. Targeting a local/dev connection needs no approval and executes "
+            "directly (still audited); only a staging target goes through the same approval "
+            "flow as execute; use dry_run=True first to preview the plan. "
+            "For cross-source JOINs, large-result aggregation, or multi-step analysis, use "
+            "the analysis workbench (a local DuckDB sandbox): analysis_import snapshots each "
+            "source's query result into a workspace dataset (pulled via the read-only "
+            "account, with a row cap), analysis_sql freely JOINs/aggregates/creates VIEWs "
+            "inside the workspace (no approval needed), bringing back only the small result. "
+            "Finished analyses can be saved as a re-runnable workflow with save_workflow; "
+            "workflows saved by a human or an agent (either a multi-statement script or an "
+            "admin-backend canvas DAG) can be re-run with one call via run_workflow: it "
+            "re-pulls the source data -> executes each step -> returns each step's status and "
+            "output; see analysis_workspaces for the list of available ones. All operations "
+            "are audited."
+            "\n[SQL-writing conventions — follow these]"
+            "1. Time zones: this service does not pin a fixed database session time zone; "
+            "@@session.time_zone inherits whatever each database is set to (could be UTC+8, "
+            "could be UTC, or something else). Whenever you use a time-zone-dependent "
+            "function such as FROM_UNIXTIME / UNIX_TIMESTAMP / NOW / CURDATE / DATE, run "
+            "`SELECT @@session.time_zone` first to confirm it, and never apply an offset on "
+            "top of it — a common trap: the session is already UTC+8 and you also manually "
+            "add +28800, which is +16h, and grouping by day will bleed evening data into the "
+            "next day, splitting one day into two rows."
+            "2. Grouping epoch-second columns by day: prefer pure arithmetic — "
+            "`FLOOR((ts+offset)/86400)` gives day_idx, and the date is derived from it via "
+            "`DATE_ADD('1970-01-01', INTERVAL day_idx DAY)`, sidestepping implicit time-zone "
+            "conversion; day_idx alone determines the date, no need to also put the date in "
+            "GROUP BY."
+            "3. A SELECT on a large table must have a LIMIT or a narrowing WHERE — never pull "
+            "the whole table."
+            "4. Prefer hitting an index: try to make the filter columns in WHERE / JOIN / "
+            "ORDER BY hit an index — check describe_table for available indexes first, or "
+            "run EXPLAIN via query if unsure (access_type=ALL/table means a full table scan). "
+            "Don't wrap an indexed column in a function or arithmetic (e.g. `DATE(ts)`, "
+            "`FROM_UNIXTIME(ts)`, `ts+1` on the left side of a WHERE clause) — that disables "
+            "the index; convert the constant side instead and use a range comparison (e.g. "
+            "`ts >= start AND ts < end`)."
+            "5. execute supports multi-statement batches (semicolon-separated, e.g. an ALTER "
+            "plus a backfill UPDATE migration) — one approval covers the whole batch, "
+            "executed statement by statement in the same transaction."
+            "6. query/sample_rows return **compact TSV text** (not JSON, to save tokens): a "
+            "top `#` metadata line plus a `# types:` column-types line, then a header row "
+            "with column names, then data rows, tab-separated, `\\N`=NULL, big integers as "
+            "strings. Results have **two hard caps**: row count (default 1000) plus a "
+            "character budget (default ~12k tokens); `truncated=true` in the metadata means "
+            "you didn't get everything — **don't re-fetch the full set**, narrow it with "
+            "WHERE/LIMIT/aggregation, or push the computation into the analysis workbench."
+            "\n[How to read errors] Every error carries a bracketed category prefix — use it "
+            "to decide the next step, don't blindly resend the same SQL: "
+            "`[sql_syntax_error]` = syntax error (caught before reaching the database and "
+            "confirmed by the database itself), you must rewrite the SQL; "
+            "`[table_not_found]`/`[column_not_found]` = check the name with list_tables / "
+            "describe_table first; "
+            "`[permission_denied]`/`[readonly_violation]` = the read-only account can't "
+            "write, data changes go through the execute approval flow; "
+            "`[query_timeout]` = narrow the range or switch to aggregation/the analysis "
+            "workbench; "
+            "`[connection_unavailable]` = the connection is temporarily down and the backend "
+            "is auto-reconnecting, retry after the suggested delay; "
+            "`[connection_exhausted]` = repeated reconnect attempts have failed (still "
+            "auto-retrying), ask the user to check the connection on the backend; "
+            "`[result_budget_exceeded]` = this session's cumulative returned data has hit its "
+            "quota — **stop and ask the user** whether to continue these token-costly "
+            "queries, and only after they agree call allow_more_results(reason=...) to "
+            "proceed — don't try to work around it by retrying."
+            "\nThe full usage guide (which tool combination fits which scenario, and where "
+            "the boundaries are) is attached to the result the first time this session calls "
+            "a tool, and can be re-read anytime with usage_guide()."
         ),
     )
 
@@ -474,43 +541,55 @@ def build_mcp(service: DbmService) -> FastMCP:
     @mcp.tool
     def allow_more_results(
         reason: Annotated[
-            str, Field(description="用户确认继续的说明，如「用户已确认：还要核对 3 张表的对账差异」。"
-                                   "会显示在后台看板上，供人核对确实问过")
+            str, Field(description="Explanation that the user confirmed continuing, e.g. "
+                                   "\"User confirmed: still needs to reconcile 3 more "
+                                   "tables\". Shown on the admin dashboard so a human can "
+                                   "verify the user was actually asked")
         ],
         ctx: Context | None = None,
     ) -> dict:
-        """本会话结果配额用尽后，**在用户确认继续之后**调用它再放行一个额度。
+        """After this session's result quota is used up, call this **only after the user has
+        confirmed** to get one more allowance.
 
-        用法：取数被配额拒绝 → 停下来问用户「是否确认继续这些会消耗大量 token 的查询」，
-        说明还要查什么、大概多少 → 用户同意后调这个工具（把用户的确认写进 reason）→ 继续查。
-        **不要在没问过用户的情况下调它来绕过限制**——放行记录会显示在后台看板上。
+        Usage: a data fetch is rejected by the quota -> stop and ask the user "do you want
+        to continue these token-costly queries", explaining what you still plan to query
+        and roughly how much -> once they agree, call this tool (write their confirmation
+        into reason) -> continue querying.
+        **Do not call this to work around the limit without having asked the user** —
+        grants show up on the admin dashboard.
 
-        在问用户之前先想想有没有更省的做法：聚合只取结论、export_table 落文件、
-        analysis_* 把计算下推到本地沙箱。
+        Before asking the user, consider a cheaper approach first: aggregate to only get
+        the conclusion, dump to a file with export_table, or push the computation into the
+        local sandbox with analysis_*.
         """
         caller = _caller_from_ctx(ctx)
         usage = service.result_budget().grant(caller.session_id, reason)
-        logger.info("会话 %s 追加结果配额（第 %d 次）：%s",
+        logger.info("Session %s granted an extra result allowance (grant #%d): %s",
                     caller.session_id or "-", usage["grants"], reason)
         return {
             "granted": True,
             "used_chars": usage["used_chars"],
             "allowance_chars": usage["allowance_chars"],
             "grants": usage["grants"],
-            "note": "已放行一个额度，可以继续取数。请继续用聚合/收窄条件控制单次结果大小。",
+            "note": "One more allowance has been granted; you may continue fetching data. "
+                    "Keep using aggregation/narrowing conditions to control the size of "
+                    "each result.",
         }
 
     @mcp.tool
     def usage_guide() -> str:
-        """本服务的完整使用说明与最佳实践：各场景该用哪个工具或哪套组合、边界在哪。
+        """The full usage guide and best practices for this service: which tool or
+        combination fits which scenario, and where the boundaries are.
 
-        会话第一次调用工具时已经随结果发过一份；忘了或者想确认某个场景的推荐做法时再调一次。
+        This is already attached to the result the first time this session calls a tool;
+        call it again if you forgot, or want to confirm the recommended approach for a
+        scenario.
         """
         return USAGE_GUIDE
 
     @mcp.custom_route("/exports/{token:str}/{filename:str}", methods=["GET"])
     async def _download_export(req: Request) -> Response:
-        """短期随机 token 下载；文件路径只能由 export_table 在专用目录内创建。"""
+        """Short-lived random-token download; the file path can only be created by export_table inside a dedicated directory."""
         token = req.path_params["token"]
         filename = req.path_params["filename"]
         path = service.resolve_mcp_export(token, filename)
@@ -524,7 +603,7 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def list_projects() -> list[dict]:
-        """列出所有项目及其下可用的数据库连接名。"""
+        """List every project and the database connection names available under it."""
         try:
             return service.list_projects()
         except Exception as e:  # noqa: BLE001
@@ -532,7 +611,7 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def list_connections(project: str) -> list[dict]:
-        """列出指定项目下的数据库连接（引擎、环境、库名等元信息，不含账号密码）。"""
+        """List the database connections under the given project (engine, environment, database name, and other metadata — no account credentials)."""
         try:
             return service.list_connections(project)
         except Exception as e:  # noqa: BLE001
@@ -540,15 +619,17 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def begin_session(
-        title: Annotated[str, Field(description="本次会话的名字，如「排查订单重复扣款」")],
-        note: Annotated[str, Field(description="会话简介/背景，可选，如「复现 issue #123，只读排查」")] = "",
+        title: Annotated[str, Field(description="This session's name, e.g. \"Investigating duplicate order charges\"")],
+        note: Annotated[str, Field(description="Session background/description, optional, e.g. \"Reproducing issue #123, read-only investigation\"")] = "",
         ctx: Context | None = None,
     ) -> dict:
-        """声明本次工作会话的名字和简介（建议在开始跑 SQL 前调用一次）。
+        """Declare this working session's name and description (recommended before you start running SQL).
 
-        登记后，本次会话里跑过的所有 SQL（query/execute/sample_rows 等）都会在管理后台
-        按这个会话归类，方便人回溯「这个会话都做了哪些操作」。同一会话可重复调用以更新名字。
-        不调用也能工作，但后台只能看到一串没有语义的会话 id。
+        Once registered, every SQL statement this session runs (query/execute/sample_rows,
+        etc.) will be grouped under this session on the admin backend, making it easy for a
+        human to trace back "what did this session do". The same session can call this
+        again to update the name. Not calling it still works, but the backend will only see
+        an opaque session id.
         """
         try:
             return service.begin_session(_caller_from_ctx(ctx), title, note)
@@ -557,42 +638,47 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def list_sessions(
-        limit: Annotated[int, Field(ge=1, le=100, description="最多列多少个会话")] = 20,
+        limit: Annotated[int, Field(ge=1, le=100, description="Maximum number of sessions to list")] = 20,
         since: Annotated[
-            str, Field(description="起始时间，`YYYY-MM-DD` 或 ISO 时间；不带时区按本地时间算")
+            str, Field(description="Start time, `YYYY-MM-DD` or ISO time; interpreted as local time when no timezone is given")
         ] = "",
         until: Annotated[
-            str, Field(description="截止时间，`YYYY-MM-DD`（含当天）或 ISO 时间")
+            str, Field(description="End time, `YYYY-MM-DD` (inclusive) or ISO time")
         ] = "",
         keyword: Annotated[
-            str, Field(description="模糊匹配会话名、简介，或该会话跑过的任意一条 SQL"
-                                   "（如表名 `orders`）")
+            str, Field(description="Fuzzy-matches the session title/note, or any SQL "
+                                   "statement the session ran (e.g. a table name like `orders`)")
         ] = "",
-        project: Annotated[str, Field(description="只看在这个项目上有操作的会话")] = "",
-        connection: Annotated[str, Field(description="只看在这个连接上有操作的会话")] = "",
+        project: Annotated[str, Field(description="Only sessions that operated on this project")] = "",
+        connection: Annotated[str, Field(description="Only sessions that operated on this connection")] = "",
         status: Annotated[
-            str, Field(description="按操作结果筛选：ok=执行成功 / rejected=被挡下未落库 / "
-                                   "error=执行出错；留空=不限。"
-                                   "配 writes_only=True 即「真正改成过数据的会话」")
+            str, Field(description="Filter by outcome: ok=executed successfully / "
+                                   "rejected=blocked, never landed / "
+                                   "error=execution failed; empty=no filter. "
+                                   "Combine with writes_only=True for "
+                                   "\"sessions that actually changed data\"")
         ] = "",
         writes_only: Annotated[
-            bool, Field(description="只列跑过写操作（改过数据）的会话")
+            bool, Field(description="Only list sessions that ran a write operation (changed data)")
         ] = False,
         all_agents: Annotated[
-            bool, Field(description="默认只列当前 agent 自己的会话；True 则列出所有 agent 的")
+            bool, Field(description="By default lists only the current agent's own sessions; True lists every agent's")
         ] = False,
         ctx: Context | None = None,
     ) -> list[dict]:
-        """查自己过去的工作会话（最近活动在前），用于回溯「之前都做了什么」。
+        """List your own past working sessions (most recently active first), for tracing back "what did I do before".
 
-        每条给出 session_id、begin_session 声明的 title/note、操作数 ops、写操作数 writes、
-        首末时间；current=true 的那条是当前会话。可按时间窗（since/until）、关键词
-        （会话名/简介/跑过的 SQL，如某张表名）、项目/连接、结果状态筛选：
-        `writes_only=True, status="ok"` 就是「真正改成过数据的会话」。
-        拿到 session_id 后用 session_history 看那次会话的具体操作。
-        没调过 begin_session 的会话也会列出来，只是 title 为空。
+        Each entry gives session_id, the title/note declared via begin_session, the
+        operation count ops, the write-operation count writes, and the first/last
+        timestamp; the entry with current=true is the current session. Filter by time
+        window (since/until), keyword (session title/note/any SQL it ran, e.g. a table
+        name), project/connection, or result status:
+        `writes_only=True, status="ok"` gives "sessions that actually changed data".
+        Once you have a session_id, use session_history to see that session's operations.
+        Sessions that never called begin_session are still listed, just with an empty title.
 
-        指定 project/connection/status 时，ops/writes/首末时间只统计符合条件的操作。
+        When project/connection/status is given, ops/writes/first-last-timestamp only
+        count the operations matching those filters.
         """
         try:
             return service.list_agent_sessions(
@@ -607,42 +693,54 @@ def build_mcp(service: DbmService) -> FastMCP:
     @mcp.tool
     def session_history(
         session_id: Annotated[
-            str, Field(description="要回溯的会话 id（来自 list_sessions）；省略=当前会话")
+            str, Field(description="The session id to trace (from list_sessions); omit for the current session")
         ] = "",
-        limit: Annotated[int, Field(ge=1, le=200, description="最多回多少条操作")] = 50,
+        limit: Annotated[int, Field(ge=1, le=200, description="Maximum number of operations to return")] = 50,
         writes_only: Annotated[
-            bool, Field(description="只看写操作（execute / sync_write），排查改动时更省 token")
+            bool, Field(description="Only show write operations (execute / sync_write) — cheaper on tokens when investigating a change")
         ] = False,
         status: Annotated[
-            str, Field(description="按结果筛选：ok=审批通过并真正执行成功 / "
-                                   "rejected=被挡下未落库（如首提生成审批单、被驳回/过期）/ "
-                                   "error=执行出错；留空=全都要。"
-                                   "查「上次到底改成了哪些」用 writes_only=True + status=ok")
+            str, Field(description="Filter by result: ok=approved and actually executed "
+                                   "successfully / "
+                                   "rejected=blocked, never landed (e.g. the first "
+                                   "submission generated an approval ticket, or it was "
+                                   "denied/expired) / "
+                                   "error=execution failed; empty=everything. "
+                                   "To see \"what did the last change actually do\", use "
+                                   "writes_only=True + status=ok")
         ] = "",
         fields: Annotated[
-            str, Field(description="要哪些列，逗号分隔。省略=精简列"
-                                   "（ts,tool,connection,status,row_count,change_id,"
-                                   "approval_status,rollback_note）；"
-                                   "**SQL 原文与错误明细默认不返回**，要看就点名 "
-                                   "`sql` / `detail`；`all` = 全部列。"
-                                   "可选：sql,detail,duration_ms,environment,agent,fingerprint")
+            str, Field(description="Which columns to return, comma-separated. Omit for "
+                                   "the compact set "
+                                   "(ts,tool,connection,status,row_count,change_id,"
+                                   "approval_status,rollback_note); "
+                                   "**the raw SQL and error details are not returned by "
+                                   "default** — ask for `sql` / `detail` explicitly; "
+                                   "`all` = every column. "
+                                   "Options: sql,detail,duration_ms,environment,agent,fingerprint")
         ] = "",
         ctx: Context | None = None,
     ) -> dict:
-        """回溯某个会话跑过的操作（最近在前），**写操作会带上审批单号与回滚备注**。
+        """Trace the operations a session ran (most recent first); **write operations carry their approval ticket id and rollback note**.
 
-        用来回答「上次那批改动改了什么、还能不能改回去」：每条写操作返回 change_id、
-        approval_status，以及提交时写在 rollback_note 里的「改动前的值 / 回滚办法」
-        （agent 自己判断有无回溯必要才写，可能为空）。据此可以自己拼出回滚 SQL，
-        再走一次 execute（回滚同样需要人工审批）。
+        Answers "what did that last batch of changes actually change, and can it still be
+        rolled back": each write operation returns change_id, approval_status, and the
+        "value before the change / how to roll back" written into rollback_note at
+        submission time (the agent decides at the time whether it's worth writing one, so
+        it may be empty). You can build a rollback statement from it and submit it via
+        execute again (a rollback also requires human approval).
 
-        **只看真正落地的改动用 `writes_only=True, status="ok"`**——首提生成审批单那条
-        记录是 rejected（还没落库），不加 status 会把它一起带出来。返回里的
-        status_counts 给出各结果各多少条，便于判断还有没有被挡下/出错的。
+        **To see only changes that actually landed, use `writes_only=True,
+        status="ok"`** — the record from the first submission that generated the approval
+        ticket is rejected (never landed); without the status filter it will be included
+        too. The returned status_counts gives the count for each outcome, so you can tell
+        whether anything was still blocked or errored.
 
-        默认只回精简列以省上下文——**SQL 原文与错误明细不会默认返回**；先用默认列扫一遍
-        找到目标那几条，再用 `limit` 收窄 + `fields="sql,detail"` 取全文（SQL 超长会截断，
-        全文可在审批页查看）。
+        Returns a compact column set by default to save context — **the raw SQL and error
+        details are not returned by default**; scan the default columns first to find the
+        entries you want, then narrow with `limit` and ask for `fields="sql,detail"` to get
+        the full text (very long SQL is truncated; the full text is viewable on the
+        approval page).
         """
         try:
             return service.session_history(
@@ -655,24 +753,30 @@ def build_mcp(service: DbmService) -> FastMCP:
     def query(
         project: str,
         connection: str,
-        sql: Annotated[str, Field(description="单条只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN）")],
+        sql: Annotated[str, Field(description="A single read-only statement (SELECT/SHOW/DESCRIBE/EXPLAIN)")],
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> str:
-        """在指定连接上执行只读 SQL，返回紧凑 TSV 文本（比 JSON 省 token）。
+        """Run a read-only SQL statement on the given connection, returning compact TSV text (saves tokens vs. JSON).
 
-        输出格式：顶部 `#` 元信息行（`shown=N truncated=bool reason=... elapsed_ms=...`）+
-        `# types:` 列类型行；随后首行是列名、其余是数据行，**制表符分隔**，`\\N` 表示 NULL，
-        值里的 `\\ \\t \\n` 做反斜杠转义。**大整数以字符串返回**（超 2^53 精度安全）。
+        Output format: a top `#` metadata line (`shown=N truncated=bool reason=...
+        elapsed_ms=...`) + a `# types:` column-types line; then a header row with column
+        names, then data rows, **tab-separated**, `\\N` means NULL, `\\ \\t \\n` in values
+        are backslash-escaped. **Big integers are returned as strings** (safe beyond 2^53
+        precision).
 
-        结果受两级硬上限：① 行数（连接 max_rows，默认 1000）；② 字符预算
-        （agent_max_result_chars，默认 40000≈12k token）。`truncated=true` 表示没给全——
-        **不要重复拉全量**，改用 WHERE/LIMIT/聚合收窄，或用分析工作台（analysis_*）下推计算。
+        Results are subject to two hard caps: (1) row count (connection max_rows, default
+        1000); (2) a character budget (agent_max_result_chars, default 40000 ≈ 12k
+        tokens). `truncated=true` means you didn't get everything — **don't re-fetch the
+        full set**, narrow it with WHERE/LIMIT/aggregation, or push the computation into
+        the analysis workbench (analysis_*).
 
-        非只读语句（含多语句、CTE 中夹带 DML、SELECT FOR UPDATE、SLEEP 等有副作用函数）会被拒绝。
+        Non-read-only statements (including multiple statements, DML hidden in a CTE,
+        SELECT FOR UPDATE, side-effecting functions like SLEEP) are rejected.
 
-        还有一道**会话级**配额：本会话累计返回量超出上限后会被拒绝取数，届时请先问用户
-        是否继续，用户同意后调 allow_more_results 再放行。
+        There's also a **session-level** quota: once this session's cumulative returned
+        volume exceeds the cap, further fetches are rejected — at that point ask the user
+        whether to continue, and call allow_more_results once they agree.
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -687,45 +791,59 @@ def build_mcp(service: DbmService) -> FastMCP:
     async def execute(
         project: str,
         connection: str,
-        sql: Annotated[str, Field(description="要执行的写 SQL（INSERT/UPDATE/DELETE/DDL）；"
-                                  "支持多语句批量（分号分隔，如 ALTER + 回填 UPDATE 的迁移），"
-                                  "整批一次审批、按语句拆开在同一事务逐条执行")],
-        reason: Annotated[str, Field(description="变更原因，供审批人参考")] = "",
+        sql: Annotated[str, Field(description="The write SQL to execute (INSERT/UPDATE/DELETE/DDL); "
+                                  "supports a multi-statement batch (semicolon-separated, "
+                                  "e.g. an ALTER plus a backfill UPDATE migration) — one "
+                                  "approval covers the whole batch, executed statement by "
+                                  "statement in the same transaction")],
+        reason: Annotated[str, Field(description="Reason for the change, for the approver's reference")] = "",
         rollback_note: Annotated[
-            str, Field(description="回滚参考：改动前这些行/列是什么值、怎么改回去。"
-                                   "先用 query 查出旧值再写在这里，如 "
-                                   "`order 1001 status 改前=2；回滚 UPDATE orders SET status=2 "
-                                   "WHERE id=1001`。审批人能看到，事后也能用 session_history "
-                                   "取回。**由你自行判断是否需要**，无回滚价值的改动可留空")
+            str, Field(description="Rollback reference: what these rows/columns were before "
+                                   "the change and how to revert it. Use query first to "
+                                   "read the old values and write them here, e.g. "
+                                   "`order 1001 status before=2; rollback UPDATE orders SET "
+                                   "status=2 WHERE id=1001`. The approver can see it, and "
+                                   "it can be retrieved later via session_history. **Decide "
+                                   "for yourself whether it's needed** — leave it blank for "
+                                   "changes with no rollback value")
         ] = "",
         change_id: Annotated[
-            int | None, Field(description="已获批审批单号；批准后带上它重提相同 SQL 即可执行")
+            int | None, Field(description="An already-approved change ticket id; resubmit the same SQL with it to execute")
         ] = None,
         wait_seconds: Annotated[
             int | None,
-            Field(description="首次提交生成审批单后，服务端等待人工决策的秒数；"
-                              "0=不等待立即返回审批单号，省略=用系统设置的默认值"),
+            Field(description="How many seconds the server should wait for a human decision "
+                              "after the first submission generates an approval ticket; "
+                              "0=don't wait, return the ticket id immediately, omit=use "
+                              "the system-setting default"),
         ] = None,
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
-        """执行数据变更操作（需人工授权）。
+        """Execute a data-changing operation (requires human authorization).
 
-        首次提交（不带 change_id）：系统评估风险并生成审批单，并**在服务端等待人工决策**
-        （默认等待时长见系统设置，可用 wait_seconds 覆盖）。等待期间请把返回的 approval_url
-        贴给用户，让其点开审批页处理；用户一批准，本次调用就会自动执行并返回
-        status=executed，无需用户回到会话里说「已批准」，也无需你再重提一次。
-        若客户端支持会话内确认（elicitation）且连接策略允许，则直接弹确认框、批准即执行。
+        First submission (no change_id): the system assesses the risk and generates an
+        approval ticket, then **the server waits for the human decision** (default wait
+        duration is in system settings, overridable with wait_seconds). While waiting,
+        give the returned approval_url to the user so they can open the approval page;
+        once they approve, this same call auto-executes and returns status=executed —
+        the user doesn't need to come back to the session and say "approved", and you
+        don't need to resubmit.
+        If the client supports in-session confirmation (elicitation) and the connection
+        policy allows it, a confirmation dialog pops up directly and executes on approval.
 
-        返回 status=approval_required 表示等待超时而审批单仍挂着：把 approval_url 再提醒
-        用户一次，然后调 wait_for_change(change_id) 继续等即可（审批单 60 分钟内有效）。
-        返回 status=rejected 时 reason 说明原因（被驳回/已过期/SQL 不一致），据此调整。
-        只读语句会被直接执行。
+        Returns status=approval_required if the wait timed out while the ticket is still
+        pending: remind the user of the approval_url again, then call
+        wait_for_change(change_id) to keep waiting (the ticket is valid for 60 minutes).
+        Returns status=rejected with reason explaining why (denied/expired/SQL mismatch) —
+        adjust accordingly. Read-only statements are executed directly.
 
-        **你判断这次改动以后可能需要回滚时，先用 query 查出旧值，再写进 rollback_note**：
-        它随审批单一起存下来，审批人在审批页看得到，事后你（或另一个会话的 agent）用
-        session_history 就能取回「改前是什么值、怎么改回去」。要不要写由你自己判断，
-        无回滚价值的改动（如补日志、加索引）留空即可。
+        **When you judge this change might need a rollback, first use query to read the
+        old values, then write them into rollback_note**: it's stored with the approval
+        ticket, visible to the approver on the approval page, and retrievable later
+        (by you or an agent in another session) via session_history to recover "what it
+        was before, how to revert it". Whether to write it is your call — leave it blank
+        for changes with no rollback value (e.g. adding a log entry, adding an index).
         """
         caller = _caller_from_ctx(ctx)
         run = partial(service.execute, project, connection, sql, caller, reason=reason,
@@ -751,49 +869,56 @@ def build_mcp(service: DbmService) -> FastMCP:
     @mcp.tool
     async def sync_table_ddl(
         source_project: str,
-        source_connection: Annotated[str, Field(description="源连接（结构从这里读）")],
+        source_connection: Annotated[str, Field(description="Source connection (structure is read from here)")],
         target_project: str,
         target_connection: Annotated[
-            str, Field(description="目标连接（在这里建表）；不能是 prod 环境的连接")
+            str, Field(description="Target connection (tables are created here); cannot be a prod-environment connection")
         ],
         tables: Annotated[
-            str, Field(description="要同步结构的表名，多张用逗号分隔，如 `orders,order_item,users`")
+            str, Field(description="Table names to sync the structure of, comma-separated, e.g. `orders,order_item,users`")
         ],
         source_database: Annotated[
-            str | None, Field(description="源库/schema（PG 为 schema）；不传时用连接默认库")
+            str | None, Field(description="Source database/schema (schema for PG); omit to use the connection's default database")
         ] = None,
         target_database: Annotated[
-            str | None, Field(description="目标库/schema（PG 为 schema）；不传时用连接默认库")
+            str | None, Field(description="Target database/schema (schema for PG); omit to use the connection's default database")
         ] = None,
         source_pg_database: Annotated[
-            str | None, Field(description="仅 PostgreSQL 源：从哪个 database 读（source_database 对 PG 是 schema）")
+            str | None, Field(description="PostgreSQL source only: which database to read from (source_database means schema for PG)")
         ] = None,
         target_pg_database: Annotated[
-            str | None, Field(description="仅 PostgreSQL 目标：建到哪个 database（target_database 对 PG 是 schema）")
+            str | None, Field(description="PostgreSQL target only: which database to create the table in (target_database means schema for PG)")
         ] = None,
         ddl: Annotated[
             Literal["create_if_missing", "recreate"],
-            Field(description="create_if_missing=目标表不存在才建（已存在的跳过）；"
-                              "recreate=先 DROP 目标表再重建（破坏性，会丢掉目标表里已有的数据）"),
+            Field(description="create_if_missing=only create if the target table doesn't "
+                              "exist (skip if it does); "
+                              "recreate=DROP the target table then rebuild it (destructive "
+                              "— discards any existing data in the target table)"),
         ] = "create_if_missing",
-        reason: Annotated[str, Field(description="同步原因，供审批人参考")] = "",
+        reason: Annotated[str, Field(description="Reason for the sync, for the approver's reference")] = "",
         dry_run: Annotated[
-            bool, Field(description="只返回每张表的建表计划，不真的建表")
+            bool, Field(description="Only return the creation plan for each table without actually creating them")
         ] = False,
         ctx: Context | None = None,
     ) -> dict:
-        """批量同步表结构（不带任何数据），用于在本地照着线上库重建一套空表。
+        """Sync table structure in bulk (no data at all), for rebuilding a set of empty tables locally that mirror production.
 
-        等价于对每张表调一次 `sync_table(ddl=…, data="none")`，只是不用一张张写。
-        同引擎用源库建表语句原文（保真）；跨引擎用 sqlglot 转写成**近似 DDL** 并在 warnings
-        里列出被剥掉的方言私有成分（ENGINE/CHARSET/二级索引等）——照着建出来的表能用，
-        但不等于源表的逐字复制。
+        Equivalent to calling `sync_table(ddl=..., data="none")` once per table, just
+        without writing it out one by one. Same-engine syncs use the source table's raw
+        CREATE TABLE text (faithful); cross-engine syncs rewrite it into an **approximate
+        DDL** via sqlglot and list the dropped dialect-specific pieces in warnings
+        (ENGINE/CHARSET/secondary indexes, etc.) — the resulting table is usable but is not
+        a byte-for-byte copy of the source.
 
-        目标是 local/dev 连接时直接执行；staging 目标每张表各生成一张审批单（所以建议
-        先 dry_run 看一遍计划）。目标不能是 prod 环境。单张表失败不影响其余表，
-        返回里逐表给出 status，失败的带 error。
+        Executes directly when the target is a local/dev connection; a staging target
+        generates one approval ticket per table (so use dry_run first to preview the
+        plan). The target cannot be a prod environment. A failure on one table doesn't
+        affect the others — the return value gives a per-table status, with error on the
+        ones that failed.
 
-        要连数据一起拉一小撮样本，用 sync_table；要把数据取到文件而不进上下文，用 export_table。
+        To also pull a small sample of data, use sync_table; to get the data into a file
+        instead of context, use export_table.
         """
         names = [t.strip() for t in tables.split(",") if t.strip()]
         try:
@@ -812,80 +937,97 @@ def build_mcp(service: DbmService) -> FastMCP:
     async def sync_table(
         source_project: str,
         source_connection: str,
-        source_table: Annotated[str, Field(description="源表名")],
+        source_table: Annotated[str, Field(description="Source table name")],
         target_project: str,
         target_connection: Annotated[
-            str, Field(description="目标连接（写入方）；不能是 prod 环境的连接")
+            str, Field(description="Target connection (the writer); cannot be a prod-environment connection")
         ],
         target_table: Annotated[
-            str | None, Field(description="目标表名，默认与源表同名")
+            str | None, Field(description="Target table name, defaults to the same name as the source table")
         ] = None,
         source_database: Annotated[
-            str | None, Field(description="源库/schema（PG 为 schema）；不传时用连接默认库")
+            str | None, Field(description="Source database/schema (schema for PG); omit to use the connection's default database")
         ] = None,
         target_database: Annotated[
-            str | None, Field(description="目标库/schema（PG 为 schema）；不传时用连接默认库")
+            str | None, Field(description="Target database/schema (schema for PG); omit to use the connection's default database")
         ] = None,
         source_pg_database: Annotated[
-            str | None, Field(description="仅 PostgreSQL 源：从哪个 database 读（source_database 对 PG 是 schema）")
+            str | None, Field(description="PostgreSQL source only: which database to read from (source_database means schema for PG)")
         ] = None,
         target_pg_database: Annotated[
-            str | None, Field(description="仅 PostgreSQL 目标：写到哪个 database（target_database 对 PG 是 schema）")
+            str | None, Field(description="PostgreSQL target only: which database to write to (target_database means schema for PG)")
         ] = None,
         ddl: Annotated[
             Literal["skip", "create_if_missing", "recreate"],
-            Field(description="结构同步：skip=不建表（目标表须已存在）；"
-                              "create_if_missing=目标表不存在才按源表结构建；"
-                              "recreate=先 DROP 目标表再重建（破坏性）"),
+            Field(description="Structure sync: skip=don't create the table (target must "
+                              "already exist); "
+                              "create_if_missing=create it from the source structure only "
+                              "if the target doesn't exist; "
+                              "recreate=DROP the target table then rebuild it (destructive)"),
         ] = "create_if_missing",
         data: Annotated[
             Literal["none", "append", "replace"],
-            Field(description="数据同步：none=只同步结构；append=追加写入；"
-                              "replace=先清空目标表再写入（破坏性）"),
+            Field(description="Data sync: none=structure only; append=insert on top of "
+                              "existing rows; "
+                              "replace=clear the target table before writing (destructive)"),
         ] = "append",
         where: Annotated[
-            str, Field(description="源表取数的 WHERE 条件（不含 WHERE 关键字），如 "
-                                   "`created_at >= '2026-01-01'`；强烈建议带上以收窄数据量")
+            str, Field(description="WHERE condition for fetching from the source (without "
+                                   "the WHERE keyword), e.g. `created_at >= '2026-01-01'`; "
+                                   "strongly recommended to narrow the data volume")
         ] = "",
         order_by: Annotated[
-            str, Field(description="源表取数的 ORDER BY（不含关键字），如 `id DESC`；"
-                                   "配合 limit 可取「最新 N 条」")
+            str, Field(description="ORDER BY for fetching from the source (without the "
+                                   "keyword), e.g. `id DESC`; combine with limit to get "
+                                   "\"the latest N rows\"")
         ] = "",
         limit: Annotated[
-            int, Field(ge=1, description="最多同步多少行（默认 1000），会被夹到系统设置 "
-                                         "sync_max_rows 上限内")
+            int, Field(ge=1, description="Maximum rows to sync (default 1000), clamped to "
+                                         "the system-setting sync_max_rows cap")
         ] = 1000,
-        reason: Annotated[str, Field(description="同步原因，供审批人参考")] = "",
+        reason: Annotated[str, Field(description="Reason for the sync, for the approver's reference")] = "",
         dry_run: Annotated[
-            bool, Field(description="只返回同步计划（建表语句/列/行数上限/告警），不生成审批单")
+            bool, Field(description="Only return the sync plan (create-table statement/columns/row cap/warnings), don't generate an approval ticket")
         ] = False,
         change_id: Annotated[
-            int | None, Field(description="已获批的同步审批单号；批准后带上它、并保持其余参数"
-                                          "与提交时完全一致即可执行")
+            int | None, Field(description="An already-approved sync change ticket id; "
+                                          "resubmit with it, keeping every other parameter "
+                                          "identical to the original submission, to execute")
         ] = None,
         wait_seconds: Annotated[
-            int | None, Field(description="生成审批单后服务端等待人工决策的秒数；"
-                                          "0=不等待，省略=用系统设置默认值"),
+            int | None, Field(description="How many seconds the server should wait for a "
+                                          "human decision after generating the approval "
+                                          "ticket; 0=don't wait, omit=use the system-setting default"),
         ] = None,
         ctx: Context | None = None,
     ) -> dict:
-        """把一张表从一个连接同步到另一个连接（典型场景：线上库 → 本地库）。
+        """Sync a table from one connection to another (typical scenario: production -> local).
 
-        能同步**结构**（按源表建表；同引擎用源库建表语句原文，跨引擎用 sqlglot 转写成近似
-        DDL 并列出被剥掉的东西）和**数据**（按 where/order_by/limit 取一小撮，参数化批量写入）。
-        **数据量有硬上限**（默认 1000 行，上限见系统设置 sync_max_rows）——它用于拉一份能在
-        本地跑起来的样本数据，不是全量迁移工具；要大批量请走导出/导入。
+        Can sync **structure** (built from the source table; same-engine syncs use the
+        source's raw CREATE TABLE text, cross-engine syncs rewrite it into an approximate
+        DDL via sqlglot and list what was dropped) and **data** (a sample taken via
+        where/order_by/limit, written in parameterized batches). **The data volume has a
+        hard cap** (default 1000 rows, cap configurable via the sync_max_rows system
+        setting) — it's for pulling a sample you can run locally, not a full-migration
+        tool; for bulk data use export/import instead.
 
-        **目标是 local/dev 环境的连接时不需要审批**，直接执行并返回 status=executed（动的不是
-        线上数据；执行仍照常审计留痕，可在后台回溯）。目标是 staging 时才走审批：流程同
-        execute——生成审批单并在服务端等人决策，把返回的 approval_url 贴给用户点开批准，
-        批准后本次调用自动执行；等待超时返回 status=approval_required，用
-        wait_for_change(change_id) 续等，或带 change_id 重提（重提时其余参数必须与提交时逐字
-        一致，否则指纹校验会拒）。先用 dry_run=True 可以只看计划、让用户确认要同步什么。
+        **No approval is needed when the target is a local/dev-environment connection** —
+        it executes directly and returns status=executed (it's not touching production
+        data; execution is still audited as usual and traceable on the backend). Only a
+        staging target goes through approval: same flow as execute — an approval ticket is
+        generated and the server waits for a human decision; give the returned
+        approval_url to the user to open and approve; once approved this same call
+        auto-executes; if the wait times out, status=approval_required is returned — use
+        wait_for_change(change_id) to keep waiting, or resubmit with change_id (every other
+        parameter must match the original submission exactly, or the fingerprint check
+        will reject it). Use dry_run=True first to preview the plan and let the user
+        confirm what will be synced.
 
-        限制：目标连接不能是 prod 环境（拒绝往生产灌数）；目标必须配了 writer 账号；
-        ClickHouse 只能做源、Redis 不参与。同步的是**真实值**（不脱敏），
-        所以从生产同步时请注意目标库会持有一份生产数据副本。
+        Constraints: the target connection cannot be a prod environment (writing into
+        production is refused); the target must have a writer account configured;
+        ClickHouse can only be a source, Redis does not participate. The data synced is
+        the **real value** (not masked), so when syncing from production be aware the
+        target will hold a copy of production data.
         """
         caller = _caller_from_ctx(ctx)
         spec = SyncSpec(
@@ -925,14 +1067,15 @@ def build_mcp(service: DbmService) -> FastMCP:
             raise agent_error(e) from e
         return result
 
-    # Redis 有意不暴露为 MCP 工具：agent 碰不到 Redis。Redis 仅供人通过已登录的
-    # 管理后台 /admin/redis 操作（对标 Medis 的独立控制台）。
+    # Redis is deliberately not exposed as an MCP tool: the agent cannot reach Redis.
+    # Redis is only for a human to operate through the logged-in admin backend at
+    # /admin/redis (modeled after Medis's standalone console).
 
     @mcp.tool
     def get_change_status(change_id: int) -> dict:
-        """查询审批单当前状态（pending / approved / rejected / consumed / expired），立即返回。
+        """Look up the current status of an approval ticket (pending / approved / rejected / consumed / expired); returns immediately.
 
-        只想「等到有结果为止」用 wait_for_change，别自己写循环反复调本工具。
+        If you just want to wait until there's a result, use wait_for_change instead of writing your own polling loop around this tool.
         """
         try:
             change = service.get_change(change_id)
@@ -944,21 +1087,24 @@ def build_mcp(service: DbmService) -> FastMCP:
     async def wait_for_change(
         change_id: int,
         timeout_seconds: Annotated[
-            int | None, Field(description="最长等待秒数，省略则用系统设置的默认值")
+            int | None, Field(description="Maximum seconds to wait; omit to use the system-setting default")
         ] = None,
         ctx: Context | None = None,
     ) -> dict:
-        """等待审批单被人决策，一直阻塞到有结果或超时（不要自己轮询 get_change_status）。
+        """Wait for an approval ticket to be decided by a human, blocking until there's a result or it times out (don't poll get_change_status yourself).
 
-        用在 execute 的等待超时之后：把 approval_url 再提醒用户一次，然后调本工具继续等。
-        返回 status=approved 表示可以带 change_id 重提相同 SQL 执行；
-        status=consumed 表示审批人在后台点了「批准并立即执行」，变更已落地（exec_result 里有
-        影响行数），**不要再重提**；status=rejected/expired 见 decision_note；
-        status=pending 且 timed_out=true 表示本次等待超时、审批单仍有效，可再调一次继续等。
+        Use this after execute's wait times out: remind the user of the approval_url once
+        more, then call this tool to keep waiting.
+        Returns status=approved when you can resubmit the same SQL with change_id to
+        execute it; status=consumed means the approver clicked "approve and execute now" on
+        the backend and the change has already landed (exec_result has the affected row
+        count) — **do not resubmit**; see decision_note for status=rejected/expired;
+        status=pending with timed_out=true means this wait timed out and the ticket is
+        still valid, call it again to keep waiting.
         """
         wait_s = service.approval_wait_seconds() if timeout_seconds is None else timeout_seconds
         try:
-            service.get_change(change_id)  # 先确认审批单存在，不存在直接报错而不是空等
+            service.get_change(change_id)  # confirm the ticket exists first — error immediately instead of waiting for nothing
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
         return await _wait_for_decision(service, change_id, wait_s, ctx)
@@ -967,11 +1113,13 @@ def build_mcp(service: DbmService) -> FastMCP:
     def list_server_databases(
         project: str, connection: str, ctx: Context | None = None
     ) -> list[str]:
-        """列出服务器上可连接的 database。
+        """List the databases available on the server for this connection.
 
-        PostgreSQL 的库与 schema 是两层，且一条连接只能在一个库里查询：先用本工具看有哪些库，
-        再把库名作为其它工具的 pg_database 参数传入即可在那个库里操作（list_databases 列的
-        是某个库里的 schema）。MySQL/ClickHouse 没有这一层，结果等同 list_databases。
+        PostgreSQL has two layers — database and schema — and a connection can only query
+        one database at a time: use this tool first to see what databases exist, then pass
+        the database name as the pg_database parameter to other tools to operate on that
+        database (list_databases lists the schemas *inside* a given database). MySQL/
+        ClickHouse have no such layer, so the result is the same as list_databases.
         """
         try:
             return service.list_server_databases(project, connection, _caller_from_ctx(ctx))
@@ -983,10 +1131,11 @@ def build_mcp(service: DbmService) -> FastMCP:
         project: str, connection: str, pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> list[str]:
-        """列出连接可选择的库/schema；MySQL/ClickHouse 返回数据库，PostgreSQL 返回 schema。
+        """List the databases/schemas available for this connection; MySQL/ClickHouse return databases, PostgreSQL returns schemas.
 
-        PostgreSQL 列的是 pg_database（不传则连接绑定的库）里的 schema；服务器上有哪些库
-        用 list_server_databases 查。
+        For PostgreSQL, this lists the schemas inside pg_database (or the connection's
+        bound database if not given); use list_server_databases to see what databases
+        exist on the server.
         """
         try:
             db = service.resolve_pg_database(project, connection, pg_database)
@@ -1002,7 +1151,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> list[str]:
-        """列出指定库/schema 中的所有表。"""
+        """List every table in the given database/schema."""
         try:
             db = service.resolve_pg_database(project, connection, pg_database)
             return service.list_tables(
@@ -1020,7 +1169,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
-        """查看表结构：字段（类型/可空/默认值/注释）、索引、主键。"""
+        """Show a table's structure: columns (type/nullable/default/comment), indexes, primary key."""
         try:
             db = service.resolve_pg_database(project, connection, pg_database)
             return service.describe_table(
@@ -1035,32 +1184,43 @@ def build_mcp(service: DbmService) -> FastMCP:
         connection: str,
         database: Annotated[
             str | None,
-            Field(description="体检的库/schema（MySQL/ClickHouse 为库，PostgreSQL 为 schema）；"
-                              "不传时用连接默认库"),
+            Field(description="The database/schema to check (MySQL/ClickHouse: database, "
+                              "PostgreSQL: schema); omit to use the connection's default database"),
         ] = None,
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
-        """数据库体检：一次调用拿到结构化诊断报告，不必为「这台 DB 健康吗」多轮 SQL 摸底。
+        """Database health check: get a structured diagnostic report in one call, no need for multiple rounds of SQL to probe "is this database healthy".
 
-        按引擎提供一组只读诊断项（逐项容错，某项取不到数据只会标成 unknown 并说明原因，
-        不会让整份报告失败）：
+        Provides a set of read-only diagnostic checks per engine (each check degrades
+        gracefully — one that can't be measured is simply marked unknown with a reason,
+        without failing the whole report):
 
-        - **MySQL**（16 项）：连接占用（含被 max_connections 拒绝的次数）、活跃线程、
-          InnoDB 缓冲池命中率与压力、缓冲池 vs 数据量、慢查询、全表扫描 JOIN、临时表落盘、
-          异常断连、死锁、长查询、行锁等待、无主键表、大事务落盘、复制延迟、大表 TOP5
-        - **PostgreSQL**（16 项）：连接占用、空闲事务、长查询、等待事件、缓存命中率、
-          临时文件落盘、死锁、死元组膨胀、统计信息过期、未使用索引、复制延迟、复制槽健康度
-          （wal_status）、WAL 归档失败、事务 ID 回卷风险、库与大表大小
-        - **ClickHouse**（8 项）：磁盘健康（is_broken/只读/剩余空间）、核心指标、失败查询、
-          副本同步队列（会话过期/log_pointer 落后）、活跃 part 数、未完成 mutation、大表 TOP5
-        - **SQLite**：完整性检查、空闲页碎片、日志模式、表行数
+        - **MySQL** (16 checks): connection usage (including connections rejected by
+          max_connections), active threads, InnoDB buffer pool hit rate and pressure,
+          buffer pool vs. data size, slow queries, full-table-scan JOINs, temp tables
+          spilling to disk, abnormal disconnects, deadlocks, long-running queries, row lock
+          waits, tables without a primary key, large transactions spilling to disk,
+          replication lag, top-5 largest tables
+        - **PostgreSQL** (16 checks): connection usage, idle transactions, long-running
+          queries, wait events, cache hit rate, temp files spilling to disk, deadlocks,
+          dead-tuple bloat, stale statistics, unused indexes, replication lag, replication
+          slot health (wal_status), WAL archiving failures, transaction ID wraparound risk,
+          database and largest-table sizes
+        - **ClickHouse** (8 checks): disk health (is_broken/read-only/free space), core
+          metrics, failed queries, replica sync queue (expired sessions/log_pointer lag),
+          active part count, unfinished mutations, top-5 largest tables
+        - **SQLite**: integrity check, free-page fragmentation, journal mode, table row counts
 
-        每项含 status（ok / info / warn / critical / unknown）、归属维度、人可读的 value
-        与解读建议；overall 是其中最严重的状态。**status=unknown 表示「没测到」而非「正常」**
-        ——视图选型已尽量避开权限门槛（MySQL 长查询/锁等待走 performance_schema，无需 PROCESS；
-        PG 连接占用/复制槽/统计类视图只读可见），真正缺权限的项会在报告的 privileges 里
-        汇总成可复制的 GRANT 语句（如 `GRANT pg_monitor TO ...`）。
+        Each item has a status (ok / info / warn / critical / unknown), the dimension it
+        belongs to, a human-readable value, and interpretation guidance; overall is the
+        most severe status among them. **status=unknown means "not measured", not
+        "healthy"** — the views were chosen to avoid most permission gates where possible
+        (MySQL long-query/lock-wait checks use performance_schema, no PROCESS privilege
+        needed; PG connection-usage/replication-slot/statistics views are visible to
+        read-only accounts); checks that genuinely lack permission are summarized in the
+        report's privileges field as ready-to-copy GRANT statements (e.g. `GRANT
+        pg_monitor TO ...`).
         """
         try:
             db = service.resolve_pg_database(project, connection, pg_database)
@@ -1077,19 +1237,24 @@ def build_mcp(service: DbmService) -> FastMCP:
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
-        """实例级体检：一次看遍这条连接所在服务器上的**所有用户库**，合并成一份诊断报告。
+        """Instance-level health check: sweep **every user database** on the server this connection points at, merged into one diagnostic report.
 
-        db_checkup 只检一个库/schema；但「这台 DB 健康吗」不该只看当前库——慢查询、
-        大表、索引膨胀、无主键表在哪个库都可能发生。本工具逐库体检后合并：
+        db_checkup only checks one database/schema; but "is this database healthy"
+        shouldn't only look at the current one — slow queries, large tables, index bloat,
+        and tables without a primary key can all happen in any database. This tool
+        checks each database and merges the results:
 
-        - 实例级指标（连接占用、缓存命中率、长查询、锁、复制延迟…）各库值相同，
-          只留一条；
-        - 库级指标（大表 TOP5、无主键表、膨胀、未用索引…）取**最严重**的那条，
-          标题带 `[库名]` 前缀。
+        - Instance-level metrics (connection usage, cache hit rate, long-running queries,
+          locks, replication lag, ...) are the same value across databases, so only one
+          copy is kept;
+        - Database-level metrics (top-5 largest tables, tables without a primary key,
+          bloat, unused indexes, ...) take the **most severe** entry, with the title
+          prefixed by `[database name]`.
 
-        因此报告篇幅和 db_checkup 相当，但覆盖全体库。单库实例（如 SQLite）
-        自动回落到 db_checkup。**想知道整台实例健康状况时用本工具，而不是逐库
-        db_checkup 拼接。**
+        So the report is about the same length as db_checkup's but covers every
+        database. A single-database instance (like SQLite) automatically falls back to
+        db_checkup. **Use this tool when you want to know the health of the whole
+        instance, rather than stitching together per-database db_checkup calls.**
         """
         try:
             db = service.resolve_pg_database(project, connection, pg_database)
@@ -1104,26 +1269,31 @@ def build_mcp(service: DbmService) -> FastMCP:
         project: str,
         connection: str,
         table: Annotated[
-            str, Field(description="表名；一次要多张就用逗号分隔，如 `orders,order_item`")
+            str, Field(description="Table name; comma-separate several, e.g. `orders,order_item`")
         ],
         database: Annotated[str | None, Field(description=_SCHEMA_DESC)] = None,
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> str:
-        """查看建表语句（DDL）。比 describe_table 多给出索引定义、字符集、引擎、分区等原文细节。
+        """Show the CREATE TABLE statement (DDL). Gives more raw detail than describe_table — index definitions, charset, engine, partitioning, etc.
 
-        MySQL / ClickHouse 返回 `SHOW CREATE TABLE` 的原文；PostgreSQL / SQLite 等没有这条
-        语句的引擎，返回由表结构反射拼出的**近似 DDL**（首行注释会标明），可用来读懂结构，
-        但不要当作可原样执行的建库脚本。
+        MySQL / ClickHouse return the raw `SHOW CREATE TABLE` text; engines without such a
+        statement (PostgreSQL / SQLite, etc.) return an **approximate DDL** built from
+        reflecting the table structure (a leading comment says so), useful for
+        understanding the structure but not to be treated as a script you can run as-is
+        to create the database.
 
-        只需要字段名和类型时用 describe_table 更省上下文；要看索引怎么建的、有没有分区、
-        建表时的默认值/注释原文，才用这个。
+        Use describe_table when you only need column names and types — it's cheaper on
+        context; use this one when you need to see how indexes are built, whether it's
+        partitioned, or the raw defaults/comments from table creation.
         """
         names = [t.strip() for t in table.split(",") if t.strip()]
         caller = _caller_from_ctx(ctx)
         try:
-            # 单表走原路径：表名写错/无权限就该原样报错给 agent，而不是回一段
-            # 「取失败」的注释文本让它以为调用成功了。批量才需要逐表容错。
+            # Single table takes the original path: a misspelled name or missing
+            # permission should raise a real error to the agent, not return a comment
+            # saying "failed to fetch" that looks like success. Only the batch path
+            # needs per-table fault tolerance.
             db = service.resolve_pg_database(project, connection, pg_database)
             if len(names) == 1:
                 return service.get_table_ddl(project, connection, names[0], caller,
@@ -1132,10 +1302,11 @@ def build_mcp(service: DbmService) -> FastMCP:
                                            schema=database, database=db)
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
-        # 多表：每段前加表名注释分隔，取失败的那张也如实标出来（不静默跳过）
+        # Multiple tables: separate each block with a table-name comment, and honestly
+        # mark the ones that failed to fetch (don't silently skip them)
         return "\n\n".join(
             f"-- {it['table']}\n" + (it["ddl"] if "ddl" in it
-                                     else f"-- 取建表语句失败: {it['error']}")
+                                     else f"-- Failed to fetch DDL: {it['error']}")
             for it in items
         )
 
@@ -1148,9 +1319,9 @@ def build_mcp(service: DbmService) -> FastMCP:
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> str:
-        """抽样查看表数据（默认 10 行，上限 100 行）。返回紧凑 TSV 文本（格式同 query）。
+        """Sample a table's data (default 10 rows, up to 100). Returns compact TSV text (same format as query).
 
-        与 query 共用同一份会话级结果配额。
+        Shares the same session-level result quota with query.
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -1166,30 +1337,33 @@ def build_mcp(service: DbmService) -> FastMCP:
     async def export_table(
         project: str,
         connection: str,
-        table: Annotated[str, Field(description="要导出的表名")],
+        table: Annotated[str, Field(description="Table name to export")],
         limit: Annotated[
-            int, Field(ge=1, description="最多导出的行数，不能超过连接策略 max_rows")
+            int, Field(ge=1, description="Maximum rows to export; cannot exceed the connection policy's max_rows")
         ],
         fields: Annotated[
             list[str] | None,
-            Field(description="要导出的字段名列表；不传或空列表表示全部字段"),
+            Field(description="List of column names to export; omit or pass an empty list for all columns"),
         ] = None,
         format: Annotated[  # noqa: A002
             Literal["csv", "json", "markdown", "xlsx"],
-            Field(description="导出格式：csv / json / markdown / xlsx"),
+            Field(description="Export format: csv / json / markdown / xlsx"),
         ] = "csv",
         database: Annotated[
             str | None,
-            Field(description="要导出的库/schema（PG 为 schema）；连接已绑定默认库时可不传"),
+            Field(description="Database/schema to export from (schema for PG); omit if the connection already has a default database bound"),
         ] = None,
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
-        """按库、表、字段和行数导出数据，返回短期下载链接。
+        """Export data by database, table, columns, and row count, returning a short-lived download link.
 
-        不接受任意 SQL；表和字段会先校验并安全引用。导出使用 reader 账号、只读查询与审计，
-        受连接 max_rows 限制，并沿用 agent 敏感字段脱敏策略。文件保存在服务端一小时，
-        tool result 仅含元信息和下载 URL，文件内容不会进入 agent 上下文。
+        Does not accept arbitrary SQL; the table and columns are validated and safely
+        quoted first. Export uses the read-only account, a read-only query, and is
+        audited, subject to the connection's max_rows limit, and follows the same
+        sensitive-column masking policy as the agent. The file is kept on the server for
+        one hour; the tool result only contains metadata and the download URL — the file
+        content never enters the agent's context.
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -1204,10 +1378,12 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def analysis_workspaces() -> dict:
-        """列出分析工作区（含数据集）与已保存的 workflow（DuckDB 沙箱，跨源数据分析用）。
+        """List analysis workspaces (with their datasets) and saved workflows (a DuckDB sandbox for cross-source data analysis).
 
-        适用场景：跨连接 JOIN、大结果集聚合、多步分析——把数据快照进工作区后
-        用 analysis_sql 自由分析，只把小结果带回上下文。简单单表查询请直接用 query。
+        Use it when: cross-connection JOINs, large-result aggregation, multi-step
+        analysis — snapshot the data into a workspace, then analyze it freely with
+        analysis_sql and bring back only the small result. For a simple single-table
+        query, use query directly instead.
         """
         try:
             return {"workspaces": service.analysis_overview(),
@@ -1219,20 +1395,21 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     async def analysis_import(
-        workspace: Annotated[str, Field(description="工作区名（不存在则自动创建）")],
-        dataset: Annotated[str, Field(description="导入后的数据集（表）名")],
+        workspace: Annotated[str, Field(description="Workspace name (created automatically if it doesn't exist)")],
+        dataset: Annotated[str, Field(description="Name of the dataset (table) to import into")],
         project: str,
         connection: str,
-        sql: Annotated[str, Field(description="只读取数 SQL，如 SELECT * FROM t 或聚合查询")],
-        limit: Annotated[int | None, Field(description="快照行数上限（默认 20 万，硬上限 50 万）")] = None,
-        schema: Annotated[str | None, Field(description="执行 schema（未绑库连接需指定）")] = None,
+        sql: Annotated[str, Field(description="Read-only fetch SQL, e.g. SELECT * FROM t or an aggregation query")],
+        limit: Annotated[int | None, Field(description="Snapshot row cap (default 200,000, hard cap 500,000)")] = None,
+        schema: Annotated[str | None, Field(description="Execution schema (required for a connection with no bound database)")] = None,
         pg_database: PgDatabase = None,
         ctx: Context | None = None,
     ) -> dict:
-        """从某个连接把查询结果快照进分析工作区（reader 只读拉取，全程审计，带行数上限）。
+        """Snapshot a query's result from a connection into the analysis workspace (fetched via the read-only account, fully audited, with a row cap).
 
-        跨源分析第一步：把各源的表/查询结果导成工作区数据集，再用 analysis_sql JOIN。
-        同名数据集会被替换（重跑友好）。
+        Step one of cross-source analysis: import each source's table/query result as a
+        workspace dataset, then JOIN them with analysis_sql. A dataset with the same name
+        is replaced (friendly to re-running).
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -1246,14 +1423,16 @@ def build_mcp(service: DbmService) -> FastMCP:
     @mcp.tool
     async def analysis_sql(
         workspace: str,
-        sql: Annotated[str, Field(description="工作区内任意 SQL：JOIN/聚合/建 VIEW/DDL 均可（本地沙箱，不碰生产）")],
-        max_rows: Annotated[int, Field(ge=1, le=5000, description="返回行数上限")] = 200,
+        sql: Annotated[str, Field(description="Any SQL inside the workspace: JOIN/aggregation/CREATE VIEW/DDL are all fine (local sandbox, never touches production)")],
+        max_rows: Annotated[int, Field(ge=1, le=5000, description="Row cap for the returned result")] = 200,
         ctx: Context | None = None,
     ) -> dict:
-        """在分析工作区执行 SQL（DuckDB 方言，完整支持 JOIN/窗口函数/CTE）。
+        """Run SQL inside the analysis workspace (DuckDB dialect, full support for JOIN/window functions/CTEs).
 
-        工作区是本地沙箱：建视图、建中间表、改数据都不需要审批——它不影响任何
-        生产库。把中间结果存成 VIEW/TABLE，多步分析时上下文只需携带最终小结果。
+        A workspace is a local sandbox: creating views, building intermediate tables, and
+        modifying data all need no approval — none of it touches any production database.
+        Store intermediate results as a VIEW/TABLE so a multi-step analysis only needs to
+        carry the final small result in context.
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -1264,14 +1443,15 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     async def run_workflow(
-        name: Annotated[str, Field(description="workflow 名称（人或 agent 之前保存的分析流程）")],
+        name: Annotated[str, Field(description="Workflow name (a saved analysis flow, from a human or an agent)")],
         ctx: Context | None = None,
     ) -> dict:
-        """一键重跑已保存的分析 workflow：重新拉取源数据 → 逐步执行 → 返回每步状态
-        与最终输出预览。两类 workflow 均支持：脚本式（多语句 SQL）与可视化 DAG
-        （管理后台画布编排的取数/过滤/JOIN/聚合流程，按拓扑序执行）。
-        人沉淀的分析，agent 可按需重跑并解读结果。
-        可用 workflow 列表见 analysis_workspaces 工具或询问用户。
+        """Re-run a saved analysis workflow with one call: re-pull the source data -> run each step -> return each step's status
+        and a preview of the final output. Both kinds of workflow are supported: script-style
+        (a multi-statement SQL script) and visual DAG (a fetch/filter/JOIN/aggregate flow
+        laid out on the admin-backend canvas, executed in topological order).
+        An agent can re-run an analysis a human saved and interpret the result as needed.
+        See the analysis_workspaces tool, or ask the user, for the list of available workflows.
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -1282,17 +1462,18 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     async def save_workflow(
-        name: Annotated[str, Field(description="workflow 名称（已存在的脚本式同名会被覆盖更新）")],
-        workspace: Annotated[str, Field(description="分析工作区名（数据集所在的工作区）")],
-        script: Annotated[str, Field(description="多语句 SQL 脚本（分号分隔，DuckDB 方言），"
-                                                 "引用工作区里的数据集；最后一条 SELECT 作为输出")],
+        name: Annotated[str, Field(description="Workflow name (an existing script-style workflow with the same name will be overwritten)")],
+        workspace: Annotated[str, Field(description="Analysis workspace name (the workspace the datasets live in)")],
+        script: Annotated[str, Field(description="A multi-statement SQL script (semicolon-separated, "
+                                                 "DuckDB dialect) referencing the workspace's datasets; the last SELECT is the output")],
         ctx: Context | None = None,
     ) -> dict:
-        """把当前分析沉淀为可重跑的 workflow：脚本 + 工作区各数据集的取数配方（自动收集）。
+        """Save the current analysis as a re-runnable workflow: the script plus the fetch recipe for each dataset in the workspace (collected automatically).
 
-        先用 analysis_import 把数据导入工作区、analysis_sql 验证脚本可行，再保存；
-        之后人或 agent 都可用 run_workflow 一键重跑（自动重拉最新源数据）。
-        同名的管理后台画布（DAG）workflow 不允许覆盖。
+        Use analysis_import to import data into the workspace and analysis_sql to verify
+        the script works, then save it; afterwards a human or an agent can re-run it with
+        one call via run_workflow (which re-pulls the latest source data).
+        Cannot overwrite an admin-backend canvas (DAG) workflow with the same name.
         """
         caller = _caller_from_ctx(ctx)
         try:
@@ -1304,7 +1485,7 @@ def build_mcp(service: DbmService) -> FastMCP:
 
     @mcp.tool
     def test_connection(project: str, connection: str, ctx: Context | None = None) -> dict:
-        """测试连接连通性（执行 SELECT 1）。"""
+        """Test connectivity for a connection (runs SELECT 1)."""
         try:
             return service.test_connection(project, connection, _caller_from_ctx(ctx))
         except Exception as e:  # noqa: BLE001

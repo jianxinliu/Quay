@@ -170,15 +170,19 @@ class SessionBudget:
         if entry.used_chars < entry.allowance:
             return
         raise ResultBudgetExceeded(
-            f"本会话累计已返回约 {entry.used_chars:,} 字符"
-            f"（{'' if tokenizer_ready() else '≈'}{entry.used_tokens:,} token，"
-            f"共 {entry.calls} 次取数），"
-            f"达到会话结果配额上限。**请先停下来问用户**：是否确认继续这些会消耗大量 token "
-            "的查询？说明你还打算查什么、大概还要多少。用户同意后调 "
-            "allow_more_results(reason=\"用户已确认：……\") 再放行一个额度，然后继续。\n"
-            "在问之前，先想想有没有更省的做法：把聚合写进 SQL 只取结论；"
-            "整份数据用 export_table 落文件（用程序下载，别读进上下文）；"
-            "多步/跨源处理用 analysis_import + analysis_sql 把计算下推到本地沙箱。"
+            f"This session has already returned about {entry.used_chars:,} characters "
+            f"({'' if tokenizer_ready() else '~'}{entry.used_tokens:,} tokens across "
+            f"{entry.calls} fetches), hitting the session result quota. "
+            "**Stop and ask the user first**: do they want you to continue these "
+            "token-costly queries? Explain what you still plan to query and roughly how "
+            "much more. Once they agree, call "
+            "allow_more_results(reason=\"user confirmed: ...\") to get another allowance, "
+            "then continue.\n"
+            "Before asking, consider a cheaper approach: compute the answer with "
+            "aggregation in SQL; dump the full dataset to a file with export_table "
+            "(download it with code, don't read it into context); or push multi-step / "
+            "cross-source processing into the local sandbox with "
+            "analysis_import + analysis_sql."
         )
 
     def charge(self, session_id: str, text: str) -> dict:
@@ -240,11 +244,12 @@ WARN_AT_PERCENT = 75
 
 
 def usage_note(usage: dict) -> str:
-    """接近上限时给 agent 的一行提醒；未接近则返回空串。"""
+    """One-line warning for the agent when approaching the limit; empty string otherwise."""
     if not usage.get("enabled") or usage.get("percent", 0) < WARN_AT_PERCENT:
         return ""
-    tilde = "" if usage.get("tokens_exact") else "≈"
-    return (f"# budget: 本会话已用 {usage['used_chars']:,} 字符"
-            f"（{tilde}{usage['used_tokens']:,} token，{usage['percent']}% 配额，"
-            f"{usage['calls']} 次取数）。"
-            "接近上限后将被拒绝取数——请改用聚合/导出文件/分析工作台收窄结果。")
+    tilde = "" if usage.get("tokens_exact") else "~"
+    return (f"# budget: this session has used {usage['used_chars']:,} characters "
+            f"({tilde}{usage['used_tokens']:,} tokens, {usage['percent']}% of quota, "
+            f"{usage['calls']} fetches). "
+            "Further fetches will be rejected once the limit is reached — switch to "
+            "aggregation / exporting to a file / the analysis workbench to narrow the result.")

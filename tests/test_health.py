@@ -131,7 +131,7 @@ class TestHealthMonitor:
         assert ei.value.state == "exhausted"
         # 不再是"永久放弃"：仍给出下次重试时间，且文案说明在自动重试
         assert ei.value.retry_after_s > 0
-        assert "自动重试" in str(ei.value)
+        assert "auto-retrying" in str(ei.value)
         m.stop()
 
 

@@ -133,7 +133,7 @@ class TestService:
         assert rec["project"] == "analysis" and rec["connection"] == "ws1"
 
     def test_import_rejects_write_sql(self, service):
-        with pytest.raises(QueryRejected, match="只读"):
+        with pytest.raises(QueryRejected, match="read-only"):
             service.analysis_import("ws1", "x", "demo", "main",
                                     "DELETE FROM users", CALLER)
 
@@ -179,7 +179,7 @@ class TestWorkflow:
         # 重跑:重拉 + 逐步执行,输出为最后的 SELECT
         out = svc.workflow_run("adults", CALLER)
         assert out["ok"] is True
-        assert out["steps"][0]["step"].startswith("导入 u") and out["steps"][0]["rows"] == 3
+        assert out["steps"][0]["step"].startswith("Import u") and out["steps"][0]["rows"] == 3
         assert out["output"]["rows"][0][0] == 2
         # 源数据变化后重跑结果随之更新(模拟:直接改工作区数据不行——改源库)
         import sqlite3
@@ -635,7 +635,7 @@ class TestGraph:
         # 人画的 DAG：agent 同名保存被拒
         g = {"nodes": [_node("a", "source", "u", conn="demo/main", sql="SELECT 1")], "edges": []}
         svc.workflow_save("human-dag", "ws1", "", CALLER, graph=g)
-        with pytest.raises(ValueError, match="不允许覆盖"):
+        with pytest.raises(ValueError, match="cannot be overwritten"):
             svc.workflow_save("human-dag", "ws1", "SELECT 1", CALLER, allow_replace_graph=False)
         # 后台侧（默认 allow_replace_graph=True）不受限
         svc.workflow_save("human-dag", "ws1", "", CALLER, graph=g)

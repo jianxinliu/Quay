@@ -194,7 +194,7 @@ class TestQuery:
         assert logs[0]["fingerprint"]
 
     def test_write_rejected_and_audited(self, service):
-        with pytest.raises(QueryRejected, match="已拒绝"):
+        with pytest.raises(QueryRejected, match="Rejected"):
             service.query("demo", "main", "DELETE FROM users", CALLER)
 
         logs = service.store.recent()
@@ -269,7 +269,7 @@ class TestSchemaTools:
         assert path.read_bytes().startswith(b"\xef\xbb\xbfname,age")
 
     def test_export_table_rejects_unknown_field(self, service):
-        with pytest.raises(ValueError, match="字段不存在"):
+        with pytest.raises(ValueError, match="not found in table"):
             service.export_table(
                 "demo", "main", "users", ["name", "password"], 2, "json", CALLER
             )
@@ -293,7 +293,7 @@ class TestSchemaTools:
         assert "| id | name |" in preview["raw"]
 
     def test_export_table_respects_connection_row_limit(self, service):
-        with pytest.raises(ValueError, match="连接策略上限"):
+        with pytest.raises(ValueError, match="connection policy cap"):
             service.export_table(
                 "demo", "main", "users", None, 3, "json", CALLER
             )
@@ -464,7 +464,7 @@ class TestNoDatabaseSchema:
                      "environment": "dev"}}}}})
         svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
         # 守卫在建连之前触发，无需真实连接
-        with pytest.raises(ValueError, match="未绑定默认库"):
+        with pytest.raises(ValueError, match="no default database bound"):
             svc.list_tables("p", "nodb", CALLER)
         svc.close()
 
@@ -490,7 +490,7 @@ class TestNoDatabaseHint:
         }}}})
         svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"))
         conns = {c["connection"]: c for c in svc.list_connections("p")}
-        assert "note" in conns["nodb"] and "全限定" in conns["nodb"]["note"]
+        assert "note" in conns["nodb"] and "database.table" in conns["nodb"]["note"]
         assert "note" not in conns["withdb"]
         svc.close()
 
@@ -932,7 +932,7 @@ class TestAiPgDatabase:
         self._enable(svc)
         monkeypatch.setattr(svc, "_pg_server_databases",
                             lambda *a, **k: ["maindb", "otherdb"])
-        with pytest.raises(ValueError, match="可连接的库"):
+        with pytest.raises(ValueError, match="can connect to"):
             svc.ai_generate_sql("demo", "pg", "q", CALLER, tables=["t"], database="nope")
         svc.close()
 
@@ -942,7 +942,7 @@ class TestAiPgDatabase:
 
         service.settings = SettingsStore(":memory:")
         service.save_settings({"ai_enabled": "true"})
-        with pytest.raises(ValueError, match="pg_database 只适用"):
+        with pytest.raises(ValueError, match="pg_database only applies"):
             service.ai_generate_sql("demo", "main", "q", CALLER, tables=["users"],
                                     database="whatever")
 
