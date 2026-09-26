@@ -152,7 +152,7 @@ Add one `@deepseek-ai/dsh-mcp-client` instance per MCP server in `cordis.yml`. T
 
 If a client speaks MCP streamable HTTP, the URL is `http://127.0.0.1:8100/mcp`. It listens on loopback with no auth — do not expose port 8100 on the LAN or the public internet.
 
-Every admin page (dashboard, approvals, audit, settings) shares one theme with the query console: dark by default, switchable to light in Settings. A fresh dashboard shows a three-step onboarding (add a connection → run a query → connect an agent), and connections that were never reached show as "unprobed" rather than "ok".
+Every admin page (dashboard, approvals, audit, settings) shares one theme with the query console: dark by default, switchable to light in Settings. Text shared between the agent and the admin (risk reasons, checkup reports, approval errors) is always English for the agent over MCP, while the admin shows it in the language chosen in Settings (`text_language`, Chinese by default). A fresh dashboard shows a three-step onboarding (add a connection → run a query → connect an agent), and connections that were never reached show as "unprobed" rather than "ok".
 
 ## How it's organized
 

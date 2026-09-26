@@ -42,8 +42,22 @@ from .drivers import (  # noqa: F401
 from .drivers.base import role_timeouts  # noqa: F401
 from .drivers.mysql import mysql_read_timeout, mysql_session_statements  # noqa: F401
 from .drivers.postgres import pg_database_name  # noqa: F401
+from .i18n import register, t
 from .metrics import estimate_cell_bytes, estimate_result_bytes
 from .tunnel import SSHTunnel, open_tunnel
+
+register({
+    "engines.truncated_suffix": (
+        "…[已截断，原 {n} 字符]",
+        "…[truncated, original length {n} characters]",
+    ),
+    "engines.table_not_found": (
+        "表 {table} 不存在，可用表: {names}",
+        "Table {table} does not exist. Available tables: {names}",
+    ),
+    "engines.no_tables_available": ("（无）", "(none)"),
+})
+
 DEFAULT_IDLE_RECLAIM_S = 600  # 隧道 + 引擎空闲 10 分钟回收
 DEFAULT_ENGINE_POOL_SIZE = 15  # 单引擎最大连接数（= SQLAlchemy pool_size + max_overflow）
 
@@ -377,11 +391,11 @@ def stream_rows(
 def truncate_cell(value: Any, max_chars: int) -> Any:
     """超长字符串单元格截断并标注原始长度（含 bytes 的 base64 包装形式）。"""
     if isinstance(value, str) and len(value) > max_chars:
-        return value[:max_chars] + f"…[已截断，原 {len(value)} 字符]"
+        return value[:max_chars] + t("engines.truncated_suffix", n=len(value))
     if isinstance(value, dict) and "__bytes_base64__" in value:
         b64 = value["__bytes_base64__"]
         if isinstance(b64, str) and len(b64) > max_chars:
-            return {"__bytes_base64__": b64[:max_chars] + f"…[已截断，原 {len(b64)} 字符]"}
+            return {"__bytes_base64__": b64[:max_chars] + t("engines.truncated_suffix", n=len(b64))}
     return value
 
 
@@ -637,7 +651,8 @@ def sample_rows(
 def _ensure_table_exists(insp, table: str, schema: str | None = None) -> None:  # noqa: ANN001
     names = insp.get_table_names(schema=schema)
     if table not in names:
-        raise ValueError(f"表 {table!r} 不存在，可用表: {', '.join(sorted(names)) or '（无）'}")
+        names_str = ", ".join(sorted(names)) or t("engines.no_tables_available")
+        raise ValueError(t("engines.table_not_found", table=repr(table), names=names_str))
 
 
 # JS Number.MAX_SAFE_INTEGER = 2^53-1；超过它的整数（雪花 ID/int64）在前端 JSON.parse
@@ -731,7 +746,8 @@ def _check_one_statement(conn, stmt: str, engine_kind: str) -> SyntaxCheck:  # n
 def _ensure_table_exists(insp, table: str, schema: str | None = None) -> None:  # noqa: ANN001
     names = insp.get_table_names(schema=schema)
     if table not in names:
-        raise ValueError(f"表 {table!r} 不存在，可用表: {', '.join(sorted(names)) or '（无）'}")
+        names_str = ", ".join(sorted(names)) or t("engines.no_tables_available")
+        raise ValueError(t("engines.table_not_found", table=repr(table), names=names_str))
 
 
 # JS Number.MAX_SAFE_INTEGER = 2^53-1；超过它的整数（雪花 ID/int64）在前端 JSON.parse

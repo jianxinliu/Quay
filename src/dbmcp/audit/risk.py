@@ -18,7 +18,61 @@ from typing import Protocol
 import sqlglot
 from sqlglot import exp
 
+from ..i18n import current_locale, register, t
 from .classify import normalize_sql_for_parse
+
+register({
+    "risk.unparseable": (
+        "SQL 无法解析，无法评估影响范围，按最高风险处理",
+        "The SQL could not be parsed, so its impact cannot be assessed; treated as maximum risk",
+    ),
+    "risk.empty_statement": (
+        "空语句，无法评估，按最高风险处理",
+        "Empty statement, cannot be assessed; treated as maximum risk",
+    ),
+    "risk.batch_summary": (
+        "多语句批量提交（{count} 条），逐条评估取最高风险等级 {level}",
+        "Batch of {count} statements; assessed individually, highest risk level is {level}",
+    ),
+    "risk.batch_item": ("[{index}] {kind}（{level}）：{detail}", "[{index}] {kind} ({level}): {detail}"),
+    "risk.irreversible_delete": (
+        "{kind} 会不可逆地删除对象/数据",
+        "{kind} irreversibly deletes objects/data",
+    ),
+    "risk.ddl_change": ("DDL 变更", "DDL change"),
+    "risk.drop_partition_data_loss": (
+        "DROP PARTITION 会不可逆地删除整个分区的数据",
+        "DROP PARTITION irreversibly deletes an entire partition's data",
+    ),
+    "risk.large_table_ddl_warning": (
+        "大表 DDL 可能长时间锁表，建议低峰期或在线 DDL 工具执行",
+        "DDL on a large table may lock it for a long time; consider running it off-peak or with an online DDL tool",
+    ),
+    "risk.comment_only": ("只修改注释，不影响数据", "Only changes a comment; does not affect data"),
+    "risk.insert_data": ("插入数据", "Inserts data"),
+    "risk.ddl_or_grant": ("{kind} 属于 DDL / 权限变更", "{kind} is a DDL/privilege change"),
+    "risk.unknown_statement_type": (
+        "无法识别的语句类型 {kind}，无法评估影响范围，按最高风险处理",
+        "Unrecognized statement type {kind}; its impact cannot be assessed, treated as maximum risk",
+    ),
+    "risk.no_where_full_table": (
+        "无 WHERE 条件的 {kind} 会影响全表所有行",
+        "{kind} without a WHERE clause affects every row in the table",
+    ),
+    "risk.where_not_indexed": (
+        "WHERE 条件列 {columns} 未命中索引，可能全表扫描后写入",
+        "WHERE columns {columns} do not hit an index; this may write after a full table scan",
+    ),
+    "risk.where_indexed": (
+        "WHERE 条件命中索引，影响范围可控",
+        "The WHERE clause hits an index; the impact is bounded",
+    ),
+    "risk.has_where": ("带 WHERE 条件的 {kind}", "{kind} with a WHERE clause"),
+    "risk.large_table_rows": (
+        "目标表约 {rows} 行，属于大表",
+        "The target table has about {rows} rows and is considered large",
+    ),
+})
 
 # 风险等级，数值越大越危险
 LEVELS = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -92,11 +146,11 @@ def assess(sql: str, engine: str, meta_provider: MetaProvider) -> RiskReport:
             level="CRITICAL",
             statement_kind="Unparseable",
             tables=[],
-            reasons=["SQL 无法解析，无法评估影响范围，按最高风险处理"],
+            reasons=[t("risk.unparseable")],
         )
     if not statements:
         return RiskReport(level="CRITICAL", statement_kind="Empty", tables=[],
-                          reasons=["空语句，无法评估，按最高风险处理"])
+                          reasons=[t("risk.empty_statement")])
     if len(statements) > 1:
         return _assess_batch(statements, meta_provider)
     return _assess_one(statements[0], meta_provider)
@@ -108,11 +162,12 @@ def _assess_batch(statements: list[exp.Expression], meta_provider: MetaProvider)
     level = "LOW"
     for r in reports:
         level = _bump(level, r.level)
-    tables = sorted({t for r in reports for t in r.tables})
-    reasons = [f"多语句批量提交（{len(statements)} 条），逐条评估取最高风险等级 {level}"]
+    tables = sorted({tb for r in reports for tb in r.tables})
+    reasons = [t("risk.batch_summary", count=len(statements), level=level)]
+    sep = "; " if current_locale() == "en" else "；"
     for i, r in enumerate(reports, 1):
-        detail = "；".join(r.reasons) if r.reasons else "—"
-        reasons.append(f"[{i}] {r.statement_kind}（{r.level}）：{detail}")
+        detail = sep.join(r.reasons) if r.reasons else "—"
+        reasons.append(t("risk.batch_item", index=i, kind=r.statement_kind, level=r.level, detail=detail))
     warnings = [f"[{i}] {w}" for i, r in enumerate(reports, 1) for w in r.warnings]
     return RiskReport(level=level, statement_kind="MultiStatement", tables=tables,
                       reasons=reasons, warnings=warnings)
@@ -121,15 +176,15 @@ def _assess_batch(statements: list[exp.Expression], meta_provider: MetaProvider)
 def _assess_one(stmt: exp.Expression, meta_provider: MetaProvider) -> RiskReport:
     """评估单条已解析语句。"""
     kind = type(stmt).__name__
-    found = [t for t in stmt.find_all(exp.Table) if t.name]
+    found = [tb for tb in stmt.find_all(exp.Table) if tb.name]
     report = RiskReport(level="MEDIUM", statement_kind=kind,
-                        tables=sorted({t.name for t in found}))
+                        tables=sorted({tb.name for tb in found}))
     # 查元数据要带上 schema：只给表名会到默认 schema 里找，`console.t` 这类永远查不到
-    tables = sorted({f"{t.db}.{t.name}" if t.db else t.name for t in found})
+    tables = sorted({f"{tb.db}.{tb.name}" if tb.db else tb.name for tb in found})
 
     if isinstance(stmt, (exp.Drop, exp.TruncateTable)):
         report.level = "CRITICAL"
-        report.reasons.append(f"{kind} 会不可逆地删除对象/数据")
+        report.reasons.append(t("risk.irreversible_delete", kind=kind))
         _annotate_table_size(report, tables, meta_provider)
         return report
 
@@ -138,40 +193,40 @@ def _assess_one(stmt: exp.Expression, meta_provider: MetaProvider) -> RiskReport
         return report
 
     if isinstance(stmt, exp.Alter):
-        report.reasons.append("DDL 变更")
+        report.reasons.append(t("risk.ddl_change"))
         big = _annotate_table_size(report, tables, meta_provider)
         report.level = _bump(report.level, "HIGH" if big else "MEDIUM")
         # DROP PARTITION 会不可逆地删除整个分区的数据（数据丢失）→ 底线 HIGH，不论表大小
         if next(stmt.find_all(exp.DropPartition), None) is not None:
             report.level = _bump(report.level, "HIGH")
-            report.reasons.append("DROP PARTITION 会不可逆地删除整个分区的数据")
+            report.reasons.append(t("risk.drop_partition_data_loss"))
         if big:
-            report.warnings.append("大表 DDL 可能长时间锁表，建议低峰期或在线 DDL 工具执行")
+            report.warnings.append(t("risk.large_table_ddl_warning"))
         return report
 
     if isinstance(stmt, exp.Comment):
         # 只改对象的注释文字：不碰数据，PG 也只在元数据上持很短的锁。等级只影响展示，
         # 写操作照样要审批 / 人工确认（见 requires_approval）
         report.level = "LOW"
-        report.reasons.append("只修改注释，不影响数据")
+        report.reasons.append(t("risk.comment_only"))
         target = stmt.this
         if isinstance(target, exp.Column) and target.table and not report.tables:
             report.tables = [target.table]
         return report
 
     if isinstance(stmt, exp.Insert):
-        report.reasons.append("插入数据")
+        report.reasons.append(t("risk.insert_data"))
         report.level = "MEDIUM"
         return report
 
     if isinstance(stmt, (exp.Create, exp.Grant)):
         report.level = "HIGH"
-        report.reasons.append(f"{kind} 属于 DDL / 权限变更")
+        report.reasons.append(t("risk.ddl_or_grant", kind=kind))
         return report
 
     # 无法映射到已知写类型：无法评估影响范围，按最高风险处理（默认拒绝原则）
     report.level = "CRITICAL"
-    report.reasons.append(f"无法识别的语句类型 {kind}，无法评估影响范围，按最高风险处理")
+    report.reasons.append(t("risk.unknown_statement_type", kind=kind))
     return report
 
 
@@ -188,7 +243,7 @@ def _assess_dml(
 
     if where is None:
         report.level = "CRITICAL"
-        report.reasons.append(f"无 WHERE 条件的 {kind} 会影响全表所有行")
+        report.reasons.append(t("risk.no_where_full_table", kind=kind))
         report.affected_estimate = report.row_estimate
         return
 
@@ -200,12 +255,12 @@ def _assess_dml(
         if not report.uses_index:
             report.level = _bump(report.level, "HIGH")
             report.reasons.append(
-                f"WHERE 条件列 {sorted(where_columns)} 未命中索引，可能全表扫描后写入"
+                t("risk.where_not_indexed", columns=sorted(where_columns))
             )
         else:
-            report.reasons.append("WHERE 条件命中索引，影响范围可控")
+            report.reasons.append(t("risk.where_indexed"))
     else:
-        report.reasons.append(f"带 WHERE 条件的 {kind}")
+        report.reasons.append(t("risk.has_where", kind=kind))
 
 
 def _annotate_table_size(
@@ -213,13 +268,13 @@ def _annotate_table_size(
 ) -> bool:
     """标注表行数量级，返回是否命中"大表"。"""
     biggest: int | None = None
-    for t in tables:
-        meta = meta_provider(t)
+    for tb in tables:
+        meta = meta_provider(tb)
         if meta is not None and meta.row_estimate is not None:
             biggest = meta.row_estimate if biggest is None else max(biggest, meta.row_estimate)
     report.row_estimate = biggest
     if biggest is not None and biggest >= LARGE_TABLE_ROWS:
-        report.warnings.append(f"目标表约 {biggest:,} 行，属于大表")
+        report.warnings.append(t("risk.large_table_rows", rows=f"{biggest:,}"))
         return True
     return False
 
@@ -227,8 +282,8 @@ def _annotate_table_size(
 def _indexed_columns_for(tables: list[str], meta_provider: MetaProvider) -> set[str] | None:
     cols: set[str] = set()
     seen_meta = False
-    for t in tables:
-        meta = meta_provider(t)
+    for tb in tables:
+        meta = meta_provider(tb)
         if meta is not None:
             seen_meta = True
             cols |= meta.indexed_columns

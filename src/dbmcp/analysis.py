@@ -12,6 +12,32 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .i18n import register, t
+
+register({
+    "analysis.kind_workspace": ("工作区", "workspace"),
+    "analysis.kind_dataset": ("数据集", "dataset"),
+    "analysis.invalid_name": (
+        "{kind}名只允许字母/数字/下划线/连字符（1-64 位），实际: {name}",
+        "{kind} name may only contain letters, digits, underscore, or hyphen (1-64 chars); got: {name}",
+    ),
+    "analysis.workspace_not_found_can_create": (
+        "工作区 {workspace} 不存在，可先创建或用 import 自动创建",
+        "Workspace {workspace} does not exist; create it first, or use import to create it automatically",
+    ),
+    "analysis.workspace_not_found": ("工作区 {workspace} 不存在", "Workspace {workspace} does not exist"),
+    "analysis.no_columns_to_import": (
+        "结果集没有列，无法导入",
+        "The result set has no columns, so it cannot be imported",
+    ),
+    "analysis.file_not_found": ("文件不存在: {path}", "File not found: {path}"),
+    "analysis.unsupported_file_type": (
+        "不支持的文件类型 {suffix}（支持 csv/tsv/parquet/json/jsonl）",
+        "Unsupported file type {suffix} (supported: csv/tsv/parquet/json/jsonl)",
+    ),
+    "analysis.dataset_not_found": ("数据集 {dataset} 不存在", "Dataset {dataset} does not exist"),
+})
+
 MAX_SNAPSHOT_ROWS = 500_000       # 快照行数硬上限（防拉挂源库/塞爆本地）
 DEFAULT_SNAPSHOT_ROWS = 200_000   # 默认快照行数
 MAX_RESULT_ROWS = 5_000           # 工作区查询默认返回上限（分页兜底仍由调用方做）
@@ -25,7 +51,7 @@ class AnalysisError(Exception):
 
 def _valid_name(name: str, kind: str) -> str:
     if not _NAME_RE.match(name or ""):
-        raise AnalysisError(f"{kind}名只允许字母/数字/下划线/连字符（1-64 位），实际: {name!r}")
+        raise AnalysisError(t("analysis.invalid_name", kind=kind, name=repr(name)))
     return name
 
 
@@ -37,14 +63,14 @@ class AnalysisStore:
     # ---------- 工作区 ----------
 
     def _path(self, workspace: str) -> Path:
-        return self.root / f"{_valid_name(workspace, '工作区')}.duckdb"
+        return self.root / f"{_valid_name(workspace, t('analysis.kind_workspace'))}.duckdb"
 
     def _connect(self, workspace: str, must_exist: bool = True):
         import duckdb  # noqa: PLC0415  惰性导入，未安装不影响其他功能
 
         path = self._path(workspace)
         if must_exist and not path.exists():
-            raise AnalysisError(f"工作区 {workspace!r} 不存在，可先创建或用 import 自动创建")
+            raise AnalysisError(t("analysis.workspace_not_found_can_create", workspace=repr(workspace)))
         return duckdb.connect(str(path))
 
     def list_workspaces(self) -> list[dict]:
@@ -59,7 +85,7 @@ class AnalysisStore:
     def drop_workspace(self, workspace: str) -> None:
         path = self._path(workspace)
         if not path.exists():
-            raise AnalysisError(f"工作区 {workspace!r} 不存在")
+            raise AnalysisError(t("analysis.workspace_not_found", workspace=repr(workspace)))
         path.unlink()
         wal = path.with_suffix(".duckdb.wal")
         if wal.exists():
@@ -111,9 +137,9 @@ class AnalysisStore:
         replace: bool = True, spec: dict | None = None,
     ) -> int:
         """把（service 从源库拉到的）行集落成工作区的表。列类型按前 200 行推断。"""
-        _valid_name(dataset, "数据集")
+        _valid_name(dataset, t("analysis.kind_dataset"))
         if not columns:
-            raise AnalysisError("结果集没有列，无法导入")
+            raise AnalysisError(t("analysis.no_columns_to_import"))
         con = self._connect(workspace, must_exist=False)
         try:
             types = _infer_types(columns, rows)
@@ -135,10 +161,10 @@ class AnalysisStore:
     def import_file(self, workspace: str, dataset: str, path: str, replace: bool = True,
                     record_spec: bool = True) -> int:
         """导入本地 CSV / Parquet / JSON 文件（DuckDB 原生读取，类型自动推断）。"""
-        _valid_name(dataset, "数据集")
+        _valid_name(dataset, t("analysis.kind_dataset"))
         p = Path(path).expanduser()
         if not p.is_file():
-            raise AnalysisError(f"文件不存在: {p}")
+            raise AnalysisError(t("analysis.file_not_found", path=p))
         suffix = p.suffix.lower()
         reader = {
             ".csv": "read_csv_auto(?)",
@@ -149,7 +175,7 @@ class AnalysisStore:
             ".ndjson": "read_json_auto(?)",
         }.get(suffix)
         if reader is None:
-            raise AnalysisError(f"不支持的文件类型 {suffix}（支持 csv/tsv/parquet/json/jsonl）")
+            raise AnalysisError(t("analysis.unsupported_file_type", suffix=suffix))
         con = self._connect(workspace, must_exist=False)
         try:
             if replace:
@@ -181,7 +207,7 @@ class AnalysisStore:
     def drop_dataset(self, workspace: str, dataset: str) -> None:
         # DuckDB 的 DROP TABLE IF EXISTS 遇到同名 VIEW 会报类型错误（IF EXISTS 不豁免），
         # 必须先查类型再按类型删
-        _valid_name(dataset, "数据集")
+        _valid_name(dataset, t("analysis.kind_dataset"))
         con = self._connect(workspace)
         try:
             row = con.execute(
@@ -213,7 +239,7 @@ class AnalysisStore:
                 " WHERE table_schema = 'main' AND table_name = ? ORDER BY ordinal_position",
                 [dataset]).fetchall()
             if not rows:
-                raise AnalysisError(f"数据集 {dataset!r} 不存在")
+                raise AnalysisError(t("analysis.dataset_not_found", dataset=repr(dataset)))
             return {"table": dataset, "schema": None,
                     "columns": [{"name": r[0], "type": r[1],
                                  "nullable": r[2] == "YES", "default": None, "comment": None}
@@ -272,12 +298,12 @@ def _infer_types(columns: list[str], rows: list[list[Any]]) -> list[str]:
 def _coerce_row(row: list[Any], types: list[str]) -> list[Any]:
     """按推断类型温和转换（推断样本外出现的异型值转字符串兜底，避免整批失败）。"""
     out = []
-    for v, t in zip(row, types, strict=False):
+    for v, typ in zip(row, types, strict=False):
         if v is None:
             out.append(None)
-        elif t == "VARCHAR" and not isinstance(v, str):
+        elif typ == "VARCHAR" and not isinstance(v, str):
             out.append(str(v))
-        elif t in ("BIGINT", "DOUBLE") and isinstance(v, str):
+        elif typ in ("BIGINT", "DOUBLE") and isinstance(v, str):
             out.append(None if v == "" else v)  # duckdb 会尝试转换，失败抛错即报给用户
         elif isinstance(v, dict):  # bytes base64 包装等复杂值
             out.append(str(v))

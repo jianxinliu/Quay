@@ -18,6 +18,58 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .i18n import current_locale, register, t
+
+register({
+    "approvals.not_found": ("审批单 #{id} 不存在", "Change #{id} does not exist"),
+    "approvals.not_pending_for_token": (
+        "审批单 #{id} 不是待审批状态，无法签发操作链接",
+        "Change #{id} is not pending, so an action link cannot be issued",
+    ),
+    "approvals.cannot_decide": (
+        "审批单 #{id} 当前状态为 {status}，无法再决策",
+        "Change #{id} is currently {status} and can no longer be decided",
+    ),
+    "approvals.expired": (
+        "审批单 #{id} 已过期（TTL {ttl}），请重新提交",
+        "Change #{id} has expired (TTL {ttl}); please resubmit",
+    ),
+    "approvals.already_consumed": (
+        "审批单 #{id} 已被使用过，一张审批单只能执行一次",
+        "Change #{id} has already been used; a change can only be executed once",
+    ),
+    "approvals.rejected": (
+        "审批单 #{id} 已被拒绝{note}，请按意见调整后重新提交",
+        "Change #{id} was rejected{note}; revise per the feedback and resubmit",
+    ),
+    "approvals.still_pending": (
+        "审批单 #{id} 尚未审批，请等待人工审批后再重提",
+        "Change #{id} has not been approved yet; wait for human approval before resubmitting",
+    ),
+    "approvals.connection_mismatch": (
+        "审批单 #{id} 属于连接 {project}/{connection}，与本次提交不符",
+        "Change #{id} belongs to connection {project}/{connection}, which does not match this submission",
+    ),
+    "approvals.default_database_label": ("（连接默认库）", "(the connection's default database)"),
+    "approvals.database_mismatch": (
+        "审批单 #{id} 批准的是在库 {approved_db} 上执行，本次重提指定的是 {resubmit_db}，拒绝执行",
+        "Change #{id} was approved to run against database {approved_db}; this resubmission "
+        "specifies {resubmit_db}; rejected",
+    ),
+    "approvals.what_sync": ("同步计划", "sync plan"),
+    "approvals.what_sql": ("SQL", "SQL"),
+    "approvals.fingerprint_mismatch": (
+        "重提的{what}与审批单 #{id} 已批准的{what}不一致，拒绝执行。"
+        "请提交与审批时完全相同的{what}，或重新发起审批。",
+        "The resubmitted {what} does not match the {what} approved in change #{id}; rejected. "
+        "Resubmit the exact same {what} as when it was approved, or start a new approval.",
+    ),
+    "approvals.consumed_concurrent": (
+        "审批单 #{id} 已被使用过（并发核销），一张审批单只能执行一次",
+        "Change #{id} has already been used (consumed concurrently); a change can only be executed once",
+    ),
+})
+
 DEFAULT_TTL_MINUTES = 60
 
 # 状态机：pending → approved → consumed
@@ -196,7 +248,7 @@ class ApprovalStore:
                 "SELECT * FROM change_request WHERE id = ?", (change_id,)
             ).fetchone()
         if row is None:
-            raise ApprovalError(f"审批单 #{change_id} 不存在")
+            raise ApprovalError(t("approvals.not_found", id=change_id))
         return self._row_to_change(row)
 
     def list_by_status(self, status: str | None = None, limit: int = 200) -> list[ChangeRequest]:
@@ -245,7 +297,7 @@ class ApprovalStore:
             )
             self._conn.commit()
         if cur.rowcount != 1:
-            raise ApprovalError(f"审批单 #{change_id} 不是待审批状态，无法签发操作链接")
+            raise ApprovalError(t("approvals.not_pending_for_token", id=change_id))
         return token
 
     def action_token_matches(self, change_id: int, token: str) -> bool:
@@ -282,7 +334,7 @@ class ApprovalStore:
         change = self.get(change_id)
         effective = change.effective_status()
         if effective != STATUS_PENDING:
-            raise ApprovalError(f"审批单 #{change_id} 当前状态为 {effective}，无法再决策")
+            raise ApprovalError(t("approvals.cannot_decide", id=change_id, status=effective))
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             # 决策后令牌一并作废：后台批过的单，通知里的链接不该还能再点
@@ -304,30 +356,33 @@ class ApprovalStore:
         change = self.get(change_id)
         effective = change.effective_status()
         if effective == STATUS_EXPIRED:
-            raise ApprovalError(f"审批单 #{change_id} 已过期（TTL {self._ttl}），请重新提交")
+            raise ApprovalError(t("approvals.expired", id=change_id, ttl=self._ttl))
         if effective == STATUS_CONSUMED:
-            raise ApprovalError(f"审批单 #{change_id} 已被使用过，一张审批单只能执行一次")
+            raise ApprovalError(t("approvals.already_consumed", id=change_id))
         if effective == STATUS_REJECTED:
-            note = f"：{change.decision_note}" if change.decision_note else ""
-            raise ApprovalError(f"审批单 #{change_id} 已被拒绝{note}，请按意见调整后重新提交")
+            sep = ": " if current_locale() == "en" else "："
+            note = f"{sep}{change.decision_note}" if change.decision_note else ""
+            raise ApprovalError(t("approvals.rejected", id=change_id, note=note))
         if effective == STATUS_PENDING:
-            raise ApprovalError(f"审批单 #{change_id} 尚未审批，请等待人工审批后再重提")
+            raise ApprovalError(t("approvals.still_pending", id=change_id))
         if (change.project, change.connection) != connection_key:
             raise ApprovalError(
-                f"审批单 #{change_id} 属于连接 {change.project}/{change.connection}，与本次提交不符"
+                t("approvals.connection_mismatch", id=change_id,
+                  project=change.project, connection=change.connection)
             )
         # 重提时没带库名就按审批单里记的库执行；带了但对不上，说明 agent 以为自己在
         # 另一个库上——宁可拒绝，也不在它没想到的库里落地。
         if database is not None and (database or "") != change.database:
+            default_label = t("approvals.default_database_label")
             raise ApprovalError(
-                f"审批单 #{change_id} 批准的是在库 {change.database or '（连接默认库）'} 上执行，"
-                f"本次重提指定的是 {database or '（连接默认库）'}，拒绝执行"
+                t("approvals.database_mismatch", id=change_id,
+                  approved_db=change.database or default_label,
+                  resubmit_db=database or default_label)
             )
         if change.fingerprint != resubmit_fingerprint:
-            what = "同步计划" if change.kind == KIND_SYNC else "SQL"
+            what = t("approvals.what_sync") if change.kind == KIND_SYNC else t("approvals.what_sql")
             raise ApprovalError(
-                f"重提的{what}与审批单 #{change_id} 已批准的{what}不一致，拒绝执行。"
-                f"请提交与审批时完全相同的{what}，或重新发起审批。"
+                t("approvals.fingerprint_mismatch", what=what, id=change_id)
             )
         # 原子核销（compare-and-swap）：只有 status 仍为 approved 的那一次 UPDATE 生效，
         # rowcount!=1 说明被并发抢先核销——防止两个线程都通过上面的检查后重复执行（双花）。
@@ -340,9 +395,7 @@ class ApprovalStore:
             )
             self._conn.commit()
         if cur.rowcount != 1:
-            raise ApprovalError(
-                f"审批单 #{change_id} 已被使用过（并发核销），一张审批单只能执行一次"
-            )
+            raise ApprovalError(t("approvals.consumed_concurrent", id=change_id))
         return self.get(change_id)
 
     def record_execution(self, change_id: int, result: dict) -> None:

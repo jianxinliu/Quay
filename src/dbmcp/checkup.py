@@ -41,6 +41,8 @@ from typing import Any, Literal
 from sqlalchemy import text
 from sqlalchemy.engine import Engine as SAEngine
 
+from .i18n import current_locale, register, t
+
 logger = logging.getLogger(__name__)
 
 Status = Literal["ok", "info", "warn", "critical", "unknown"]
@@ -56,7 +58,52 @@ DIMENSIONS: tuple[tuple[str, str], ...] = (
     ("maintenance", "存储维护"),
 )
 _DIM_ORDER = {k: i for i, (k, _) in enumerate(DIMENSIONS)}
-_DIM_TITLE = {k: t for k, t in DIMENSIONS}
+_DIM_TITLE = {k: title for k, title in DIMENSIONS}
+
+register({
+    "checkup.dimension.availability": ("可用性", "Availability"),
+    "checkup.dimension.capacity": ("容量与连接", "Capacity & Connections"),
+    "checkup.dimension.performance": ("查询性能", "Query Performance"),
+    "checkup.dimension.concurrency": ("锁与并发", "Locking & Concurrency"),
+    "checkup.dimension.replication": ("复制与高可用", "Replication & HA"),
+    "checkup.dimension.maintenance": ("存储维护", "Storage & Maintenance"),
+    "checkup.common.unknown": ("未知", "unknown"),
+    "checkup.common.username_placeholder": ("<用户名>", "<username>"),
+    "checkup.common.grant_missing_privilege": ("-- 补权限: {priv}", "-- grant the missing privilege: {priv}"),
+    "checkup.common.duration_days_hours": ("{days} 天 {hours} 小时", "{days}d {hours}h"),
+    "checkup.common.duration_hours_mins": ("{hours} 小时 {mins} 分", "{hours}h {mins}m"),
+    "checkup.common.duration_mins_secs": ("{mins} 分 {secs} 秒", "{mins}m {secs}s"),
+    "checkup.common.duration_secs": ("{secs} 秒", "{secs}s"),
+    "checkup.common.summary_critical": ("严重", "critical"),
+    "checkup.common.summary_warn": ("需关注", "needs attention"),
+    "checkup.common.summary_ok": ("正常", "ok"),
+    "checkup.common.summary_info": ("参考", "info"),
+    "checkup.common.summary_unknown": ("无法测量", "unmeasured"),
+    "checkup.common.summary_item": ("{n} 项{label}", "{n} {label}"),
+    "checkup.common.summary_total": ("（共 {n} 项）", " ({n} total)"),
+    "checkup.merge.no_databases_title": ("无可体检的库", "No Databases to Check"),
+    "checkup.merge.no_databases_message": (
+        "该连接下没有可体检的用户库（可能全是系统库，或账号无权限列出）。",
+        "This connection has no user databases to check (they may all be system databases, "
+        "or the account lacks permission to list them).",
+    ),
+    "checkup.merge.scope_all_databases": ("全体 {n} 个库", "all {n} databases"),
+    "checkup.entry.unsupported_title": ("不支持体检", "Checkup Not Supported"),
+    "checkup.entry.unsupported_message": (
+        "该引擎暂不支持体检（支持：{engines}）",
+        "Checkup is not yet supported for this engine (supported: {engines})",
+    ),
+    "checkup.entry.connectivity_title": ("数据库连接", "Database Connection"),
+    "checkup.entry.connectivity_value": ("无法连接", "Unreachable"),
+    "checkup.entry.connectivity_message": (
+        "数据库不可达：{why}。请确认数据库在运行、网络/SSH 隧道通畅，"
+        "恢复后点「重新体检」即可测量全部指标。",
+        "The database is unreachable: {why}. Confirm the database is running and the "
+        "network/SSH tunnel is open; once it recovers, click \"re-run checkup\" to "
+        "measure every metric again.",
+    ),
+    "checkup.entry.error_title": ("体检执行失败", "Checkup Failed"),
+})
 
 # ---------- 阈值（集中声明，便于调参；注释说明取值依据） ----------
 
@@ -158,14 +205,15 @@ class CheckupReport:
         counts: dict[str, int] = {}
         for c in self.checks:
             counts[c.status] = counts.get(c.status, 0) + 1
-        parts = [f"{n} 项{label}" for label, n in
-                 (("严重", counts.get("critical", 0)),
-                  ("需关注", counts.get("warn", 0)),
-                  ("正常", counts.get("ok", 0)),
-                  ("参考", counts.get("info", 0)),
-                  ("无法测量", counts.get("unknown", 0)))
+        parts = [t("checkup.common.summary_item", n=n, label=label) for label, n in
+                 ((t("checkup.common.summary_critical"), counts.get("critical", 0)),
+                  (t("checkup.common.summary_warn"), counts.get("warn", 0)),
+                  (t("checkup.common.summary_ok"), counts.get("ok", 0)),
+                  (t("checkup.common.summary_info"), counts.get("info", 0)),
+                  (t("checkup.common.summary_unknown"), counts.get("unknown", 0)))
                  if n]
-        return "、".join(parts) + f"（共 {len(self.checks)} 项）"
+        sep = ", " if current_locale() == "en" else "、"
+        return sep.join(parts) + t("checkup.common.summary_total", n=len(self.checks))
 
     def to_dict(self) -> dict:
         return {
@@ -177,7 +225,7 @@ class CheckupReport:
             "overall": self.overall,
             "summary": self.summary,
             "checks": [c.to_dict() for c in self.checks],
-            "dimensions": [{"name": k, "title": t} for k, t in DIMENSIONS],
+            "dimensions": [{"name": k, "title": t(f"checkup.dimension.{k}")} for k, _ in DIMENSIONS],
             "privileges": [p.to_dict() for p in self.privileges],
         }
 
@@ -213,7 +261,7 @@ def report_to_markdown(report: dict) -> str:
             dim_titles[d["name"]] = d.get("title") or d["name"]
     if not dim_names:
         dim_names = [k for k, _ in DIMENSIONS]
-        dim_titles = {k: t for k, t in DIMENSIONS}
+        dim_titles = {k: title for k, title in DIMENSIONS}
     buckets: dict[str, list[dict]] = {}
     for c in rep.get("checks") or []:
         dim = c.get("dimension") or "maintenance"
@@ -339,7 +387,7 @@ def _to_num(v: Any) -> float | None:
 
 def _human_bytes(n: float | None) -> str:
     if n is None:
-        return "未知"
+        return t("checkup.common.unknown")
     n = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(n) < 1024 or unit == "TB":
@@ -350,18 +398,18 @@ def _human_bytes(n: float | None) -> str:
 
 def _human_duration(seconds: float | None) -> str:
     if seconds is None:
-        return "未知"
+        return t("checkup.common.unknown")
     seconds = float(seconds)
     days, rem = divmod(int(seconds), 86400)
     hours, rem = divmod(rem, 3600)
     mins, secs = divmod(rem, 60)
     if days:
-        return f"{days} 天 {hours} 小时"
+        return t("checkup.common.duration_days_hours", days=days, hours=hours)
     if hours:
-        return f"{hours} 小时 {mins} 分"
+        return t("checkup.common.duration_hours_mins", hours=hours, mins=mins)
     if mins:
-        return f"{mins} 分 {secs} 秒"
-    return f"{secs} 秒"
+        return t("checkup.common.duration_mins_secs", mins=mins, secs=secs)
+    return t("checkup.common.duration_secs", secs=secs)
 
 
 def _rate_per_hour(count: float | None, uptime_s: float | None) -> float | None:
@@ -390,7 +438,7 @@ def _current_user(engine: SAEngine, engine_kind: str) -> str:
     try:
         v = _scalar(engine, sql)
     except Exception:  # noqa: BLE001
-        return "<用户名>"
+        return t("checkup.common.username_placeholder")
     user = str(v or "")
     # MySQL 的 CURRENT_USER() 形如 'user@host'，GRANT 语句要拆成两个引号串
     if "@" in user and engine_kind != "postgres":
@@ -410,8 +458,9 @@ def _collect_gaps(checks: list[Check], user: str) -> list[PrivilegeGap]:
         "PROCESS": f"GRANT PROCESS ON *.* TO {user};",
         "REPLICATION CLIENT": f"GRANT REPLICATION CLIENT ON *.* TO {user};",
     }
-    return [PrivilegeGap(p, templates.get(p, f"-- 补权限: {p}"), sorted(t))
-            for p, t in by_priv.items()]
+    return [PrivilegeGap(p, templates.get(p, t("checkup.common.grant_missing_privilege", priv=p)),
+                         sorted(titles))
+            for p, titles in by_priv.items()]
 
 
 # =====================================================================
@@ -456,7 +505,7 @@ def _mysql_status(engine: SAEngine) -> tuple[dict[str, str], str]:
         pass
     rows = _rows(engine, "SHOW GLOBAL STATUS")  # 无服务端过滤，客户端筛
     got = {str(r[0]): str(r[1]) for r in rows if str(r[0]) in _MYSQL_STATUS_VARS}
-    return got, "SHOW GLOBAL STATUS（会话级回退值，若无 PROCESS 权限不代表全局）"
+    return got, t("checkup.mysql.status_source_fallback")
 
 
 def _mysql_variables(engine: SAEngine) -> dict[str, str]:
@@ -473,17 +522,132 @@ def _mysql_variables(engine: SAEngine) -> dict[str, str]:
         return {str(r[0]): str(r[1]) for r in rows if str(r[0]) in _MYSQL_VARS}
 
 
+register({
+    "checkup.common.count_times": ("{n} 次", "{n}"),
+    "checkup.mysql.server.title": ("服务器", "Server"),
+    "checkup.mysql.status_source_fallback": (
+        "SHOW GLOBAL STATUS（会话级回退值，若无 PROCESS 权限不代表全局）",
+        "SHOW GLOBAL STATUS (session-level fallback; without PROCESS privilege this is "
+        "not instance-wide)",
+    ),
+    "checkup.mysql.server.message": ("已运行 {dur}（状态来源：{src}）", "Running for {dur} (status source: {src})"),
+    "checkup.mysql.connections.title": ("连接占用", "Connections"),
+    "checkup.mysql.connections.detail_rejected": (
+        "Connection_errors_max_connection {n} 次（因超 max_connections 被拒绝的连接）",
+        "Connection_errors_max_connection: {n} (connections rejected for exceeding max_connections)",
+    ),
+    "checkup.mysql.connections.msg_rejected": (
+        "已有连接因超 max_connections 被拒绝过，池子确实打满过；调大 max_connections 或查应用连接池泄漏",
+        "Connections have already been rejected for exceeding max_connections — the pool has "
+        "genuinely been full; increase max_connections or check the application for connection "
+        "pool leaks",
+    ),
+    "checkup.mysql.connections.msg_warn": (
+        "接近上限时新连接会被拒绝；长连接过多考虑调 max_connections 或查应用连接池泄漏",
+        "New connections will be rejected once the limit is reached; if there are too many "
+        "long-lived connections, consider raising max_connections or checking for connection "
+        "pool leaks in the application",
+    ),
+    "checkup.mysql.connections.msg_ok": ("连接数在健康范围", "Connection count is within a healthy range"),
+    "checkup.mysql.connections.msg_unknown": (
+        "取不到 Threads_connected / max_connections（权限或版本不支持）",
+        "Could not read Threads_connected / max_connections (insufficient privilege or "
+        "unsupported version)",
+    ),
+    "checkup.mysql.threads_running.title": ("活跃线程", "Active Threads"),
+    "checkup.mysql.threads_running.msg_warn": (
+        "并发执行中的线程数；持续很高（>50）通常意味着慢查询在堆积",
+        "Number of concurrently executing threads; sustained high values (>50) usually indicate "
+        "slow queries are piling up",
+    ),
+    "checkup.mysql.threads_running.msg_info": (
+        "参考值：并发执行中的线程数", "Informational: number of concurrently executing threads",
+    ),
+    "checkup.mysql.threads_running.msg_unknown": ("取不到 Threads_running", "Could not read Threads_running"),
+    "checkup.mysql.buffer_pool_hit_ratio.title": (
+        "InnoDB 缓冲池命中率", "InnoDB Buffer Pool Hit Ratio",
+    ),
+    "checkup.mysql.buffer_pool_hit_ratio.msg_bad": (
+        "热数据已超出缓冲池，频繁读盘；考虑加大 innodb_buffer_pool_size 或优化全表扫描查询",
+        "Hot data no longer fits in the buffer pool, causing frequent disk reads; consider "
+        "increasing innodb_buffer_pool_size or optimizing full-table-scan queries",
+    ),
+    "checkup.mysql.buffer_pool_hit_ratio.msg_ok": (
+        "热数据基本都缓存在内存里", "Hot data is mostly cached in memory",
+    ),
+    "checkup.mysql.buffer_pool_hit_ratio.detail_reads": (
+        "逻辑读 {hit} 次，物理读 {disk} 次", "{hit} logical reads, {disk} physical reads",
+    ),
+    "checkup.mysql.buffer_pool_hit_ratio.detail_wait_free": (
+        "Innodb_buffer_pool_wait_free {n} 次（等空闲页的刷脏被打断，缓冲池确实不够）",
+        "Innodb_buffer_pool_wait_free: {n} (flushing was interrupted waiting for free pages; "
+        "the buffer pool is genuinely undersized)",
+    ),
+    "checkup.mysql.buffer_pool_hit_ratio.value_no_activity": ("无读取活动", "No read activity"),
+    "checkup.mysql.buffer_pool_hit_ratio.msg_no_activity": (
+        "启动后还没有足够的读取活动来计算命中率",
+        "Not enough read activity since startup to compute a hit ratio",
+    ),
+    "checkup.mysql.buffer_pool_hit_ratio.msg_unknown": (
+        "取不到 Innodb_buffer_pool_read_requests / reads",
+        "Could not read Innodb_buffer_pool_read_requests / reads",
+    ),
+    "checkup.mysql.slow_queries.title": ("慢查询（累计）", "Slow Queries (cumulative)"),
+    "checkup.mysql.slow_queries.value_rate": ("{n} 条（约 {rate} 条/小时）", "{n} (about {rate}/hour)"),
+    "checkup.mysql.slow_queries.value_plain": ("{n} 条", "{n}"),
+    "checkup.mysql.slow_queries.message": (
+        "阈值 long_query_time={lqt}s。看具体是哪些查询：查询台按耗时排序，或用 EXPLAIN 排查",
+        "Threshold long_query_time={lqt}s. To find which queries: sort by duration in the query "
+        "desk, or investigate with EXPLAIN",
+    ),
+    "checkup.mysql.slow_queries.msg_unknown": ("取不到 Slow_queries", "Could not read Slow_queries"),
+    "checkup.mysql.full_scan_joins.title": ("全表扫描 JOIN", "Full-Scan JOINs"),
+    "checkup.mysql.full_scan_joins.msg_warn": (
+        "JOIN 没走索引（type=ALL），扫描行数被放大；检查被 JOIN 列上是否有索引",
+        "The JOIN did not use an index (type=ALL), amplifying the rows scanned; check whether "
+        "the joined columns are indexed",
+    ),
+    "checkup.mysql.full_scan_joins.msg_info": (
+        "参考值：累计发生的不走索引的 JOIN 次数",
+        "Informational: cumulative count of JOINs that did not use an index",
+    ),
+    "checkup.mysql.full_scan_joins.msg_unknown": (
+        "取不到 Select_full_join", "Could not read Select_full_join",
+    ),
+    "checkup.mysql.aborted_clients.title": ("异常断开的连接", "Aborted Connections"),
+    "checkup.mysql.aborted_clients.rate_suffix": (
+        "（约 {rate} 次/小时）", " (about {rate}/hour)",
+    ),
+    "checkup.mysql.aborted_clients.msg_warn": (
+        "客户端没正确关闭连接（连接池泄漏 / 网络抖动 / wait_timeout 过短）",
+        "Clients are not closing connections properly (connection pool leak / network "
+        "flakiness / wait_timeout too short)",
+    ),
+    "checkup.mysql.aborted_clients.msg_info": (
+        "参考值：客户端未正常关闭的连接数；持续高频才需关注",
+        "Informational: count of connections not closed properly by clients; only worth "
+        "attention if sustained and frequent",
+    ),
+    "checkup.mysql.aborted_clients.detail": (
+        "Aborted_connects（连接被拒）{n} 次", "Aborted_connects (connections refused): {n}",
+    ),
+    "checkup.mysql.aborted_clients.msg_unknown": (
+        "取不到 Aborted_clients", "Could not read Aborted_clients",
+    ),
+})
+
+
 def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     checks: list[Check] = []
     status, src = _mysql_status(engine)
     variables = _mysql_variables(engine)
     uptime = _to_num(status.get("Uptime"))
-    version = variables.get("version", "未知")
+    version = variables.get("version") or t("checkup.common.unknown")
 
     # --- 服务器信息 ---
     checks.append(Check(
-        "server", "服务器", "info", f"MySQL {version}",
-        f"已运行 {_human_duration(uptime)}（状态来源：{src}）",
+        "server", t("checkup.mysql.server.title"), "info", f"MySQL {version}",
+        t("checkup.mysql.server.message", dur=_human_duration(uptime), src=src),
         dimension="availability",
     ))
 
@@ -497,20 +661,20 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
         # 有连接被 max_connections 拒绝过 = 池子确实打满过，比使用率更直接
         if rejected and rejected > 0 and level == "ok":
             level = "warn"
-        detail = ([f"Connection_errors_max_connection {int(rejected):,} 次"
-                   "（因超 max_connections 被拒绝的连接）"] if rejected else [])
+        detail = ([t("checkup.mysql.connections.detail_rejected", n=f"{int(rejected):,}")]
+                  if rejected else [])
+        pctxt = f"({pct:.0%})" if current_locale() == "en" else f"（{pct:.0%}）"
         checks.append(Check(
-            "connections", "连接占用", level,
-            f"{int(used)} / {int(max_conn)}（{pct:.0%}）",
-            ("已有连接因超 max_connections 被拒绝过，池子确实打满过；调大 max_connections "
-             "或查应用连接池泄漏" if rejected and rejected > 0 else
-             "接近上限时新连接会被拒绝；长连接过多考虑调 max_connections 或查应用连接池泄漏")
-            if level != "ok" else "连接数在健康范围",
+            "connections", t("checkup.mysql.connections.title"), level,
+            f"{int(used)} / {int(max_conn)}{pctxt}",
+            (t("checkup.mysql.connections.msg_rejected") if rejected and rejected > 0 else
+             t("checkup.mysql.connections.msg_warn"))
+            if level != "ok" else t("checkup.mysql.connections.msg_ok"),
             detail, dimension="capacity",
         ))
     else:
-        checks.append(Check("connections", "连接占用", "unknown", "未知",
-                            "取不到 Threads_connected / max_connections（权限或版本不支持）",
+        checks.append(Check("connections", t("checkup.mysql.connections.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.mysql.connections.msg_unknown"),
                             dimension="capacity", privilege="PROCESS"))
 
     # --- 活跃线程数 ---
@@ -518,14 +682,15 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     if running is not None:
         level = "warn" if running >= 50 else "info"
         checks.append(Check(
-            "threads_running", "活跃线程", level, str(int(running)),
-            "并发执行中的线程数；持续很高（>50）通常意味着慢查询在堆积" if level == "warn"
-            else "参考值：并发执行中的线程数",
+            "threads_running", t("checkup.mysql.threads_running.title"), level, str(int(running)),
+            t("checkup.mysql.threads_running.msg_warn") if level == "warn"
+            else t("checkup.mysql.threads_running.msg_info"),
             dimension="capacity",
         ))
     else:
-        checks.append(Check("threads_running", "活跃线程", "unknown", "未知",
-                            "取不到 Threads_running", dimension="capacity"))
+        checks.append(Check("threads_running", t("checkup.mysql.threads_running.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.mysql.threads_running.msg_unknown"),
+                            dimension="capacity"))
 
     # --- InnoDB 缓冲池命中率 ---
     hit_req = _to_num(status.get("Innodb_buffer_pool_read_requests"))
@@ -539,24 +704,29 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
             wait_free = _to_num(status.get("Innodb_buffer_pool_wait_free"))
             if wait_free and wait_free > 0 and level == "ok":
                 level = "warn"
-            detail = [f"逻辑读 {int(hit_req):,} 次，物理读 {int(disk_req):,} 次"]
+            detail = [t("checkup.mysql.buffer_pool_hit_ratio.detail_reads",
+                        hit=f"{int(hit_req):,}", disk=f"{int(disk_req):,}")]
             if wait_free and wait_free > 0:
-                detail.append(f"Innodb_buffer_pool_wait_free {int(wait_free):,} 次"
-                              "（等空闲页的刷脏被打断，缓冲池确实不够）")
+                detail.append(t("checkup.mysql.buffer_pool_hit_ratio.detail_wait_free",
+                                n=f"{int(wait_free):,}"))
             checks.append(Check(
-                "buffer_pool_hit_ratio", "InnoDB 缓冲池命中率", level, f"{hit:.2%}",
-                "热数据已超出缓冲池，频繁读盘；考虑加大 innodb_buffer_pool_size 或优化全表扫描查询"
-                if level != "ok" else "热数据基本都缓存在内存里",
+                "buffer_pool_hit_ratio", t("checkup.mysql.buffer_pool_hit_ratio.title"), level,
+                f"{hit:.2%}",
+                t("checkup.mysql.buffer_pool_hit_ratio.msg_bad") if level != "ok"
+                else t("checkup.mysql.buffer_pool_hit_ratio.msg_ok"),
                 detail, dimension="performance",
             ))
         else:
-            checks.append(Check("buffer_pool_hit_ratio", "InnoDB 缓冲池命中率", "info",
-                                "无读取活动", "启动后还没有足够的读取活动来计算命中率",
-                                dimension="performance"))
+            checks.append(Check(
+                "buffer_pool_hit_ratio", t("checkup.mysql.buffer_pool_hit_ratio.title"), "info",
+                t("checkup.mysql.buffer_pool_hit_ratio.value_no_activity"),
+                t("checkup.mysql.buffer_pool_hit_ratio.msg_no_activity"),
+                dimension="performance"))
     else:
-        checks.append(Check("buffer_pool_hit_ratio", "InnoDB 缓冲池命中率", "unknown", "未知",
-                            "取不到 Innodb_buffer_pool_read_requests / reads",
-                            dimension="performance"))
+        checks.append(Check(
+            "buffer_pool_hit_ratio", t("checkup.mysql.buffer_pool_hit_ratio.title"), "unknown",
+            t("checkup.common.unknown"), t("checkup.mysql.buffer_pool_hit_ratio.msg_unknown"),
+            dimension="performance"))
 
     # --- 缓冲池 vs 数据总量（容量规划参考） ---
     checks.append(_mysql_buffer_pool_vs_data(engine, variables, schema))
@@ -567,14 +737,17 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
         rate = _rate_per_hour(slow, uptime)
         lqt = variables.get("long_query_time", "?")
         checks.append(Check(
-            "slow_queries", "慢查询（累计）", "warn" if (rate or 0) > 10 else "info",
-            f"{int(slow):,} 条（约 {rate:.1f} 条/小时）" if rate is not None else f"{int(slow):,} 条",
-            f"阈值 long_query_time={lqt}s。看具体是哪些查询：查询台按耗时排序，或用 EXPLAIN 排查",
+            "slow_queries", t("checkup.mysql.slow_queries.title"),
+            "warn" if (rate or 0) > 10 else "info",
+            t("checkup.mysql.slow_queries.value_rate", n=f"{int(slow):,}", rate=f"{rate:.1f}")
+            if rate is not None else t("checkup.mysql.slow_queries.value_plain", n=f"{int(slow):,}"),
+            t("checkup.mysql.slow_queries.message", lqt=lqt),
             dimension="performance",
         ))
     else:
-        checks.append(Check("slow_queries", "慢查询（累计）", "unknown", "未知",
-                            "取不到 Slow_queries", dimension="performance"))
+        checks.append(Check("slow_queries", t("checkup.mysql.slow_queries.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.mysql.slow_queries.msg_unknown"),
+                            dimension="performance"))
 
     # --- 全表扫描 JOIN ---
     fj = _to_num(status.get("Select_full_join"))
@@ -582,14 +755,16 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     if fj is not None:
         level = "warn" if (fj > 0 and rj is not None and rj > 0 and fj / (fj + rj) > 0.1) else "info"
         checks.append(Check(
-            "full_scan_joins", "全表扫描 JOIN", level, f"{int(fj):,} 次",
-            "JOIN 没走索引（type=ALL），扫描行数被放大；检查被 JOIN 列上是否有索引"
-            if level == "warn" else "参考值：累计发生的不走索引的 JOIN 次数",
+            "full_scan_joins", t("checkup.mysql.full_scan_joins.title"), level,
+            t("checkup.common.count_times", n=f"{int(fj):,}"),
+            t("checkup.mysql.full_scan_joins.msg_warn") if level == "warn"
+            else t("checkup.mysql.full_scan_joins.msg_info"),
             dimension="performance",
         ))
     else:
-        checks.append(Check("full_scan_joins", "全表扫描 JOIN", "unknown", "未知",
-                            "取不到 Select_full_join", dimension="performance"))
+        checks.append(Check("full_scan_joins", t("checkup.mysql.full_scan_joins.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.mysql.full_scan_joins.msg_unknown"),
+                            dimension="performance"))
 
     # --- 临时表落盘比例 ---
     checks.append(_mysql_tmp_tables_on_disk(status, uptime))
@@ -601,16 +776,20 @@ def _mysql_checks(engine: SAEngine, schema: str | None) -> list[Check]:
         rate = _rate_per_hour(aborted, uptime)
         level = "warn" if (rate or 0) > 20 else "info"
         checks.append(Check(
-            "aborted_clients", "异常断开的连接", level,
-            f"{int(aborted):,} 次" + (f"（约 {rate:.1f} 次/小时）" if rate is not None else ""),
-            "客户端没正确关闭连接（连接池泄漏 / 网络抖动 / wait_timeout 过短）"
-            if level == "warn" else "参考值：客户端未正常关闭的连接数；持续高频才需关注",
-            [f"Aborted_connects（连接被拒）{int(aborted_conn or 0):,} 次"] if aborted_conn else [],
+            "aborted_clients", t("checkup.mysql.aborted_clients.title"), level,
+            t("checkup.common.count_times", n=f"{int(aborted):,}")
+            + (t("checkup.mysql.aborted_clients.rate_suffix", rate=f"{rate:.1f}")
+               if rate is not None else ""),
+            t("checkup.mysql.aborted_clients.msg_warn") if level == "warn"
+            else t("checkup.mysql.aborted_clients.msg_info"),
+            [t("checkup.mysql.aborted_clients.detail", n=f"{int(aborted_conn or 0):,}")]
+            if aborted_conn else [],
             dimension="availability",
         ))
     else:
-        checks.append(Check("aborted_clients", "异常断开的连接", "unknown", "未知",
-                            "取不到 Aborted_clients", dimension="availability"))
+        checks.append(Check("aborted_clients", t("checkup.mysql.aborted_clients.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.mysql.aborted_clients.msg_unknown"),
+                            dimension="availability"))
 
     # --- 死锁 ---
     checks.append(_mysql_deadlocks(engine, status))
@@ -646,6 +825,188 @@ _MYSQL_INSTANCE_SCOPE = frozenset({
 })
 
 
+register({
+    "checkup.mysql.deadlocks.title": ("InnoDB 死锁", "InnoDB Deadlocks"),
+    "checkup.mysql.deadlocks.msg_unknown": (
+        "取不到死锁计数（events_errors_summary_global_by_error 与 Innodb_deadlocks 都不可用）",
+        "Could not read deadlock count (neither events_errors_summary_global_by_error nor "
+        "Innodb_deadlocks is available)",
+    ),
+    "checkup.mysql.deadlocks.msg_warn": (
+        "有死锁发生：查最近的事务冲突，确保同一批资源按固定顺序加锁",
+        "Deadlocks have occurred: review recent transaction conflicts and make sure the same "
+        "set of resources is always locked in a fixed order",
+    ),
+    "checkup.mysql.deadlocks.msg_ok": ("启动以来无死锁", "No deadlocks since startup"),
+    "checkup.mysql.long_queries.title": ("长查询", "Long-Running Queries"),
+    "checkup.mysql.long_queries.msg_unknown": (
+        "查 performance_schema.threads 失败（可能未开启 performance_schema）：{err}",
+        "Failed to query performance_schema.threads (performance_schema may not be enabled): {err}",
+    ),
+    "checkup.mysql.long_queries.value_none": (
+        "无 >= {threshold}s 的查询", "No queries >= {threshold}s",
+    ),
+    "checkup.mysql.long_queries.msg_none": (
+        "当前没有长时间执行的查询", "No long-running queries at the moment",
+    ),
+    "checkup.mysql.long_queries.value_worst": ("{secs}s（最长）", "{secs}s (longest)"),
+    "checkup.mysql.long_queries.message": (
+        "查询台「取消」可中断（走 KILL QUERY）；再用 EXPLAIN 看是否全表扫描",
+        "Use the query desk's Cancel to interrupt it (via KILL QUERY); then check with EXPLAIN "
+        "whether it's a full table scan",
+    ),
+    "checkup.mysql.long_queries.detail": ("{secs}s | {sql}", "{secs}s | {sql}"),
+    "checkup.mysql.long_queries.no_sql_text": ("(无 SQL 文本)", "(no SQL text)"),
+    "checkup.mysql.lock_waits.title": ("行锁等待", "Row Lock Waits"),
+    "checkup.mysql.lock_waits.value": ("{n} 个事务在等锁", "{n} transaction(s) waiting on a lock"),
+    "checkup.mysql.lock_waits.msg_warn": (
+        "有事务被阻塞；查 INNODB_TRX 看谁持有锁，长事务考虑用查询台取消",
+        "Transactions are blocked; check INNODB_TRX to see who holds the lock, and consider "
+        "cancelling long-running transactions from the query desk",
+    ),
+    "checkup.mysql.lock_waits.msg_ok": (
+        "当前没有事务在等待行锁", "No transactions are currently waiting on a row lock",
+    ),
+    "checkup.mysql.lock_waits.msg_unknown": (
+        "查锁等待的视图都不可访问（performance_schema.data_lock_waits /"
+        " information_schema.INNODB_TRX / sys.innodb_lock_waits）",
+        "None of the lock-wait views are accessible (performance_schema.data_lock_waits / "
+        "information_schema.INNODB_TRX / sys.innodb_lock_waits)",
+    ),
+    "checkup.mysql.tmp_tables_on_disk.title": ("临时表落盘", "Temp Tables Spilled to Disk"),
+    "checkup.mysql.tmp_tables_on_disk.msg_unknown": (
+        "取不到 Created_tmp_tables / Created_tmp_disk_tables",
+        "Could not read Created_tmp_tables / Created_tmp_disk_tables",
+    ),
+    "checkup.mysql.tmp_tables_on_disk.value_none": ("无临时表活动", "No temp table activity"),
+    "checkup.mysql.tmp_tables_on_disk.msg_none": (
+        "启动后还没创建过临时表", "No temp tables have been created since startup",
+    ),
+    "checkup.mysql.tmp_tables_on_disk.msg_warn": (
+        "排序/哈希超过 tmp_table_size 落了临时磁盘表；调大 tmp_table_size 与 max_heap_table_size，"
+        "或优化产生大临时表的查询（看 EXPLAIN 里的 Using temporary）",
+        "Sorts/hashes exceeded tmp_table_size and spilled to on-disk temp tables; increase "
+        "tmp_table_size and max_heap_table_size, or optimize the queries that create large "
+        "temp tables (look for \"Using temporary\" in EXPLAIN)",
+    ),
+    "checkup.mysql.tmp_tables_on_disk.msg_ok": (
+        "临时表基本都在内存完成", "Temp tables are mostly handled in memory",
+    ),
+    "checkup.mysql.no_primary_key.title": ("无主键表", "Tables Without a Primary Key"),
+    "checkup.mysql.no_primary_key.msg_unknown": (
+        "查无主键表失败：{err}", "Failed to query tables without a primary key: {err}",
+    ),
+    "checkup.mysql.no_primary_key.value_ok": ("无", "None"),
+    "checkup.mysql.no_primary_key.value_count": ("{n} 张", "{n}"),
+    "checkup.mysql.no_primary_key.msg_ok": (
+        "所有表都有主键或唯一索引", "Every table has a primary key or a unique index",
+    ),
+    "checkup.mysql.no_primary_key.msg_warn": (
+        "这些表没有主键或唯一非空索引：row-based 复制时回从表要全表扫描，也影响 binlog_group_commit；"
+        "给每张表加自增主键（小表也建议）",
+        "These tables have no primary key or non-null unique index: with row-based replication "
+        "the replica has to full-scan to locate rows, and it also affects binlog_group_commit; "
+        "add an auto-increment primary key to every table (recommended even for small tables)",
+    ),
+    "checkup.mysql.no_primary_key.detail": (
+        "{schema}.{table}（约 {rows} 行）", "{schema}.{table} (~{rows} rows)",
+    ),
+    "checkup.mysql.binlog_cache.title": ("大事务落盘", "Large Transactions Spilled to Disk"),
+    "checkup.mysql.binlog_cache.msg_unknown": (
+        "取不到 Binlog_cache_use / Binlog_cache_disk_use",
+        "Could not read Binlog_cache_use / Binlog_cache_disk_use",
+    ),
+    "checkup.mysql.binlog_cache.value_none": ("无 binlog 缓存活动", "No binlog cache activity"),
+    "checkup.mysql.binlog_cache.msg_none": (
+        "该实例没开 binlog 或还没提交过事务",
+        "This instance either has binlog disabled or has not committed any transaction yet",
+    ),
+    "checkup.mysql.binlog_cache.value": (
+        "{disk} 次落盘 / {use} 次提交（{pct}）", "{disk} spilled / {use} committed ({pct})",
+    ),
+    "checkup.mysql.binlog_cache.msg_warn": (
+        "有事务超过 binlog_cache_size 落了磁盘：这是大事务的信号，会拖慢复制与提交；"
+        "调大 binlog_cache_size，并拆分批量写入",
+        "Transactions have exceeded binlog_cache_size and spilled to disk: a sign of large "
+        "transactions that slow down replication and commits; increase binlog_cache_size and "
+        "split up bulk writes",
+    ),
+    "checkup.mysql.binlog_cache.msg_ok": (
+        "所有事务的 binlog 都在内存缓存完成", "All transactions' binlog fit in the in-memory cache",
+    ),
+    "checkup.mysql.buffer_pool_vs_data.title": ("缓冲池 vs 数据量", "Buffer Pool vs. Data Size"),
+    "checkup.mysql.buffer_pool_vs_data.msg_no_bp": (
+        "取不到 innodb_buffer_pool_size", "Could not read innodb_buffer_pool_size",
+    ),
+    "checkup.mysql.buffer_pool_vs_data.msg_query_failed": (
+        "查数据总量失败：{err}", "Failed to query total data size: {err}",
+    ),
+    "checkup.mysql.buffer_pool_vs_data.value_none": ("无数据表", "No data tables"),
+    "checkup.mysql.buffer_pool_vs_data.msg_none": (
+        "该库范围内没有用户表", "There are no user tables in this database's scope",
+    ),
+    "checkup.mysql.buffer_pool_vs_data.value": (
+        "数据 {data} / 缓冲池 {bp}（{ratio} 倍）", "data {data} / buffer pool {bp} ({ratio}x)",
+    ),
+    "checkup.mysql.buffer_pool_vs_data.msg_warn": (
+        "数据量远超缓冲池，热数据必然部分在盘上；结合命中率项一起看，"
+        "命中率也低就该扩内存或缩小查询范围",
+        "The data size far exceeds the buffer pool, so some hot data is necessarily on disk; "
+        "cross-check with the hit-ratio item — if that's also low, add memory or narrow the "
+        "query range",
+    ),
+    "checkup.mysql.buffer_pool_vs_data.msg_ok": (
+        "数据总量在缓冲池可覆盖的范围内", "The total data size fits within what the buffer pool can cover",
+    ),
+    "checkup.mysql.replication_lag.title": ("复制延迟", "Replication Lag"),
+    "checkup.mysql.replication_lag.value_not_replica": ("非副本", "Not a replica"),
+    "checkup.mysql.replication_lag.msg_not_replica": (
+        "该实例未配置源/副本复制，无延迟可测",
+        "This instance has no source/replica replication configured, so there is no lag to measure",
+    ),
+    "checkup.mysql.replication_lag.value_null": (
+        "源 {host}：延迟未知（NULL）", "Source {host}: lag unknown (NULL)",
+    ),
+    "checkup.mysql.replication_lag.msg_null": (
+        "Seconds_Behind_Master 为 NULL 通常是复制线程断开或正在追赶，查副本状态",
+        "Seconds_Behind_Master being NULL usually means the replication thread is disconnected "
+        "or catching up; check the replica status",
+    ),
+    "checkup.mysql.replication_lag.value": ("{lag}s（源 {host}）", "{lag}s (source {host})"),
+    "checkup.mysql.replication_lag.msg_warn": (
+        "落后过多时读副本数据已旧；查网络 / 大事务 / 长查询是否阻塞了回放线程",
+        "If it falls too far behind, reads from the replica return stale data; check whether "
+        "the network / a large transaction / a long query is blocking the replay thread",
+    ),
+    "checkup.mysql.replication_lag.msg_ok": ("副本追平源", "The replica has caught up with the source"),
+    "checkup.mysql.replication_lag.msg_unknown": (
+        "无副本状态权限（需 REPLICATION CLIENT），或该 MySQL 版本不支持"
+        " SHOW REPLICA/SLAVE STATUS",
+        "No permission to view replica status (requires REPLICATION CLIENT), or this MySQL "
+        "version does not support SHOW REPLICA/SLAVE STATUS",
+    ),
+    "checkup.mysql.big_tables.title": ("大表 TOP5", "Top 5 Largest Tables"),
+    "checkup.mysql.big_tables.msg_unknown": (
+        "查 information_schema.tables 失败：{err}",
+        "Failed to query information_schema.tables: {err}",
+    ),
+    "checkup.mysql.big_tables.value_none": ("无表", "No tables"),
+    "checkup.mysql.big_tables.msg_none": (
+        "该库范围内没有用户表", "There are no user tables in this database's scope",
+    ),
+    "checkup.mysql.big_tables.msg_none_schema_suffix": ("（schema={schema}）", " (schema={schema})"),
+    "checkup.mysql.big_tables.value": ("最大 {name}（{size}）", "largest {name} ({size})"),
+    "checkup.mysql.big_tables.message": (
+        "最大的几张表是维护成本的主要来源：DDL 变更久、备份慢、全表扫描风险高",
+        "The largest tables are the main source of maintenance cost: DDL changes take longer, "
+        "backups are slower, and full-table-scan risk is higher",
+    ),
+    "checkup.mysql.big_tables.detail": (
+        "{schema}.{table} — {size}，约 {rows} 行", "{schema}.{table} — {size}, ~{rows} rows",
+    ),
+})
+
+
 def _mysql_deadlocks(engine: SAEngine, status: dict[str, str]) -> Check:
     """死锁计数。MySQL 9.x 移除了 Innodb_deadlocks 状态变量，改用 performance_schema
     的错误汇总表（ER_LOCK_DEADLOCK）；8.0 退回状态变量。两路都不通就 unknown。"""
@@ -661,13 +1022,13 @@ def _mysql_deadlocks(engine: SAEngine, status: dict[str, str]) -> Check:
     if n is None:
         n = _to_num(status.get("Innodb_deadlocks"))
     if n is None:
-        return Check("deadlocks", "InnoDB 死锁", "unknown", "未知",
-                     "取不到死锁计数（events_errors_summary_global_by_error 与 Innodb_deadlocks 都不可用）",
+        return Check("deadlocks", t("checkup.mysql.deadlocks.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.mysql.deadlocks.msg_unknown"),
                      dimension="concurrency")
     return Check(
-        "deadlocks", "InnoDB 死锁", "warn" if n > 0 else "ok", f"{int(n):,} 次",
-        "有死锁发生：查最近的事务冲突，确保同一批资源按固定顺序加锁"
-        if n > 0 else "启动以来无死锁",
+        "deadlocks", t("checkup.mysql.deadlocks.title"), "warn" if n > 0 else "ok",
+        t("checkup.common.count_times", n=f"{int(n):,}"),
+        t("checkup.mysql.deadlocks.msg_warn") if n > 0 else t("checkup.mysql.deadlocks.msg_ok"),
         dimension="concurrency",
     )
 
@@ -698,19 +1059,22 @@ def _mysql_long_queries(engine: SAEngine, status: dict[str, str]) -> Check:
             {"t": LONG_QUERY_WARN_S},
         )
     except Exception as e:
-        return Check("long_queries", "长查询", "unknown", "未知",
-                     f"查 performance_schema.threads 失败（可能未开启 performance_schema）："
-                     f"{type(e).__name__}",
+        return Check("long_queries", t("checkup.mysql.long_queries.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.mysql.long_queries.msg_unknown", err=type(e).__name__),
                      dimension="concurrency")
     if not rows:
-        return Check("long_queries", "长查询", "ok", f"无 >= {LONG_QUERY_WARN_S}s 的查询",
-                     "当前没有长时间执行的查询", dimension="concurrency")
+        return Check("long_queries", t("checkup.mysql.long_queries.title"), "ok",
+                     t("checkup.mysql.long_queries.value_none", threshold=LONG_QUERY_WARN_S),
+                     t("checkup.mysql.long_queries.msg_none"), dimension="concurrency")
     worst = max(float(r[0]) for r in rows)
     level: Status = "critical" if worst >= LONG_QUERY_CRIT_S else "warn"
     return Check(
-        "long_queries", "长查询", level, f"{worst:.0f}s（最长）",
-        "查询台「取消」可中断（走 KILL QUERY）；再用 EXPLAIN 看是否全表扫描",
-        [f"{int(r[0])}s | {str(r[1]) or '(无 SQL 文本)'}" for r in rows],
+        "long_queries", t("checkup.mysql.long_queries.title"), level,
+        t("checkup.mysql.long_queries.value_worst", secs=f"{worst:.0f}"),
+        t("checkup.mysql.long_queries.message"),
+        [t("checkup.mysql.long_queries.detail", secs=int(r[0]),
+           sql=str(r[1]) or t("checkup.mysql.long_queries.no_sql_text")) for r in rows],
         dimension="concurrency",
     )
 
@@ -728,16 +1092,16 @@ def _mysql_lock_waits(engine: SAEngine) -> Check:
             if n is None:
                 continue
             return Check(
-                "lock_waits", "行锁等待", "warn" if n > 0 else "ok", f"{int(n)} 个事务在等锁",
-                "有事务被阻塞；查 INNODB_TRX 看谁持有锁，长事务考虑用查询台取消"
-                if n > 0 else "当前没有事务在等待行锁",
+                "lock_waits", t("checkup.mysql.lock_waits.title"), "warn" if n > 0 else "ok",
+                t("checkup.mysql.lock_waits.value", n=int(n)),
+                t("checkup.mysql.lock_waits.msg_warn") if n > 0
+                else t("checkup.mysql.lock_waits.msg_ok"),
                 dimension="concurrency",
             )
         except Exception:
             continue
-    return Check("lock_waits", "行锁等待", "unknown", "未知",
-                 "查锁等待的视图都不可访问（performance_schema.data_lock_waits /"
-                 " information_schema.INNODB_TRX / sys.innodb_lock_waits）",
+    return Check("lock_waits", t("checkup.mysql.lock_waits.title"), "unknown",
+                 t("checkup.common.unknown"), t("checkup.mysql.lock_waits.msg_unknown"),
                  dimension="concurrency")
 
 
@@ -747,19 +1111,21 @@ def _mysql_tmp_tables_on_disk(status: dict[str, str], uptime: float | None) -> C
     disk = _to_num(status.get("Created_tmp_disk_tables"))
     total = _to_num(status.get("Created_tmp_tables"))
     if disk is None or total is None:
-        return Check("tmp_tables_on_disk", "临时表落盘", "unknown", "未知",
-                     "取不到 Created_tmp_tables / Created_tmp_disk_tables",
+        return Check("tmp_tables_on_disk", t("checkup.mysql.tmp_tables_on_disk.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.mysql.tmp_tables_on_disk.msg_unknown"),
                      dimension="performance")
     if total <= 0:
-        return Check("tmp_tables_on_disk", "临时表落盘", "ok", "无临时表活动",
-                     "启动后还没创建过临时表", dimension="performance")
+        return Check("tmp_tables_on_disk", t("checkup.mysql.tmp_tables_on_disk.title"), "ok",
+                     t("checkup.mysql.tmp_tables_on_disk.value_none"),
+                     t("checkup.mysql.tmp_tables_on_disk.msg_none"), dimension="performance")
     pct = disk / total
     level: Status = "warn" if pct > TMP_DISK_WARN_PCT else "ok"
+    disk_frac = f"({int(disk):,}/{int(total):,})" if current_locale() == "en" else f"（{int(disk):,}/{int(total):,}）"
     return Check(
-        "tmp_tables_on_disk", "临时表落盘", level, f"{pct:.0%}（{int(disk):,}/{int(total):,}）",
-        "排序/哈希超过 tmp_table_size 落了临时磁盘表；调大 tmp_table_size 与 max_heap_table_size，"
-        "或优化产生大临时表的查询（看 EXPLAIN 里的 Using temporary）"
-        if level != "ok" else "临时表基本都在内存完成",
+        "tmp_tables_on_disk", t("checkup.mysql.tmp_tables_on_disk.title"), level,
+        f"{pct:.0%}{disk_frac}",
+        t("checkup.mysql.tmp_tables_on_disk.msg_warn") if level != "ok"
+        else t("checkup.mysql.tmp_tables_on_disk.msg_ok"),
         dimension="performance",
     )
 
@@ -780,16 +1146,20 @@ def _mysql_no_primary_key(engine: SAEngine, schema: str | None) -> Check:
             {**schema_params(schema), "sys": _MYSQL_SYSTEM_SCHEMAS},
         )
     except Exception as e:
-        return Check("no_primary_key", "无主键表", "unknown", "未知",
-                     f"查无主键表失败：{type(e).__name__}", dimension="maintenance")
+        return Check("no_primary_key", t("checkup.mysql.no_primary_key.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.mysql.no_primary_key.msg_unknown", err=type(e).__name__),
+                     dimension="maintenance")
     if not rows:
-        return Check("no_primary_key", "无主键表", "ok", "无",
-                     "所有表都有主键或唯一索引", dimension="maintenance")
+        return Check("no_primary_key", t("checkup.mysql.no_primary_key.title"), "ok",
+                     t("checkup.mysql.no_primary_key.value_ok"),
+                     t("checkup.mysql.no_primary_key.msg_ok"), dimension="maintenance")
     return Check(
-        "no_primary_key", "无主键表", "warn", f"{len(rows)} 张",
-        "这些表没有主键或唯一非空索引：row-based 复制时回从表要全表扫描，也影响 binlog_group_commit；"
-        "给每张表加自增主键（小表也建议）",
-        [f"{r[0]}.{r[1]}（约 {int(float(r[2]) or 0):,} 行）" for r in rows],
+        "no_primary_key", t("checkup.mysql.no_primary_key.title"), "warn",
+        t("checkup.mysql.no_primary_key.value_count", n=len(rows)),
+        t("checkup.mysql.no_primary_key.msg_warn"),
+        [t("checkup.mysql.no_primary_key.detail", schema=r[0], table=r[1],
+           rows=f"{int(float(r[2]) or 0):,}") for r in rows],
         dimension="maintenance",
     )
 
@@ -800,20 +1170,20 @@ def _mysql_binlog_cache(status: dict[str, str]) -> Check:
     use = _to_num(status.get("Binlog_cache_use"))
     disk = _to_num(status.get("Binlog_cache_disk_use"))
     if use is None or disk is None:
-        return Check("binlog_cache", "大事务落盘", "unknown", "未知",
-                     "取不到 Binlog_cache_use / Binlog_cache_disk_use",
+        return Check("binlog_cache", t("checkup.mysql.binlog_cache.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.mysql.binlog_cache.msg_unknown"),
                      dimension="replication")
     if use <= 0:
-        return Check("binlog_cache", "大事务落盘", "ok", "无 binlog 缓存活动",
-                     "该实例没开 binlog 或还没提交过事务", dimension="replication")
+        return Check("binlog_cache", t("checkup.mysql.binlog_cache.title"), "ok",
+                     t("checkup.mysql.binlog_cache.value_none"),
+                     t("checkup.mysql.binlog_cache.msg_none"), dimension="replication")
     pct = disk / use
     level: Status = "warn" if disk > 0 else "ok"
     return Check(
-        "binlog_cache", "大事务落盘", level,
-        f"{int(disk):,} 次落盘 / {int(use):,} 次提交（{pct:.0%}）",
-        "有事务超过 binlog_cache_size 落了磁盘：这是大事务的信号，会拖慢复制与提交；"
-        "调大 binlog_cache_size，并拆分批量写入"
-        if level != "ok" else "所有事务的 binlog 都在内存缓存完成",
+        "binlog_cache", t("checkup.mysql.binlog_cache.title"), level,
+        t("checkup.mysql.binlog_cache.value", disk=f"{int(disk):,}", use=f"{int(use):,}", pct=f"{pct:.0%}"),
+        t("checkup.mysql.binlog_cache.msg_warn") if level != "ok"
+        else t("checkup.mysql.binlog_cache.msg_ok"),
         dimension="replication",
     )
 
@@ -824,8 +1194,9 @@ def _mysql_buffer_pool_vs_data(engine: SAEngine, variables: dict[str, str],
     与命中率项互相印证。"""
     bp = _to_num(variables.get("innodb_buffer_pool_size"))
     if not bp:
-        return Check("buffer_pool_vs_data", "缓冲池 vs 数据量", "unknown", "未知",
-                     "取不到 innodb_buffer_pool_size", dimension="capacity")
+        return Check("buffer_pool_vs_data", t("checkup.mysql.buffer_pool_vs_data.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.mysql.buffer_pool_vs_data.msg_no_bp"),
+                     dimension="capacity")
     try:
         total = _to_num(_scalar(
             engine,
@@ -836,19 +1207,22 @@ def _mysql_buffer_pool_vs_data(engine: SAEngine, variables: dict[str, str],
             {**schema_params(schema), "sys": _MYSQL_SYSTEM_SCHEMAS},
         ))
     except Exception as e:
-        return Check("buffer_pool_vs_data", "缓冲池 vs 数据量", "unknown", "未知",
-                     f"查数据总量失败：{type(e).__name__}", dimension="capacity")
+        return Check("buffer_pool_vs_data", t("checkup.mysql.buffer_pool_vs_data.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.mysql.buffer_pool_vs_data.msg_query_failed", err=type(e).__name__),
+                     dimension="capacity")
     if total is None or total <= 0:
-        return Check("buffer_pool_vs_data", "缓冲池 vs 数据量", "info", "无数据表",
-                     "该库范围内没有用户表", dimension="capacity")
+        return Check("buffer_pool_vs_data", t("checkup.mysql.buffer_pool_vs_data.title"), "info",
+                     t("checkup.mysql.buffer_pool_vs_data.value_none"),
+                     t("checkup.mysql.buffer_pool_vs_data.msg_none"), dimension="capacity")
     ratio = total / bp
     level: Status = "warn" if ratio > BP_VS_DATA_WARN else "ok"
     return Check(
-        "buffer_pool_vs_data", "缓冲池 vs 数据量", level,
-        f"数据 {_human_bytes(total)} / 缓冲池 {_human_bytes(bp)}（{ratio:.1f} 倍）",
-        "数据量远超缓冲池，热数据必然部分在盘上；结合命中率项一起看，"
-        "命中率也低就该扩内存或缩小查询范围"
-        if level != "ok" else "数据总量在缓冲池可覆盖的范围内",
+        "buffer_pool_vs_data", t("checkup.mysql.buffer_pool_vs_data.title"), level,
+        t("checkup.mysql.buffer_pool_vs_data.value",
+          data=_human_bytes(total), bp=_human_bytes(bp), ratio=f"{ratio:.1f}"),
+        t("checkup.mysql.buffer_pool_vs_data.msg_warn") if level != "ok"
+        else t("checkup.mysql.buffer_pool_vs_data.msg_ok"),
         dimension="capacity",
     )
 
@@ -866,8 +1240,9 @@ def _mysql_replication_lag(engine: SAEngine) -> Check:
             continue
         if not rows:
             # 有权限但不是副本（空结果）
-            return Check("replication_lag", "复制延迟", "info", "非副本",
-                         "该实例未配置源/副本复制，无延迟可测", dimension="replication")
+            return Check("replication_lag", t("checkup.mysql.replication_lag.title"), "info",
+                         t("checkup.mysql.replication_lag.value_not_replica"),
+                         t("checkup.mysql.replication_lag.msg_not_replica"), dimension="replication")
         col = next((i for i, k in enumerate(keys)
                     if str(k).lower() in ("seconds_behind_master", "seconds_behind_source")), None)
         if col is None:
@@ -876,19 +1251,20 @@ def _mysql_replication_lag(engine: SAEngine) -> Check:
         val = rows[0][col]
         lag = _to_num(val)
         if lag is None:
-            return Check("replication_lag", "复制延迟", "warn", f"源 {host}：延迟未知（NULL）",
-                         "Seconds_Behind_Master 为 NULL 通常是复制线程断开或正在追赶，查副本状态",
+            return Check("replication_lag", t("checkup.mysql.replication_lag.title"), "warn",
+                         t("checkup.mysql.replication_lag.value_null", host=host),
+                         t("checkup.mysql.replication_lag.msg_null"),
                          dimension="replication")
         level: Status = "critical" if lag >= REPL_LAG_CRIT_S else "warn" if lag >= REPL_LAG_WARN_S else "ok"
         return Check(
-            "replication_lag", "复制延迟", level, f"{lag:.0f}s（源 {host}）",
-            "落后过多时读副本数据已旧；查网络 / 大事务 / 长查询是否阻塞了回放线程"
-            if level != "ok" else "副本追平源",
+            "replication_lag", t("checkup.mysql.replication_lag.title"), level,
+            t("checkup.mysql.replication_lag.value", lag=f"{lag:.0f}", host=host),
+            t("checkup.mysql.replication_lag.msg_warn") if level != "ok"
+            else t("checkup.mysql.replication_lag.msg_ok"),
             dimension="replication",
         )
-    return Check("replication_lag", "复制延迟", "unknown", "未知",
-                 "无副本状态权限（需 REPLICATION CLIENT），或该 MySQL 版本不支持"
-                 " SHOW REPLICA/SLAVE STATUS",
+    return Check("replication_lag", t("checkup.mysql.replication_lag.title"), "unknown",
+                 t("checkup.common.unknown"), t("checkup.mysql.replication_lag.msg_unknown"),
                  dimension="replication", privilege="REPLICATION CLIENT")
 
 
@@ -905,18 +1281,23 @@ def _mysql_big_tables(engine: SAEngine, schema: str | None) -> Check:
             {**schema_params(schema), "sys": _MYSQL_SYSTEM_SCHEMAS},
         )
     except Exception as e:
-        return Check("big_tables", "大表 TOP5", "unknown", "未知",
-                     f"查 information_schema.tables 失败：{type(e).__name__}",
+        return Check("big_tables", t("checkup.mysql.big_tables.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.mysql.big_tables.msg_unknown", err=type(e).__name__),
                      dimension="maintenance")
     if not rows:
-        return Check("big_tables", "大表 TOP5", "info", "无表",
-                     "该库范围内没有用户表" + (f"（schema={schema}）" if schema else ""),
+        return Check("big_tables", t("checkup.mysql.big_tables.title"), "info",
+                     t("checkup.mysql.big_tables.value_none"),
+                     t("checkup.mysql.big_tables.msg_none")
+                     + (t("checkup.mysql.big_tables.msg_none_schema_suffix", schema=schema)
+                        if schema else ""),
                      dimension="maintenance")
     return Check(
-        "big_tables", "大表 TOP5", "info",
-        f"最大 {str(rows[0][1])}（{_human_bytes(float(rows[0][2]))}）",
-        "最大的几张表是维护成本的主要来源：DDL 变更久、备份慢、全表扫描风险高",
-        [f"{r[0]}.{r[1]} — {_human_bytes(float(r[2]))}，约 {int(float(r[3] or 0)):,} 行" for r in rows],
+        "big_tables", t("checkup.mysql.big_tables.title"), "info",
+        t("checkup.mysql.big_tables.value", name=str(rows[0][1]), size=_human_bytes(float(rows[0][2]))),
+        t("checkup.mysql.big_tables.message"),
+        [t("checkup.mysql.big_tables.detail", schema=r[0], table=r[1],
+           size=_human_bytes(float(r[2])), rows=f"{int(float(r[3] or 0)):,}") for r in rows],
         dimension="maintenance",
     )
 
@@ -936,12 +1317,75 @@ def _pg_can_see_session_detail(engine: SAEngine) -> bool:
         return False
 
 
+register({
+    "checkup.pg.server.title": ("服务器", "Server"),
+    "checkup.pg.server.msg_running": ("已运行 {dur}", "Running for {dur}"),
+    "checkup.pg.server.msg_unknown_start": ("取不到启动时间", "Could not determine the startup time"),
+    "checkup.pg.connections.title": ("连接占用", "Connections"),
+    "checkup.pg.connections.msg_err": (
+        "查 pg_stat_activity 失败：{err}", "Failed to query pg_stat_activity: {err}",
+    ),
+    "checkup.pg.connections.msg_warn": (
+        "接近上限时新连接会被拒绝；查 idle in transaction 的长连接，或调 max_connections",
+        "New connections will be rejected once the limit is reached; check for long-lived "
+        "idle-in-transaction connections, or raise max_connections",
+    ),
+    "checkup.pg.connections.msg_ok": ("连接数在健康范围", "Connection count is within a healthy range"),
+    "checkup.pg.connections.msg_no_max_conn": (
+        "取不到 max_connections", "Could not read max_connections",
+    ),
+    "checkup.pg.idle_in_transaction.title": ("空闲事务", "Idle Transactions"),
+    "checkup.pg.long_queries.title": ("长查询", "Long-Running Queries"),
+    "checkup.pg.wait_events.title": ("等待事件", "Wait Events"),
+    "checkup.pg.no_pg_monitor.message": (
+        "账号无 pg_monitor 权限：pg_stat_activity 的 state/query/wait_event "
+        "列对非 pg_monitor 角色返回 NULL，只能看到自己的会话",
+        "The account lacks the pg_monitor role: the state/query/wait_event columns of "
+        "pg_stat_activity return NULL for non-pg_monitor roles, so only its own session is visible",
+    ),
+    "checkup.pg.cache_hit_ratio.title": ("缓存命中率", "Cache Hit Ratio"),
+    "checkup.pg.cache_hit_ratio.msg_bad": (
+        "shared_buffers 放不下热数据，频繁读盘；调大 shared_buffers 或优化全表扫描查询",
+        "shared_buffers cannot hold the hot data, causing frequent disk reads; increase "
+        "shared_buffers or optimize full-table-scan queries",
+    ),
+    "checkup.pg.cache_hit_ratio.msg_ok": (
+        "热数据基本都在 shared_buffers 里", "Hot data is mostly cached in shared_buffers",
+    ),
+    "checkup.pg.cache_hit_ratio.detail": (
+        "命中 {hit} 块，读盘 {read} 块", "{hit} blocks hit, {read} blocks read from disk",
+    ),
+    "checkup.pg.cache_hit_ratio.value_no_activity": ("无读取活动", "No read activity"),
+    "checkup.pg.cache_hit_ratio.msg_no_activity": (
+        "启动后还没有足够的读取活动来计算命中率",
+        "Not enough read activity since startup to compute a hit ratio",
+    ),
+    "checkup.pg.cache_hit_ratio.msg_unknown": (
+        "查 pg_stat_database 失败：{err}", "Failed to query pg_stat_database: {err}",
+    ),
+    "checkup.pg.deadlocks.title": ("死锁（累计）", "Deadlocks (cumulative)"),
+    "checkup.pg.deadlocks.msg_warn": (
+        "有死锁发生：查冲突事务，确保同一批资源按固定顺序加锁",
+        "Deadlocks have occurred: review the conflicting transactions and make sure the same "
+        "set of resources is always locked in a fixed order",
+    ),
+    "checkup.pg.deadlocks.msg_ok": ("启动以来无死锁", "No deadlocks since startup"),
+    "checkup.pg.deadlocks.msg_col_unavailable": (
+        "deadlocks 列取不到", "Could not read the deadlocks column",
+    ),
+    "checkup.pg.deadlocks.msg_query_failed": (
+        "查 pg_stat_database.deadlocks 失败：{err}",
+        "Failed to query pg_stat_database.deadlocks: {err}",
+    ),
+})
+
+
 def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     checks: list[Check] = []
     try:
         version = str(_scalar(engine, "SELECT version()")).split(",")[0]
     except Exception:
-        version = "未知"
+        version = t("checkup.common.unknown")
 
     uptime_s = None
     try:
@@ -951,8 +1395,9 @@ def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     except Exception:
         pass
     checks.append(Check(
-        "server", "服务器", "info", version,
-        f"已运行 {_human_duration(uptime_s)}" if uptime_s is not None else "取不到启动时间",
+        "server", t("checkup.pg.server.title"), "info", version,
+        t("checkup.pg.server.msg_running", dur=_human_duration(uptime_s)) if uptime_s is not None
+        else t("checkup.pg.server.msg_unknown_start"),
         dimension="availability",
     ))
 
@@ -967,20 +1412,22 @@ def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     try:
         used = _to_num(_scalar(engine, "SELECT count(*) FROM pg_stat_activity"))
     except Exception as e:
-        conn_err = f"查 pg_stat_activity 失败：{type(e).__name__}"
+        conn_err = t("checkup.pg.connections.msg_err", err=type(e).__name__)
     if used is not None and max_conn:
         pct = used / max_conn
         level: Status = "critical" if pct >= CONN_CRIT_PCT else "warn" if pct >= CONN_WARN_PCT else "ok"
+        pctxt = f"({pct:.0%})" if current_locale() == "en" else f"（{pct:.0%}）"
         checks.append(Check(
-            "connections", "连接占用", level, f"{int(used)} / {int(max_conn)}（{pct:.0%}）",
-            "接近上限时新连接会被拒绝；查 idle in transaction 的长连接，或调 max_connections"
-            if level != "ok" else "连接数在健康范围",
+            "connections", t("checkup.pg.connections.title"), level,
+            f"{int(used)} / {int(max_conn)}{pctxt}",
+            t("checkup.pg.connections.msg_warn") if level != "ok"
+            else t("checkup.pg.connections.msg_ok"),
             dimension="capacity",
         ))
     else:
         checks.append(Check(
-            "connections", "连接占用", "unknown", "未知",
-            conn_err if used is None else "取不到 max_connections",
+            "connections", t("checkup.pg.connections.title"), "unknown", t("checkup.common.unknown"),
+            conn_err if used is None else t("checkup.pg.connections.msg_no_max_conn"),
             dimension="capacity",
         ))
 
@@ -992,12 +1439,11 @@ def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
         checks.append(_pg_long_queries(engine))
         checks.append(_pg_wait_events(engine))
     else:
-        for name, title in (("idle_in_transaction", "空闲事务"),
-                            ("long_queries", "长查询"),
-                            ("wait_events", "等待事件")):
-            checks.append(Check(name, title, "unknown", "未知",
-                                "账号无 pg_monitor 权限：pg_stat_activity 的 state/query/wait_event "
-                                "列对非 pg_monitor 角色返回 NULL，只能看到自己的会话",
+        for name, title in (("idle_in_transaction", t("checkup.pg.idle_in_transaction.title")),
+                            ("long_queries", t("checkup.pg.long_queries.title")),
+                            ("wait_events", t("checkup.pg.wait_events.title"))):
+            checks.append(Check(name, title, "unknown", t("checkup.common.unknown"),
+                                t("checkup.pg.no_pg_monitor.message"),
                                 dimension="concurrency" if name == "idle_in_transaction" else "performance",
                                 privilege="pg_monitor"))
 
@@ -1015,20 +1461,24 @@ def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
             hit = hit_n / total
             level = "critical" if hit < CACHE_HIT_CRIT else "warn" if hit < CACHE_HIT_WARN else "ok"
             checks.append(Check(
-                "cache_hit_ratio", "缓存命中率", level, f"{hit:.2%}",
-                "shared_buffers 放不下热数据，频繁读盘；调大 shared_buffers 或优化全表扫描查询"
-                if level != "ok" else "热数据基本都在 shared_buffers 里",
-                [f"命中 {int(hit_n):,} 块，读盘 {int(read_n):,} 块"],
+                "cache_hit_ratio", t("checkup.pg.cache_hit_ratio.title"), level, f"{hit:.2%}",
+                t("checkup.pg.cache_hit_ratio.msg_bad") if level != "ok"
+                else t("checkup.pg.cache_hit_ratio.msg_ok"),
+                [t("checkup.pg.cache_hit_ratio.detail", hit=f"{int(hit_n):,}", read=f"{int(read_n):,}")],
                 dimension="performance",
             ))
         else:
-            checks.append(Check("cache_hit_ratio", "缓存命中率", "info", "无读取活动",
-                                "启动后还没有足够的读取活动来计算命中率",
-                                dimension="performance"))
+            checks.append(Check(
+                "cache_hit_ratio", t("checkup.pg.cache_hit_ratio.title"), "info",
+                t("checkup.pg.cache_hit_ratio.value_no_activity"),
+                t("checkup.pg.cache_hit_ratio.msg_no_activity"),
+                dimension="performance"))
     except Exception as e:
-        checks.append(Check("cache_hit_ratio", "缓存命中率", "unknown", "未知",
-                            f"查 pg_stat_database 失败：{type(e).__name__}",
-                            dimension="performance"))
+        checks.append(Check(
+            "cache_hit_ratio", t("checkup.pg.cache_hit_ratio.title"), "unknown",
+            t("checkup.common.unknown"),
+            t("checkup.pg.cache_hit_ratio.msg_unknown", err=type(e).__name__),
+            dimension="performance"))
 
     # --- 临时文件落盘（排序/哈希超过 work_mem；pg_stat_database 无权限限制） ---
     checks.append(_pg_temp_files(engine, uptime_s))
@@ -1040,16 +1490,19 @@ def _postgres_checks(engine: SAEngine, schema: str | None) -> list[Check]:
             "SELECT sum(deadlocks) FROM pg_stat_database WHERE datname = current_database()"))
         if n is not None:
             checks.append(Check(
-                "deadlocks", "死锁（累计）", "warn" if n > 0 else "ok", f"{int(n):,} 次",
-                "有死锁发生：查冲突事务，确保同一批资源按固定顺序加锁" if n > 0 else "启动以来无死锁",
+                "deadlocks", t("checkup.pg.deadlocks.title"), "warn" if n > 0 else "ok",
+                t("checkup.common.count_times", n=f"{int(n):,}"),
+                t("checkup.pg.deadlocks.msg_warn") if n > 0 else t("checkup.pg.deadlocks.msg_ok"),
                 dimension="concurrency",
             ))
         else:
-            checks.append(Check("deadlocks", "死锁（累计）", "unknown", "未知",
-                                "deadlocks 列取不到", dimension="concurrency"))
+            checks.append(Check("deadlocks", t("checkup.pg.deadlocks.title"), "unknown",
+                                t("checkup.common.unknown"),
+                                t("checkup.pg.deadlocks.msg_col_unavailable"), dimension="concurrency"))
     except Exception as e:
-        checks.append(Check("deadlocks", "死锁（累计）", "unknown", "未知",
-                            f"查 pg_stat_database.deadlocks 失败：{type(e).__name__}",
+        checks.append(Check("deadlocks", t("checkup.pg.deadlocks.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.pg.deadlocks.msg_query_failed", err=type(e).__name__),
                             dimension="concurrency"))
 
     # --- 死元组膨胀（该 autovacuum 了） ---
@@ -1090,6 +1543,290 @@ _PG_INSTANCE_SCOPE = frozenset({
 })
 
 
+register({
+    "checkup.pg.idle_in_transaction.msg_err": (
+        "查 pg_stat_activity 失败：{err}", "Failed to query pg_stat_activity: {err}",
+    ),
+    "checkup.pg.idle_in_transaction.value_none": (
+        "无超过 {threshold}s 的空闲事务", "No idle transactions over {threshold}s",
+    ),
+    "checkup.pg.idle_in_transaction.msg_none": (
+        "空闲事务拿着锁又挡 autovacuum，越长越该清掉",
+        "Idle transactions hold locks and block autovacuum; the longer they persist, the more "
+        "they should be cleared",
+    ),
+    "checkup.pg.idle_in_transaction.value_worst": ("{secs}s（最长）", "{secs}s (longest)"),
+    "checkup.pg.idle_in_transaction.message": (
+        "有事务开了不提交也不干活，挡住 autovacuum 并持锁；查应用是否漏提交，或取消该会话",
+        "A transaction is open but neither committing nor doing work, blocking autovacuum while "
+        "holding locks; check whether the application is missing a commit, or cancel the session",
+    ),
+    "checkup.pg.idle_in_transaction.detail": ("pid {pid} · {secs}s | {sql}", "pid {pid} · {secs}s | {sql}"),
+    "checkup.pg.long_queries.msg_err": (
+        "查 pg_stat_activity 失败：{err}", "Failed to query pg_stat_activity: {err}",
+    ),
+    "checkup.pg.long_queries.value_none": (
+        "无 >= {threshold}s 的查询", "No queries >= {threshold}s",
+    ),
+    "checkup.pg.long_queries.msg_none": (
+        "当前没有长时间执行的查询", "No long-running queries at the moment",
+    ),
+    "checkup.pg.long_queries.value_worst": ("{secs}s（最长）", "{secs}s (longest)"),
+    "checkup.pg.long_queries.message": (
+        "用 pg_cancel_backend(pid) 或查询台「取消」中断；再 EXPLAIN 看是否全表扫描",
+        "Interrupt it with pg_cancel_backend(pid) or the query desk's Cancel; then check with "
+        "EXPLAIN whether it's a full table scan",
+    ),
+    "checkup.pg.long_queries.detail": ("pid {pid} · {secs}s | {sql}", "pid {pid} · {secs}s | {sql}"),
+    "checkup.pg.wait_events.msg_err": (
+        "查 pg_stat_activity 等待事件失败：{err}",
+        "Failed to query pg_stat_activity wait events: {err}",
+    ),
+    "checkup.pg.wait_events.value_none": ("无会话在等待", "No sessions are waiting"),
+    "checkup.pg.wait_events.msg_none": (
+        "所有后端进程都在执行而非等待", "All backend processes are executing, not waiting",
+    ),
+    "checkup.pg.wait_events.value": ("TOP {name}（{n} 个会话）", "top {name} ({n} sessions)"),
+    "checkup.pg.wait_events.msg_warn": (
+        "等待事件说明会话卡在哪里；Lock 类等待多时查持锁的 idle in transaction 会话",
+        "Wait events show where sessions are stuck; when Lock waits are frequent, check for "
+        "idle-in-transaction sessions holding locks",
+    ),
+    "checkup.pg.wait_events.msg_info": (
+        "参考值：当前各会话的等待事件分布", "Informational: the current distribution of wait events across sessions",
+    ),
+    "checkup.pg.wait_events.detail": ("{type}/{event} — {n} 个", "{type}/{event} — {n}"),
+    "checkup.pg.temp_files.title": ("临时文件落盘", "Temp Files Spilled to Disk"),
+    "checkup.pg.temp_files.msg_err": (
+        "查 pg_stat_database 失败：{err}", "Failed to query pg_stat_database: {err}",
+    ),
+    "checkup.pg.temp_files.msg_no_row": (
+        "pg_stat_database 没有当前库的行", "pg_stat_database has no row for the current database",
+    ),
+    "checkup.pg.temp_files.msg_no_col": ("temp_files 列取不到", "Could not read the temp_files column"),
+    "checkup.pg.temp_files.value_none": ("无临时文件", "No temp files"),
+    "checkup.pg.temp_files.msg_none": (
+        "启动以来没有查询把数据写到临时文件",
+        "No query has written data to a temp file since startup",
+    ),
+    "checkup.pg.temp_files.value": ("{n} 个文件 / {size}", "{n} files / {size}"),
+    "checkup.pg.temp_files.rate_suffix": ("（约 {rate} 个/小时）", " (about {rate}/hour)"),
+    "checkup.pg.temp_files.msg_warn": (
+        "查询的排序/哈希超过 work_mem 落了临时文件；调大 work_mem，或用 EXPLAIN 找出"
+        " Using filesort / hash spill 的查询",
+        "Queries' sorts/hashes exceeded work_mem and spilled to temp files; increase work_mem, "
+        "or use EXPLAIN to find the queries using filesort / a hash spill",
+    ),
+    "checkup.pg.temp_files.msg_info": (
+        "参考值：累计临时文件数与字节数", "Informational: cumulative temp file count and bytes",
+    ),
+    "checkup.pg.bloat.title": ("死元组膨胀", "Dead Tuple Bloat"),
+    "checkup.pg.bloat.msg_err": (
+        "查 pg_stat_user_tables 失败：{err}", "Failed to query pg_stat_user_tables: {err}",
+    ),
+    "checkup.pg.bloat.value_none": (
+        "无超过 {threshold} 死元组的表", "No table with more than {threshold} dead tuples",
+    ),
+    "checkup.pg.bloat.msg_none": (
+        "死元组由 autovacuum 回收；表删除/更新频繁时关注此项",
+        "Dead tuples are reclaimed by autovacuum; watch this item on tables with frequent "
+        "deletes/updates",
+    ),
+    "checkup.pg.bloat.value": ("最严重 {name}（{n} 死元组）", "worst {name} ({n} dead tuples)"),
+    "checkup.pg.bloat.message": (
+        "死元组过多说明 autovacuum 跟不上；查 last_autovacuum 是否太久没跑，必要时手动 VACUUM",
+        "Too many dead tuples means autovacuum can't keep up; check whether last_autovacuum has "
+        "not run in a long time, and run VACUUM manually if needed",
+    ),
+    "checkup.pg.bloat.detail": (
+        "{name} — 死 {dead} / 活 {live}，上次 autovacuum {last}",
+        "{name} — dead {dead} / live {live}, last autovacuum {last}",
+    ),
+    "checkup.pg.bloat.never": ("从未", "never"),
+    "checkup.pg.stats_stale.title": ("统计信息过期", "Stale Statistics"),
+    "checkup.pg.stats_stale.msg_err": (
+        "查 pg_stat_user_tables 失败：{err}", "Failed to query pg_stat_user_tables: {err}",
+    ),
+    "checkup.pg.stats_stale.value_none": (
+        "全部在 {days} 天内分析过", "All tables analyzed within {days} days",
+    ),
+    "checkup.pg.stats_stale.msg_none": (
+        "统计信息新鲜，规划器能拿到准确的行数估计",
+        "Statistics are fresh, so the planner gets accurate row estimates",
+    ),
+    "checkup.pg.stats_stale.value": (
+        "{n} 张表超过 {days} 天未分析", "{n} table(s) not analyzed in over {days} days",
+    ),
+    "checkup.pg.stats_stale.suffix_age": ("（最久 {days} 天）", " (oldest: {days} days)"),
+    "checkup.pg.stats_stale.suffix_never": ("（从未分析）", " (never analyzed)"),
+    "checkup.pg.stats_stale.message": (
+        "统计信息过期会让规划器选错索引；查 autovacuum 是否在跑，必要时手动 ANALYZE",
+        "Stale statistics can lead the planner to pick the wrong index; check whether "
+        "autovacuum is running, and run ANALYZE manually if needed",
+    ),
+    "checkup.pg.stats_stale.detail_never": ("{name} — 从未分析", "{name} — never analyzed"),
+    "checkup.pg.stats_stale.detail_ago": ("{name} — {dur} 前", "{name} — {dur} ago"),
+    "checkup.pg.unused_indexes.title": ("未使用索引", "Unused Indexes"),
+    "checkup.pg.unused_indexes.msg_err": (
+        "查 pg_stat_user_indexes 失败：{err}", "Failed to query pg_stat_user_indexes: {err}",
+    ),
+    "checkup.pg.unused_indexes.value_none": ("无", "None"),
+    "checkup.pg.unused_indexes.msg_none": (
+        "所有非唯一索引都被使用过（或没有非唯一索引）",
+        "Every non-unique index has been used at least once (or there are none)",
+    ),
+    "checkup.pg.unused_indexes.value": (
+        "{n} 个从未使用（合计 {size}）", "{n} never used (totaling {size})",
+    ),
+    "checkup.pg.unused_indexes.message": (
+        "这些索引自统计重置以来从未被扫描，却要为每次写入付出维护成本；"
+        "确认无用后删除可减少写放大并回收空间",
+        "These indexes have never been scanned since statistics were last reset, yet still cost "
+        "maintenance on every write; after confirming they're unused, dropping them reduces "
+        "write amplification and reclaims space",
+    ),
+    "checkup.pg.unused_indexes.detail": ("{table}.{index} — {size}", "{table}.{index} — {size}"),
+    "checkup.pg.replication_lag.title": ("复制延迟", "Replication Lag"),
+    "checkup.pg.replication_lag.msg_no_pg_monitor": (
+        "账号无 pg_monitor 权限，pg_stat_replication 只能看到自己的会话",
+        "The account lacks the pg_monitor role; pg_stat_replication only shows its own session",
+    ),
+    "checkup.pg.replication_lag.msg_err": (
+        "查 pg_stat_replication 失败（通常缺 pg_monitor 权限）：{err}",
+        "Failed to query pg_stat_replication (usually missing the pg_monitor role): {err}",
+    ),
+    "checkup.pg.replication_lag.value_none": ("无流复制", "No streaming replication"),
+    "checkup.pg.replication_lag.msg_none": (
+        "没有连接的流复制备用节点，或该实例是主节点且无订阅者",
+        "There is no connected streaming-replication standby, or this instance is a primary "
+        "with no subscribers",
+    ),
+    "checkup.pg.replication_lag.value": ("{secs}s（最慢备库）", "{secs}s (slowest standby)"),
+    "checkup.pg.replication_lag.msg_warn": (
+        "写/刷盘/回放延迟之和过大时备库数据已旧；查网络、大事务或备库长查询",
+        "When the sum of write/flush/replay lag is too large, the standby's data is stale; "
+        "check the network, large transactions, or long-running queries on the standby",
+    ),
+    "checkup.pg.replication_lag.msg_ok": ("所有备库追平主库", "All standbys have caught up with the primary"),
+    "checkup.pg.replication_lag.detail": (
+        "{name}（{addr}）总延迟 {secs}s", "{name} ({addr}) total lag {secs}s",
+    ),
+    "checkup.pg.replication_slots.title": ("复制槽健康度", "Replication Slot Health"),
+    "checkup.pg.replication_slots.msg_err": (
+        "查 pg_replication_slots 失败：{err}", "Failed to query pg_replication_slots: {err}",
+    ),
+    "checkup.pg.replication_slots.value_none": ("无复制槽", "No replication slots"),
+    "checkup.pg.replication_slots.msg_none": (
+        "该实例没有配置复制槽（物理/逻辑都没有）",
+        "This instance has no replication slots configured (neither physical nor logical)",
+    ),
+    "checkup.pg.replication_slots.msg_ok": (
+        "所有复制槽都在正常消费 WAL", "All replication slots are consuming WAL normally",
+    ),
+    "checkup.pg.replication_slots.msg_wal_status_critical": (
+        "复制槽 {slot} 的 wal_status={status}：保留的 WAL 已不安全",
+        "Replication slot {slot} has wal_status={status}: the retained WAL is no longer safe",
+    ),
+    "checkup.pg.replication_slots.msg_wal_status_warn": (
+        "复制槽 {slot} 的 wal_status={status}：WAL 保留量已超上限",
+        "Replication slot {slot} has wal_status={status}: WAL retention has exceeded its limit",
+    ),
+    "checkup.pg.replication_slots.msg_lag_critical": (
+        "复制槽滞后过大：消费方不拉 WAL，pg_wal 会持续堆积直到撑爆磁盘",
+        "A replication slot is lagging severely: the consumer isn't pulling WAL, and pg_wal will "
+        "keep accumulating until it fills the disk",
+    ),
+    "checkup.pg.replication_slots.msg_lag_warn": (
+        "复制槽滞后较大：消费方不拉 WAL，pg_wal 会持续堆积",
+        "A replication slot is lagging significantly: the consumer isn't pulling WAL, and pg_wal "
+        "will keep accumulating",
+    ),
+    "checkup.pg.replication_slots.msg_inactive": (
+        "有非活跃的复制槽：消费方断开后 WAL 仍在堆积，确认槽是否仍需要",
+        "There is an inactive replication slot: WAL keeps accumulating after the consumer "
+        "disconnects; confirm whether the slot is still needed",
+    ),
+    "checkup.pg.replication_slots.value": ("最滞后 {name}（{size}）", "most lagging {name} ({size})"),
+    "checkup.pg.replication_slots.value_safe_suffix": (
+        "，{name} 离丢数据仅剩 {size}", "; {name} has only {size} left before data loss",
+    ),
+    "checkup.pg.replication_slots.msg_drop_suffix": (
+        "；不再需要的槽用 pg_drop_replication_slot 删掉",
+        "; drop slots that are no longer needed with pg_drop_replication_slot",
+    ),
+    "checkup.pg.replication_slots.detail": (
+        "{name}（{type}，{active}{wal_status}）滞后 {lag}",
+        "{name} ({type}, {active}{wal_status}) lag {lag}",
+    ),
+    "checkup.pg.replication_slots.active_yes": ("活跃", "active"),
+    "checkup.pg.replication_slots.active_no": ("未活跃", "inactive"),
+    "checkup.pg.replication_slots.wal_status_suffix": ("，wal_status={status}", ", wal_status={status}"),
+    "checkup.pg.archiver.title": ("WAL 归档", "WAL Archiving"),
+    "checkup.pg.archiver.msg_err": (
+        "查 pg_stat_archiver 失败：{err}", "Failed to query pg_stat_archiver: {err}",
+    ),
+    "checkup.pg.archiver.msg_no_data": (
+        "pg_stat_archiver 没有数据", "pg_stat_archiver has no data",
+    ),
+    "checkup.pg.archiver.msg_no_col": (
+        "failed_count 列取不到", "Could not read the failed_count column",
+    ),
+    "checkup.pg.archiver.value_ok": (
+        "已归档 {n} 段，无失败", "{n} segments archived, no failures",
+    ),
+    "checkup.pg.archiver.msg_ok": (
+        "archive_command 一直在正常工作", "archive_command has been working normally",
+    ),
+    "checkup.pg.archiver.value_warn": ("{n} 次失败", "{n} failure(s)"),
+    "checkup.pg.archiver.msg_warn": (
+        "归档失败会让 pg_wal 无法回收（撑爆磁盘）且时间点恢复不可用；"
+        "查 archive_command 与 last_failed_time",
+        "Archive failures prevent pg_wal from being reclaimed (filling the disk) and make "
+        "point-in-time recovery unavailable; check archive_command and last_failed_time",
+    ),
+    "checkup.pg.archiver.detail_last_fail": ("最近失败段：{wal}", "Most recent failed segment: {wal}"),
+    "checkup.pg.archiver.detail_no_last_fail": (
+        "last_failed_wal 为空（旧的失败记录已轮换）",
+        "last_failed_wal is empty (the old failure record has rotated out)",
+    ),
+    "checkup.pg.xid_wraparound.title": ("事务 ID 回卷风险", "Transaction ID Wraparound Risk"),
+    "checkup.pg.xid_wraparound.msg_err": (
+        "查 pg_database.datfrozenxid 失败：{err}", "Failed to query pg_database.datfrozenxid: {err}",
+    ),
+    "checkup.pg.xid_wraparound.msg_no_age": (
+        "age(datfrozenxid) 取不到", "Could not read age(datfrozenxid)",
+    ),
+    "checkup.pg.xid_wraparound.msg_no_remaining": (
+        "剩余事务数算不出来", "Could not compute the remaining transaction count",
+    ),
+    "checkup.pg.xid_wraparound.value": ("剩余 {m}M 个事务 ID", "{m}M transaction IDs remaining"),
+    "checkup.pg.xid_wraparound.msg_warn": (
+        "剩余事务号不足时库会被强制只读（防回卷），在此之前必须让 autovacuum 把"
+        " datfrozenxid 推进；查是否有长事务挡住 vacuum（idle_in_transaction 项）",
+        "When the remaining transaction IDs run low, the database is forced read-only (to "
+        "prevent wraparound); before that happens, autovacuum must be allowed to advance "
+        "datfrozenxid — check whether a long transaction is blocking vacuum (see the "
+        "idle-in-transaction item)",
+    ),
+    "checkup.pg.xid_wraparound.msg_ok": (
+        "各库的 datfrozenxid 都在被正常推进", "Every database's datfrozenxid is advancing normally",
+    ),
+    "checkup.pg.xid_wraparound.detail": (
+        "最老的库已用 {m}M 个事务 ID（上限 2147M）", "The oldest database has used {m}M transaction IDs (limit 2147M)",
+    ),
+    "checkup.pg.sizes.title": ("库大小与大表 TOP5", "Database Size & Top 5 Largest Tables"),
+    "checkup.pg.sizes.msg_err": ("查 pg_class 大小失败：{err}", "Failed to query pg_class sizes: {err}"),
+    "checkup.pg.sizes.value": ("库 {total}", "database {total}"),
+    "checkup.pg.sizes.value_biggest_suffix": ("，最大表 {name}", ", largest table {name}"),
+    "checkup.pg.sizes.message": (
+        "最大的几张表是维护成本的主要来源：DDL 变更久、备份慢、全表扫描风险高",
+        "The largest tables are the main source of maintenance cost: DDL changes take longer, "
+        "backups are slower, and full-table-scan risk is higher",
+    ),
+    "checkup.pg.sizes.detail": ("{name} — {size}", "{name} — {size}"),
+})
+
+
 def _pg_idle_transactions(engine: SAEngine) -> Check:
     try:
         rows = _rows(
@@ -1102,18 +1839,22 @@ def _pg_idle_transactions(engine: SAEngine) -> Check:
             {"s": IDLE_TXN_WARN_S},
         )
     except Exception as e:
-        return Check("idle_in_transaction", "空闲事务", "unknown", "未知",
-                     f"查 pg_stat_activity 失败：{type(e).__name__}", dimension="concurrency")
+        return Check("idle_in_transaction", t("checkup.pg.idle_in_transaction.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.pg.idle_in_transaction.msg_err", err=type(e).__name__),
+                     dimension="concurrency")
     if not rows:
-        return Check("idle_in_transaction", "空闲事务", "ok",
-                     f"无超过 {IDLE_TXN_WARN_S}s 的空闲事务",
-                     "空闲事务拿着锁又挡 autovacuum，越长越该清掉",
+        return Check("idle_in_transaction", t("checkup.pg.idle_in_transaction.title"), "ok",
+                     t("checkup.pg.idle_in_transaction.value_none", threshold=IDLE_TXN_WARN_S),
+                     t("checkup.pg.idle_in_transaction.msg_none"),
                      dimension="concurrency")
     worst = max(float(r[1]) for r in rows)
     return Check(
-        "idle_in_transaction", "空闲事务", "warn", f"{worst:.0f}s（最长）",
-        "有事务开了不提交也不干活，挡住 autovacuum 并持锁；查应用是否漏提交，或取消该会话",
-        [f"pid {r[0]} · {int(float(r[1]))}s | {str(r[2])}" for r in rows],
+        "idle_in_transaction", t("checkup.pg.idle_in_transaction.title"), "warn",
+        t("checkup.pg.idle_in_transaction.value_worst", secs=f"{worst:.0f}"),
+        t("checkup.pg.idle_in_transaction.message"),
+        [t("checkup.pg.idle_in_transaction.detail", pid=r[0], secs=int(float(r[1])), sql=str(r[2]))
+         for r in rows],
         dimension="concurrency",
     )
 
@@ -1130,17 +1871,21 @@ def _pg_long_queries(engine: SAEngine) -> Check:
             {"s": LONG_QUERY_WARN_S},
         )
     except Exception as e:
-        return Check("long_queries", "长查询", "unknown", "未知",
-                     f"查 pg_stat_activity 失败：{type(e).__name__}", dimension="performance")
+        return Check("long_queries", t("checkup.pg.long_queries.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.pg.long_queries.msg_err", err=type(e).__name__), dimension="performance")
     if not rows:
-        return Check("long_queries", "长查询", "ok", f"无 >= {LONG_QUERY_WARN_S}s 的查询",
-                     "当前没有长时间执行的查询", dimension="performance")
+        return Check("long_queries", t("checkup.pg.long_queries.title"), "ok",
+                     t("checkup.pg.long_queries.value_none", threshold=LONG_QUERY_WARN_S),
+                     t("checkup.pg.long_queries.msg_none"), dimension="performance")
     worst = max(float(r[1]) for r in rows)
     level: Status = "critical" if worst >= LONG_QUERY_CRIT_S else "warn"
     return Check(
-        "long_queries", "长查询", level, f"{worst:.0f}s（最长）",
-        "用 pg_cancel_backend(pid) 或查询台「取消」中断；再 EXPLAIN 看是否全表扫描",
-        [f"pid {r[0]} · {int(float(r[1]))}s | {str(r[2])}" for r in rows],
+        "long_queries", t("checkup.pg.long_queries.title"), level,
+        t("checkup.pg.long_queries.value_worst", secs=f"{worst:.0f}"),
+        t("checkup.pg.long_queries.message"),
+        [t("checkup.pg.long_queries.detail", pid=r[0], secs=int(float(r[1])), sql=str(r[2]))
+         for r in rows],
         dimension="performance",
     )
 
@@ -1156,19 +1901,22 @@ def _pg_wait_events(engine: SAEngine) -> Check:
             " GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 5",
         )
     except Exception as e:
-        return Check("wait_events", "等待事件", "unknown", "未知",
-                     f"查 pg_stat_activity 等待事件失败：{type(e).__name__}",
+        return Check("wait_events", t("checkup.pg.wait_events.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.pg.wait_events.msg_err", err=type(e).__name__),
                      dimension="performance")
     if not rows:
-        return Check("wait_events", "等待事件", "ok", "无会话在等待",
-                     "所有后端进程都在执行而非等待", dimension="performance")
+        return Check("wait_events", t("checkup.pg.wait_events.title"), "ok",
+                     t("checkup.pg.wait_events.value_none"),
+                     t("checkup.pg.wait_events.msg_none"), dimension="performance")
     locks = sum(int(r[2]) for r in rows if str(r[0]) == "Lock")
     level: Status = "warn" if locks >= 5 else "info"
     return Check(
-        "wait_events", "等待事件", level, f"TOP {str(rows[0][1])}（{int(rows[0][2])} 个会话）",
-        "等待事件说明会话卡在哪里；Lock 类等待多时查持锁的 idle in transaction 会话"
-        if level == "warn" else "参考值：当前各会话的等待事件分布",
-        [f"{r[0]}/{r[1]} — {int(r[2])} 个" for r in rows],
+        "wait_events", t("checkup.pg.wait_events.title"), level,
+        t("checkup.pg.wait_events.value", name=str(rows[0][1]), n=int(rows[0][2])),
+        t("checkup.pg.wait_events.msg_warn") if level == "warn"
+        else t("checkup.pg.wait_events.msg_info"),
+        [t("checkup.pg.wait_events.detail", type=r[0], event=r[1], n=int(r[2])) for r in rows],
         dimension="performance",
     )
 
@@ -1183,28 +1931,31 @@ def _pg_temp_files(engine: SAEngine, uptime_s: float | None) -> Check:
             " WHERE datname = current_database()",
         )
     except Exception as e:
-        return Check("temp_files", "临时文件落盘", "unknown", "未知",
-                     f"查 pg_stat_database 失败：{type(e).__name__}", dimension="performance")
+        return Check("temp_files", t("checkup.pg.temp_files.title"),
+                     "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.temp_files.msg_err", err=type(e).__name__), dimension="performance")
     if not row:
-        return Check("temp_files", "临时文件落盘", "unknown", "未知",
-                     "pg_stat_database 没有当前库的行", dimension="performance")
+        return Check("temp_files", t("checkup.pg.temp_files.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.pg.temp_files.msg_no_row"),
+                     dimension="performance")
     files = _to_num(row[0][0])
     bytes_ = _to_num(row[0][1])
     if files is None:
-        return Check("temp_files", "临时文件落盘", "unknown", "未知",
-                     "temp_files 列取不到", dimension="performance")
+        return Check("temp_files", t("checkup.pg.temp_files.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.pg.temp_files.msg_no_col"),
+                     dimension="performance")
     if files <= 0:
-        return Check("temp_files", "临时文件落盘", "ok", "无临时文件",
-                     "启动以来没有查询把数据写到临时文件", dimension="performance")
+        return Check("temp_files", t("checkup.pg.temp_files.title"), "ok",
+                     t("checkup.pg.temp_files.value_none"),
+                     t("checkup.pg.temp_files.msg_none"), dimension="performance")
     rate = _rate_per_hour(files, uptime_s)
     level: Status = "warn" if (rate or 0) > 10 else "info"
     return Check(
-        "temp_files", "临时文件落盘", level,
-        f"{int(files):,} 个文件 / {_human_bytes(bytes_)}"
-        + (f"（约 {rate:.1f} 个/小时）" if rate is not None else ""),
-        "查询的排序/哈希超过 work_mem 落了临时文件；调大 work_mem，或用 EXPLAIN 找出"
-        " Using filesort / hash spill 的查询"
-        if level == "warn" else "参考值：累计临时文件数与字节数",
+        "temp_files", t("checkup.pg.temp_files.title"), level,
+        t("checkup.pg.temp_files.value", n=f"{int(files):,}", size=_human_bytes(bytes_))
+        + (t("checkup.pg.temp_files.rate_suffix", rate=f"{rate:.1f}") if rate is not None else ""),
+        t("checkup.pg.temp_files.msg_warn") if level == "warn"
+        else t("checkup.pg.temp_files.msg_info"),
         dimension="performance",
     )
 
@@ -1213,24 +1964,26 @@ def _pg_bloat(engine: SAEngine, schema: str | None) -> Check:
     try:
         rows = _rows(
             engine,
-            "SELECT relname, n_dead_tup, n_live_tup,"
-            " COALESCE(last_autovacuum::text, '从未')"
+            "SELECT relname, n_dead_tup, n_live_tup, last_autovacuum::text"
             " FROM pg_stat_user_tables"
             f" WHERE n_dead_tup >= :n AND {schema_filter_pg(schema)}"
             " ORDER BY n_dead_tup DESC LIMIT 5",
             {"n": DEAD_TUPLE_WARN, **({"s": schema} if schema else {})},
         )
     except Exception as e:
-        return Check("bloat", "死元组膨胀", "unknown", "未知",
-                     f"查 pg_stat_user_tables 失败：{type(e).__name__}", dimension="maintenance")
+        return Check("bloat", t("checkup.pg.bloat.title"), "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.bloat.msg_err", err=type(e).__name__), dimension="maintenance")
     if not rows:
-        return Check("bloat", "死元组膨胀", "ok", f"无超过 {DEAD_TUPLE_WARN} 死元组的表",
-                     "死元组由 autovacuum 回收；表删除/更新频繁时关注此项",
+        return Check("bloat", t("checkup.pg.bloat.title"), "ok",
+                     t("checkup.pg.bloat.value_none", threshold=DEAD_TUPLE_WARN),
+                     t("checkup.pg.bloat.msg_none"),
                      dimension="maintenance")
     return Check(
-        "bloat", "死元组膨胀", "warn", f"最严重 {str(rows[0][0])}（{int(float(rows[0][1])):,} 死元组）",
-        "死元组过多说明 autovacuum 跟不上；查 last_autovacuum 是否太久没跑，必要时手动 VACUUM",
-        [f"{r[0]} — 死 {int(float(r[1])):,} / 活 {int(float(r[2]) or 0):,}，上次 autovacuum {r[3]}"
+        "bloat", t("checkup.pg.bloat.title"), "warn",
+        t("checkup.pg.bloat.value", name=str(rows[0][0]), n=f"{int(float(rows[0][1])):,}"),
+        t("checkup.pg.bloat.message"),
+        [t("checkup.pg.bloat.detail", name=r[0], dead=f"{int(float(r[1])):,}",
+           live=f"{int(float(r[2]) or 0):,}", last=r[3] or t("checkup.pg.bloat.never"))
          for r in rows],
         dimension="maintenance",
     )
@@ -1250,21 +2003,24 @@ def _pg_stats_stale(engine: SAEngine, schema: str | None) -> Check:
             {"s": schema} if schema else None,
         )
     except Exception as e:
-        return Check("stats_stale", "统计信息过期", "unknown", "未知",
-                     f"查 pg_stat_user_tables 失败：{type(e).__name__}", dimension="maintenance")
+        return Check("stats_stale", t("checkup.pg.stats_stale.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.pg.stats_stale.msg_err", err=type(e).__name__), dimension="maintenance")
     stale = [r for r in rows
              if r[1] is None or (_to_num(r[2]) or 0) > STATS_STALE_DAYS * 86400]
     if not stale:
-        return Check("stats_stale", "统计信息过期", "ok",
-                     f"全部在 {STATS_STALE_DAYS} 天内分析过",
-                     "统计信息新鲜，规划器能拿到准确的行数估计", dimension="maintenance")
+        return Check("stats_stale", t("checkup.pg.stats_stale.title"), "ok",
+                     t("checkup.pg.stats_stale.value_none", days=STATS_STALE_DAYS),
+                     t("checkup.pg.stats_stale.msg_none"), dimension="maintenance")
     worst_age = max((_to_num(r[2]) or 0) for r in stale)
     return Check(
-        "stats_stale", "统计信息过期", "warn",
-        f"{len(stale)} 张表超过 {STATS_STALE_DAYS} 天未分析"
-        + (f"（最久 {worst_age / 86400:.0f} 天）" if worst_age > 0 else "（从未分析）"),
-        "统计信息过期会让规划器选错索引；查 autovacuum 是否在跑，必要时手动 ANALYZE",
-        [f"{r[0]} — {'从未分析' if r[1] is None else f'{_human_duration(_to_num(r[2]))} 前'}"
+        "stats_stale", t("checkup.pg.stats_stale.title"), "warn",
+        t("checkup.pg.stats_stale.value", n=len(stale), days=STATS_STALE_DAYS)
+        + (t("checkup.pg.stats_stale.suffix_age", days=f"{worst_age / 86400:.0f}") if worst_age > 0
+           else t("checkup.pg.stats_stale.suffix_never")),
+        t("checkup.pg.stats_stale.message"),
+        [t("checkup.pg.stats_stale.detail_never", name=r[0]) if r[1] is None
+         else t("checkup.pg.stats_stale.detail_ago", name=r[0], dur=_human_duration(_to_num(r[2])))
          for r in stale[:5]],
         dimension="maintenance",
     )
@@ -1289,27 +2045,30 @@ def _pg_unused_indexes(engine: SAEngine, schema: str | None) -> Check:
             {"s": schema} if schema else None,
         )
     except Exception as e:
-        return Check("unused_indexes", "未使用索引", "unknown", "未知",
-                     f"查 pg_stat_user_indexes 失败：{type(e).__name__}", dimension="maintenance")
+        return Check("unused_indexes", t("checkup.pg.unused_indexes.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.pg.unused_indexes.msg_err", err=type(e).__name__), dimension="maintenance")
     if not rows:
-        return Check("unused_indexes", "未使用索引", "ok", "无",
-                     "所有非唯一索引都被使用过（或没有非唯一索引）", dimension="maintenance")
+        return Check("unused_indexes", t("checkup.pg.unused_indexes.title"), "ok",
+                     t("checkup.pg.unused_indexes.value_none"),
+                     t("checkup.pg.unused_indexes.msg_none"), dimension="maintenance")
     total_b = sum(float(r[3] or 0) for r in rows)
     level: Status = "warn" if total_b > UNUSED_IDX_WARN_B else "info"
     return Check(
-        "unused_indexes", "未使用索引", level,
-        f"{len(rows)} 个从未使用（合计 {_human_bytes(total_b)}）",
-        "这些索引自统计重置以来从未被扫描，却要为每次写入付出维护成本；"
-        "确认无用后删除可减少写放大并回收空间",
-        [f"{r[0]}.{r[1]} — {_human_bytes(float(r[3] or 0))}" for r in rows[:5]],
+        "unused_indexes", t("checkup.pg.unused_indexes.title"), level,
+        t("checkup.pg.unused_indexes.value", n=len(rows), size=_human_bytes(total_b)),
+        t("checkup.pg.unused_indexes.message"),
+        [t("checkup.pg.unused_indexes.detail", table=r[0], index=r[1], size=_human_bytes(float(r[3] or 0)))
+         for r in rows[:5]],
         dimension="maintenance",
     )
 
 
 def _pg_replication_lag(engine: SAEngine, can_see: bool) -> Check:
     if not can_see:
-        return Check("replication_lag", "复制延迟", "unknown", "未知",
-                     "账号无 pg_monitor 权限，pg_stat_replication 只能看到自己的会话",
+        return Check("replication_lag", t("checkup.pg.replication_lag.title"),
+                     "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.replication_lag.msg_no_pg_monitor"),
                      dimension="replication", privilege="pg_monitor")
     try:
         rows = _rows(
@@ -1321,20 +2080,25 @@ def _pg_replication_lag(engine: SAEngine, can_see: bool) -> Check:
             " FROM pg_stat_replication ORDER BY 3 DESC NULLS LAST LIMIT 5",
         )
     except Exception as e:
-        return Check("replication_lag", "复制延迟", "unknown", "未知",
-                     f"查 pg_stat_replication 失败（通常缺 pg_monitor 权限）：{type(e).__name__}",
+        return Check("replication_lag", t("checkup.pg.replication_lag.title"), "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.replication_lag.msg_err", err=type(e).__name__),
                      dimension="replication", privilege="pg_monitor")
     if not rows:
-        return Check("replication_lag", "复制延迟", "info", "无流复制",
-                     "没有连接的流复制备用节点，或该实例是主节点且无订阅者",
+        return Check("replication_lag", t("checkup.pg.replication_lag.title"), "info",
+                     t("checkup.pg.replication_lag.value_none"),
+                     t("checkup.pg.replication_lag.msg_none"),
                      dimension="replication")
-    worst = max(float(r[3] or 0) for r in rows)
+    # 查询只有三列（application_name, client_addr, 三段延迟之和），之前取 r[3] 会在真有
+    # 复制从库的 PG 上直接 IndexError
+    worst = max(float(r[2] or 0) for r in rows)
     level: Status = "critical" if worst >= REPL_LAG_CRIT_S else "warn" if worst >= REPL_LAG_WARN_S else "ok"
     return Check(
-        "replication_lag", "复制延迟", level, f"{worst:.0f}s（最慢备库）",
-        "写/刷盘/回放延迟之和过大时备库数据已旧；查网络、大事务或备库长查询"
-        if level != "ok" else "所有备库追平主库",
-        [f"{r[0]}（{r[1]}）总延迟 {float(r[3] or 0):.0f}s" for r in rows],
+        "replication_lag", t("checkup.pg.replication_lag.title"), level,
+        t("checkup.pg.replication_lag.value", secs=f"{worst:.0f}"),
+        t("checkup.pg.replication_lag.msg_warn") if level != "ok"
+        else t("checkup.pg.replication_lag.msg_ok"),
+        [t("checkup.pg.replication_lag.detail", name=r[0], addr=r[1], secs=f"{float(r[2] or 0):.0f}")
+         for r in rows],
         dimension="replication",
     )
 
@@ -1370,45 +2134,53 @@ def _pg_replication_slots(engine: SAEngine) -> Check:
             rows = _rows(engine, _PG_SLOT_SQL_LEGACY)
             legacy = True
         except Exception as e:
-            return Check("replication_slots", "复制槽健康度", "unknown", "未知",
-                         f"查 pg_replication_slots 失败：{type(e).__name__}",
+            return Check("replication_slots", t("checkup.pg.replication_slots.title"), "unknown",
+                         t("checkup.common.unknown"),
+                         t("checkup.pg.replication_slots.msg_err", err=type(e).__name__),
                          dimension="replication")
     if not rows:
-        return Check("replication_slots", "复制槽健康度", "info", "无复制槽",
-                     "该实例没有配置复制槽（物理/逻辑都没有）", dimension="replication")
+        return Check("replication_slots", t("checkup.pg.replication_slots.title"), "info",
+                     t("checkup.pg.replication_slots.value_none"),
+                     t("checkup.pg.replication_slots.msg_none"), dimension="replication")
     worst_lag = max(float(r[5] or 0) for r in rows)
     level: Status = "ok"
-    msg = "所有复制槽都在正常消费 WAL"
+    msg = t("checkup.pg.replication_slots.msg_ok")
     # 官方枚举优先：wal_status 直接说明槽保留的 WAL 是否已不安全
     if not legacy:
         for r in rows:
             st = _SLOT_WAL_STATUS_LEVEL.get(str(r[3] or ""))
             if st == "critical":
-                level, msg = "critical", f"复制槽 {r[0]} 的 wal_status={r[3]}：保留的 WAL 已不安全"
+                level = "critical"
+                msg = t("checkup.pg.replication_slots.msg_wal_status_critical", slot=r[0], status=r[3])
                 break
             if st == "warn" and level != "critical":
-                level, msg = "warn", f"复制槽 {r[0]} 的 wal_status={r[3]}：WAL 保留量已超上限"
+                level = "warn"
+                msg = t("checkup.pg.replication_slots.msg_wal_status_warn", slot=r[0], status=r[3])
     # 滞后量兜底
     if level == "ok":
         if worst_lag >= SLOT_LAG_CRIT_B:
-            level, msg = "critical", "复制槽滞后过大：消费方不拉 WAL，pg_wal 会持续堆积直到撑爆磁盘"
+            level, msg = "critical", t("checkup.pg.replication_slots.msg_lag_critical")
         elif worst_lag >= SLOT_LAG_WARN_B:
-            level, msg = "warn", "复制槽滞后较大：消费方不拉 WAL，pg_wal 会持续堆积"
+            level, msg = "warn", t("checkup.pg.replication_slots.msg_lag_warn")
     # 非活跃槽：无论滞后多少都在堆积
     inactive = [r for r in rows if not r[2]]
     if level == "ok" and inactive:
-        level, msg = "warn", "有非活跃的复制槽：消费方断开后 WAL 仍在堆积，确认槽是否仍需要"
+        level, msg = "warn", t("checkup.pg.replication_slots.msg_inactive")
     safe = min((float(r[4]) for r in rows if r[4] is not None and float(r[4]) >= 0),
                default=None)
-    value = f"最滞后 {str(rows[0][0])}（{_human_bytes(worst_lag)}）"
+    value = t("checkup.pg.replication_slots.value", name=str(rows[0][0]), size=_human_bytes(worst_lag))
     if safe is not None and safe < SLOT_LAG_WARN_B:
-        value += f"，{rows[0][0]} 离丢数据仅剩 {_human_bytes(safe)}"
+        value += t("checkup.pg.replication_slots.value_safe_suffix", name=rows[0][0],
+                   size=_human_bytes(safe))
     return Check(
-        "replication_slots", "复制槽健康度", level, value,
-        msg + ("；不再需要的槽用 pg_drop_replication_slot 删掉" if level != "ok" else ""),
-        [f"{r[0]}（{r[1]}，{'活跃' if r[2] else '未活跃'}"
-         + (f"，wal_status={r[3]}" if not legacy and r[3] else "")
-         + f"）滞后 {_human_bytes(float(r[5] or 0))}" for r in rows],
+        "replication_slots", t("checkup.pg.replication_slots.title"), level, value,
+        msg + (t("checkup.pg.replication_slots.msg_drop_suffix") if level != "ok" else ""),
+        [t("checkup.pg.replication_slots.detail", name=r[0], type=r[1],
+           active=(t("checkup.pg.replication_slots.active_yes") if r[2]
+                   else t("checkup.pg.replication_slots.active_no")),
+           wal_status=(t("checkup.pg.replication_slots.wal_status_suffix", status=r[3])
+                       if not legacy and r[3] else ""),
+           lag=_human_bytes(float(r[5] or 0))) for r in rows],
         dimension="replication",
     )
 
@@ -1423,24 +2195,26 @@ def _pg_archiver(engine: SAEngine) -> Check:
             " FROM pg_stat_archiver",
         )
     except Exception as e:
-        return Check("archiver", "WAL 归档", "unknown", "未知",
-                     f"查 pg_stat_archiver 失败：{type(e).__name__}",
+        return Check("archiver", t("checkup.pg.archiver.title"), "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.archiver.msg_err", err=type(e).__name__),
                      dimension="replication")
     if not rows:
-        return Check("archiver", "WAL 归档", "unknown", "未知",
-                     "pg_stat_archiver 没有数据", dimension="replication")
+        return Check("archiver", t("checkup.pg.archiver.title"), "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.archiver.msg_no_data"), dimension="replication")
     archived, failed, last_fail = _to_num(rows[0][0]), _to_num(rows[0][1]), str(rows[0][2])
     if failed is None:
-        return Check("archiver", "WAL 归档", "unknown", "未知",
-                     "failed_count 列取不到", dimension="replication")
+        return Check("archiver", t("checkup.pg.archiver.title"), "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.archiver.msg_no_col"), dimension="replication")
     if failed <= 0:
-        return Check("archiver", "WAL 归档", "ok", f"已归档 {int(archived or 0):,} 段，无失败",
-                     "archive_command 一直在正常工作", dimension="replication")
+        return Check("archiver", t("checkup.pg.archiver.title"), "ok",
+                     t("checkup.pg.archiver.value_ok", n=f"{int(archived or 0):,}"),
+                     t("checkup.pg.archiver.msg_ok"), dimension="replication")
     return Check(
-        "archiver", "WAL 归档", "warn", f"{int(failed):,} 次失败",
-        "归档失败会让 pg_wal 无法回收（撑爆磁盘）且时间点恢复不可用；"
-        "查 archive_command 与 last_failed_time",
-        [f"最近失败段：{last_fail}" if last_fail else "last_failed_wal 为空（旧的失败记录已轮换）"],
+        "archiver", t("checkup.pg.archiver.title"), "warn",
+        t("checkup.pg.archiver.value_warn", n=f"{int(failed):,}"),
+        t("checkup.pg.archiver.msg_warn"),
+        [t("checkup.pg.archiver.detail_last_fail", wal=last_fail) if last_fail
+         else t("checkup.pg.archiver.detail_no_last_fail")],
         dimension="replication",
     )
 
@@ -1455,16 +2229,19 @@ def _pg_xid_wraparound(engine: SAEngine) -> Check:
             " FROM pg_database",
         )
     except Exception as e:
-        return Check("xid_wraparound", "事务 ID 回卷风险", "unknown", "未知",
-                     f"查 pg_database.datfrozenxid 失败：{type(e).__name__}",
+        return Check("xid_wraparound", t("checkup.pg.xid_wraparound.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.pg.xid_wraparound.msg_err", err=type(e).__name__),
                      dimension="maintenance")
     if not rows or rows[0][0] is None:
-        return Check("xid_wraparound", "事务 ID 回卷风险", "unknown", "未知",
-                     "age(datfrozenxid) 取不到", dimension="maintenance")
+        return Check("xid_wraparound", t("checkup.pg.xid_wraparound.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.pg.xid_wraparound.msg_no_age"),
+                     dimension="maintenance")
     age_, remaining = _to_num(rows[0][0]), _to_num(rows[0][1])
     if remaining is None:
-        return Check("xid_wraparound", "事务 ID 回卷风险", "unknown", "未知",
-                     "剩余事务数算不出来", dimension="maintenance")
+        return Check("xid_wraparound", t("checkup.pg.xid_wraparound.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.pg.xid_wraparound.msg_no_remaining"),
+                     dimension="maintenance")
     if remaining < XID_REMAINING_CRIT:
         level: Status = "critical"
     elif remaining < XID_REMAINING_WARN:
@@ -1472,12 +2249,11 @@ def _pg_xid_wraparound(engine: SAEngine) -> Check:
     else:
         level = "ok"
     return Check(
-        "xid_wraparound", "事务 ID 回卷风险", level,
-        f"剩余 {remaining / 1e6:.0f}M 个事务 ID",
-        "剩余事务号不足时库会被强制只读（防回卷），在此之前必须让 autovacuum 把"
-        " datfrozenxid 推进；查是否有长事务挡住 vacuum（idle_in_transaction 项）"
-        if level != "ok" else "各库的 datfrozenxid 都在被正常推进",
-        [f"最老的库已用 {age_ / 1e6:.0f}M 个事务 ID（上限 2147M）"],
+        "xid_wraparound", t("checkup.pg.xid_wraparound.title"), level,
+        t("checkup.pg.xid_wraparound.value", m=f"{remaining / 1e6:.0f}"),
+        t("checkup.pg.xid_wraparound.msg_warn") if level != "ok"
+        else t("checkup.pg.xid_wraparound.msg_ok"),
+        [t("checkup.pg.xid_wraparound.detail", m=f"{age_ / 1e6:.0f}")],
         dimension="maintenance",
     )
 
@@ -1499,13 +2275,14 @@ def _pg_sizes(engine: SAEngine, schema: str | None) -> Check:
             {"s": schema} if schema else None,
         )
     except Exception as e:
-        return Check("big_tables", "库大小与大表 TOP5", "unknown", "未知",
-                     f"查 pg_class 大小失败：{type(e).__name__}", dimension="maintenance")
-    details = [f"{r[0]} — {_human_bytes(float(r[1]))}" for r in rows]
+        return Check("big_tables", t("checkup.pg.sizes.title"), "unknown", t("checkup.common.unknown"),
+                     t("checkup.pg.sizes.msg_err", err=type(e).__name__), dimension="maintenance")
+    details = [t("checkup.pg.sizes.detail", name=r[0], size=_human_bytes(float(r[1]))) for r in rows]
     return Check(
-        "big_tables", "库大小与大表 TOP5", "info",
-        f"库 {total or '未知'}" + (f"，最大表 {rows[0][0]}" if rows else ""),
-        "最大的几张表是维护成本的主要来源：DDL 变更久、备份慢、全表扫描风险高",
+        "big_tables", t("checkup.pg.sizes.title"), "info",
+        t("checkup.pg.sizes.value", total=total or t("checkup.common.unknown"))
+        + (t("checkup.pg.sizes.value_biggest_suffix", name=rows[0][0]) if rows else ""),
+        t("checkup.pg.sizes.message"),
         details, dimension="maintenance",
     )
 
@@ -1515,13 +2292,81 @@ def _pg_sizes(engine: SAEngine, schema: str | None) -> Check:
 # =====================================================================
 
 
+register({
+    "checkup.sqlite.server.title": ("数据库", "Database"),
+    "checkup.sqlite.server.value": (
+        "{size}（{pages} 页 × {page_size} B）", "{size} ({pages} pages x {page_size} B)",
+    ),
+    "checkup.sqlite.server.msg_no_page_info": ("取不到页信息", "Could not read page info"),
+    "checkup.sqlite.integrity.title": ("完整性检查", "Integrity Check"),
+    "checkup.sqlite.integrity.value_ok": ("正常", "OK"),
+    "checkup.sqlite.integrity.value_bad_fallback": ("异常", "Failed"),
+    "checkup.sqlite.integrity.msg_ok": ("数据库文件无结构损坏", "The database file has no structural corruption"),
+    "checkup.sqlite.integrity.msg_bad": (
+        "数据库已损坏！立即备份后用 .recover 或 integrity_check 定位",
+        "The database is corrupted! Back it up immediately, then use .recover or "
+        "integrity_check to locate the damage",
+    ),
+    "checkup.sqlite.integrity.msg_err": (
+        "PRAGMA quick_check 失败：{err}", "PRAGMA quick_check failed: {err}",
+    ),
+    "checkup.sqlite.fragmentation.title": ("空闲页碎片", "Free-Page Fragmentation"),
+    "checkup.sqlite.fragmentation.value": (
+        "{pct}（{freelist}/{pages} 页空闲）", "{pct} ({freelist}/{pages} pages free)",
+    ),
+    "checkup.sqlite.fragmentation.msg_warn": (
+        "空闲页占比高时 VACUUM 可回收空间并加速扫描",
+        "When the free-page ratio is high, VACUUM can reclaim space and speed up scans",
+    ),
+    "checkup.sqlite.fragmentation.msg_ok": (
+        "删除产生的空闲页比例正常", "The free-page ratio from deletions is normal",
+    ),
+    "checkup.sqlite.fragmentation.msg_unknown": (
+        "取不到 freelist/page 计数", "Could not read the freelist/page counts",
+    ),
+    "checkup.sqlite.journal_mode.title": ("日志模式", "Journal Mode"),
+    "checkup.sqlite.journal_mode.msg_wal": (
+        "WAL 支持读写并发、崩溃恢复更快；DELETE 模式下写会阻塞读",
+        "WAL supports concurrent reads and writes and recovers faster from crashes; in DELETE "
+        "mode, writes block reads",
+    ),
+    "checkup.sqlite.journal_mode.msg_other": (
+        "并发写较多时考虑切到 WAL（PRAGMA journal_mode=WAL）",
+        "If there are many concurrent writes, consider switching to WAL "
+        "(PRAGMA journal_mode=WAL)",
+    ),
+    "checkup.sqlite.journal_mode.msg_unknown": (
+        "PRAGMA journal_mode 失败", "PRAGMA journal_mode failed",
+    ),
+    "checkup.sqlite.tables.title": ("表与行数", "Tables & Row Counts"),
+    "checkup.sqlite.tables.value_with_stats": ("{n} 张表有统计信息", "{n} table(s) have statistics"),
+    "checkup.sqlite.tables.value_no_stats": ("无统计信息", "No statistics"),
+    "checkup.sqlite.tables.msg_stats": (
+        "行数来自 ANALYZE 写入的 sqlite_stat1（近似值）；跑过 ANALYZE 才有",
+        "Row counts come from sqlite_stat1 written by ANALYZE (approximate); only available "
+        "after ANALYZE has run",
+    ),
+    "checkup.sqlite.tables.detail": ("{name} — 约 {rows} 行", "{name} — ~{rows} rows"),
+    "checkup.sqlite.tables.value_count": ("{n} 张表", "{n} table(s)"),
+    "checkup.sqlite.tables.msg_no_stats": (
+        "无 sqlite_stat1 统计信息，故不逐表 count（大表 count 慢）；"
+        "ANALYZE 后可看近似行数",
+        "No sqlite_stat1 statistics, so tables are not counted individually (counting large "
+        "tables is slow); run ANALYZE to see approximate row counts",
+    ),
+    "checkup.sqlite.tables.msg_err": (
+        "查 sqlite_master 失败：{err}", "Failed to query sqlite_master: {err}",
+    ),
+})
+
+
 def _sqlite_checks(engine: SAEngine, _schema: str | None) -> list[Check]:
     checks: list[Check] = []
 
     try:
         version = str(_scalar(engine, "SELECT sqlite_version()"))
     except Exception:
-        version = "未知"
+        version = t("checkup.common.unknown")
     try:
         pages = _to_num(_scalar(engine, "PRAGMA page_count"))
         freelist = _to_num(_scalar(engine, "PRAGMA freelist_count"))
@@ -1530,9 +2375,10 @@ def _sqlite_checks(engine: SAEngine, _schema: str | None) -> list[Check]:
         pages = freelist = page_size = None
 
     checks.append(Check(
-        "server", "数据库", "info", f"SQLite {version}",
-        f"{_human_bytes((pages or 0) * (page_size or 0))}（{int(pages or 0):,} 页 × "
-        f"{int(page_size or 0)} B）" if pages and page_size else "取不到页信息",
+        "server", t("checkup.sqlite.server.title"), "info", f"SQLite {version}",
+        t("checkup.sqlite.server.value", size=_human_bytes((pages or 0) * (page_size or 0)),
+          pages=f"{int(pages or 0):,}", page_size=int(page_size or 0))
+        if pages and page_size else t("checkup.sqlite.server.msg_no_page_info"),
         dimension="availability",
     ))
 
@@ -1542,51 +2388,58 @@ def _sqlite_checks(engine: SAEngine, _schema: str | None) -> list[Check]:
         result = "; ".join(str(r[0]) for r in rows[:3]) if rows else ""
         ok = result.strip().lower() == "ok"
         checks.append(Check(
-            "integrity", "完整性检查", "ok" if ok else "critical",
-            "正常" if ok else (result or "异常"),
-            "数据库文件无结构损坏" if ok else "数据库已损坏！立即备份后用 .recover 或 integrity_check 定位",
+            "integrity", t("checkup.sqlite.integrity.title"), "ok" if ok else "critical",
+            t("checkup.sqlite.integrity.value_ok") if ok
+            else (result or t("checkup.sqlite.integrity.value_bad_fallback")),
+            t("checkup.sqlite.integrity.msg_ok") if ok else t("checkup.sqlite.integrity.msg_bad"),
             dimension="availability",
         ))
     except Exception as e:
-        checks.append(Check("integrity", "完整性检查", "unknown", "未知",
-                            f"PRAGMA quick_check 失败：{type(e).__name__}",
+        checks.append(Check("integrity", t("checkup.sqlite.integrity.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.sqlite.integrity.msg_err", err=type(e).__name__),
                             dimension="availability"))
 
     # --- 空闲页碎片 ---
     if pages and freelist is not None and pages > 0:
         frag = freelist / pages
         checks.append(Check(
-            "fragmentation", "空闲页碎片", "warn" if frag > 0.2 else "ok",
-            f"{frag:.1%}（{int(freelist):,}/{int(pages):,} 页空闲）",
-            "空闲页占比高时 VACUUM 可回收空间并加速扫描" if frag > 0.2
-            else "删除产生的空闲页比例正常",
+            "fragmentation", t("checkup.sqlite.fragmentation.title"), "warn" if frag > 0.2 else "ok",
+            t("checkup.sqlite.fragmentation.value", pct=f"{frag:.1%}",
+              freelist=f"{int(freelist):,}", pages=f"{int(pages):,}"),
+            t("checkup.sqlite.fragmentation.msg_warn") if frag > 0.2
+            else t("checkup.sqlite.fragmentation.msg_ok"),
             dimension="maintenance",
         ))
     else:
-        checks.append(Check("fragmentation", "空闲页碎片", "unknown", "未知",
-                            "取不到 freelist/page 计数", dimension="maintenance"))
+        checks.append(Check("fragmentation", t("checkup.sqlite.fragmentation.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.sqlite.fragmentation.msg_unknown"),
+                            dimension="maintenance"))
 
     # --- journal 模式（WAL 与否影响并发） ---
     try:
         mode = str(_scalar(engine, "PRAGMA journal_mode"))
         checks.append(Check(
-            "journal_mode", "日志模式", "info", mode,
-            "WAL 支持读写并发、崩溃恢复更快；DELETE 模式下写会阻塞读" if mode.upper() == "WAL"
-            else "并发写较多时考虑切到 WAL（PRAGMA journal_mode=WAL）",
+            "journal_mode", t("checkup.sqlite.journal_mode.title"), "info", mode,
+            t("checkup.sqlite.journal_mode.msg_wal") if mode.upper() == "WAL"
+            else t("checkup.sqlite.journal_mode.msg_other"),
             dimension="concurrency",
         ))
     except Exception:
-        checks.append(Check("journal_mode", "日志模式", "unknown", "未知",
-                            "PRAGMA journal_mode 失败", dimension="concurrency"))
+        checks.append(Check("journal_mode", t("checkup.sqlite.journal_mode.title"), "unknown",
+                            t("checkup.common.unknown"), t("checkup.sqlite.journal_mode.msg_unknown"),
+                            dimension="concurrency"))
 
     # --- 表行数（有 sqlite_stat1 时用统计值，避免逐表 count） ---
     try:
         rows = _rows(engine, "SELECT tbl, stat FROM sqlite_stat1 ORDER BY 1 LIMIT 10")
-        details = [f"{r[0]} — 约 {str(r[1]).split(' ')[0]} 行" for r in rows if r[1]]
+        details = [t("checkup.sqlite.tables.detail", name=r[0], rows=str(r[1]).split(" ")[0])
+                   for r in rows if r[1]]
         checks.append(Check(
-            "tables", "表与行数", "info",
-            f"{len(details)} 张表有统计信息" if details else "无统计信息",
-            "行数来自 ANALYZE 写入的 sqlite_stat1（近似值）；跑过 ANALYZE 才有",
+            "tables", t("checkup.sqlite.tables.title"), "info",
+            t("checkup.sqlite.tables.value_with_stats", n=len(details)) if details
+            else t("checkup.sqlite.tables.value_no_stats"),
+            t("checkup.sqlite.tables.msg_stats"),
             details, dimension="maintenance",
         ))
     except Exception:
@@ -1597,14 +2450,15 @@ def _sqlite_checks(engine: SAEngine, _schema: str | None) -> list[Check]:
                 "SELECT count(*) FROM sqlite_master WHERE type='table'"
                 " AND name NOT LIKE 'sqlite_%'"))
             checks.append(Check(
-                "tables", "表与行数", "info", f"{int(n or 0)} 张表",
-                "无 sqlite_stat1 统计信息，故不逐表 count（大表 count 慢）；"
-                "ANALYZE 后可看近似行数",
+                "tables", t("checkup.sqlite.tables.title"), "info",
+                t("checkup.sqlite.tables.value_count", n=int(n or 0)),
+                t("checkup.sqlite.tables.msg_no_stats"),
                 dimension="maintenance",
             ))
         except Exception as e:
-            checks.append(Check("tables", "表与行数", "unknown", "未知",
-                                f"查 sqlite_master 失败：{type(e).__name__}",
+            checks.append(Check("tables", t("checkup.sqlite.tables.title"), "unknown",
+                                t("checkup.common.unknown"),
+                                t("checkup.sqlite.tables.msg_err", err=type(e).__name__),
                                 dimension="maintenance"))
 
     return checks
@@ -1615,18 +2469,195 @@ def _sqlite_checks(engine: SAEngine, _schema: str | None) -> list[Check]:
 # =====================================================================
 
 
+register({
+    "checkup.ch.server.title": ("服务器", "Server"),
+    "checkup.ch.server.msg_running": ("已运行 {dur}", "Running for {dur}"),
+    "checkup.ch.server.msg_no_uptime": ("取不到 uptime", "Could not read uptime"),
+    "checkup.ch.metrics.title": ("核心指标", "Core Metrics"),
+    "checkup.ch.metrics.value": ("{n} 项", "{n}"),
+    "checkup.ch.metrics.message": (
+        "Query=正在执行的查询数；Merge/BackgroundMergesAndMutationsPoolTask=后台合并任务积压"
+        "（持续接近上限说明合并跟不上写入，逼近 too_many_parts 时新 part 会被拒绝写入）；"
+        "ReadonlyReplica>0 说明有副本只读",
+        "Query = number of currently executing queries; "
+        "Merge/BackgroundMergesAndMutationsPoolTask = background merge task backlog "
+        "(sustained near the limit means merges can't keep up with inserts; new parts get "
+        "rejected once too_many_parts is approached); ReadonlyReplica>0 means a replica is "
+        "read-only",
+    ),
+    "checkup.ch.metrics.msg_none": (
+        "system.metrics 没有匹配的指标", "system.metrics has no matching metrics",
+    ),
+    "checkup.ch.metrics.msg_err": (
+        "查 system.metrics 失败：{err}", "Failed to query system.metrics: {err}",
+    ),
+    "checkup.ch.replication_queue.title": ("副本同步队列", "Replica Sync Queue"),
+    "checkup.ch.replication_queue.msg_expired": (
+        "副本会话已过期（{tables}）：与 Keeper 的连接断开，同步已停止；查 Keeper 状态与网络",
+        "The replica session has expired ({tables}): the connection to Keeper is down and "
+        "sync has stopped; check Keeper status and the network",
+    ),
+    "checkup.ch.replication_queue.msg_lag_critical": (
+        "队列积压过大，副本严重落后；查网络 / Keeper / 大 mutation",
+        "The queue backlog is too large and the replica is severely behind; check the "
+        "network / Keeper / large mutations",
+    ),
+    "checkup.ch.replication_queue.msg_pointer_behind": (
+        "log_pointer 远小于 log_max_index：拉取线程落后于日志产生速度"
+        "（官方文档明确指出这个差值过大意味着副本有问题）",
+        "log_pointer is far behind log_max_index: the fetch thread is lagging behind the "
+        "rate log entries are produced (the official docs note that too large a gap means "
+        "the replica has a problem)",
+    ),
+    "checkup.ch.replication_queue.msg_growing": (
+        "queue_size 是待同步的日志条数；持续增长说明副本追不上，查网络/ZK/大 mutation",
+        "queue_size is the number of log entries pending sync; sustained growth means the "
+        "replica can't keep up — check the network/ZooKeeper/large mutations",
+    ),
+    "checkup.ch.replication_queue.msg_ok": (
+        "副本同步队列正常消费", "The replica sync queue is draining normally",
+    ),
+    "checkup.ch.replication_queue.value": (
+        "最长队列 {n}（{table}）", "longest queue {n} ({table})",
+    ),
+    "checkup.ch.replication_queue.detail": (
+        "{table} — 队列 {queue}，待合并 {merges}，绝对延迟 {delay}s",
+        "{table} — queue {queue}, merges pending {merges}, absolute delay {delay}s",
+    ),
+    "checkup.ch.replication_queue.detail_expired_suffix": ("，会话已过期", ", session expired"),
+    "checkup.ch.replication_queue.detail_log_suffix": (
+        "，log {pointer}/{index}", ", log {pointer}/{index}",
+    ),
+    "checkup.ch.replication_queue.value_none": ("无 ReplicatedMergeTree 表", "No ReplicatedMergeTree tables"),
+    "checkup.ch.replication_queue.msg_none": (
+        "没有需要同步的副本表（非副本部署，或未用 ReplicatedMergeTree 引擎）",
+        "There are no replicated tables to sync (a non-replicated deployment, or no "
+        "ReplicatedMergeTree engine in use)",
+    ),
+    "checkup.ch.replication_queue.msg_err": (
+        "查 system.replicas 失败：{err}", "Failed to query system.replicas: {err}",
+    ),
+    "checkup.ch.parts.title": ("活跃 part 数", "Active Part Count"),
+    "checkup.ch.parts.value": ("最多 {n}（{table}）", "highest {n} ({table})"),
+    "checkup.ch.parts.message": (
+        "part 数逼近 too_many_parts 阈值时会拒绝写入；降低写入频率或扩大分区粒度",
+        "Once the part count approaches the too_many_parts threshold, writes get rejected; "
+        "reduce the insert frequency or make the partition granularity coarser",
+    ),
+    "checkup.ch.parts.detail": ("{table} — {n} 个活跃 part", "{table} — {n} active parts"),
+    "checkup.ch.parts.value_none": (
+        "无超过 {threshold} part 的表", "No table with more than {threshold} parts",
+    ),
+    "checkup.ch.parts.msg_none": ("合并跟得上写入", "Merges are keeping up with inserts"),
+    "checkup.ch.parts.msg_err": (
+        "查 system.parts 失败：{err}", "Failed to query system.parts: {err}",
+    ),
+    "checkup.ch.mutations.title": ("未完成的 mutation", "Pending Mutations"),
+    "checkup.ch.mutations.value": ("{n} 个", "{n}"),
+    "checkup.ch.mutations.msg_warn": (
+        "ALTER ... UPDATE/DELETE 是异步 mutation；堆积的 mutation 会拖慢合并和查询",
+        "ALTER ... UPDATE/DELETE is an asynchronous mutation; a backlog of mutations slows "
+        "down merges and queries",
+    ),
+    "checkup.ch.mutations.msg_ok": ("没有在跑的 mutation", "No mutation is currently running"),
+    "checkup.ch.mutations.msg_null": ("count 返回 NULL", "count returned NULL"),
+    "checkup.ch.mutations.msg_err": (
+        "查 system.mutations 失败：{err}", "Failed to query system.mutations: {err}",
+    ),
+    "checkup.ch.big_tables.title": ("大表 TOP5", "Top 5 Largest Tables"),
+    "checkup.ch.big_tables.value": ("最大 {table}（{size}）", "largest {table} ({size})"),
+    "checkup.ch.big_tables.message": (
+        "最大的几张表是合并/存储成本的主要来源，TTL 与分区设计要重点 review",
+        "The largest tables are the main source of merge/storage cost; review their TTL and "
+        "partitioning design",
+    ),
+    "checkup.ch.big_tables.detail": (
+        "{table} — {size}，{rows} 行", "{table} — {size}, {rows} rows",
+    ),
+    "checkup.ch.big_tables.value_none": ("无表", "No tables"),
+    "checkup.ch.big_tables.msg_none": ("没有可统计的 part", "There are no parts to account for"),
+    "checkup.ch.big_tables.msg_err": (
+        "查 system.parts 大小失败：{err}", "Failed to query system.parts sizes: {err}",
+    ),
+    "checkup.ch.disk_space.title": ("磁盘健康", "Disk Health"),
+    "checkup.ch.disk_space.msg_err": (
+        "查 system.disks 失败：{err}", "Failed to query system.disks: {err}",
+    ),
+    "checkup.ch.disk_space.msg_no_disks": (
+        "system.disks 没有磁盘记录", "system.disks has no disk records",
+    ),
+    "checkup.ch.disk_space.value_broken": (
+        "{n} 块盘损坏（{names}）", "{n} disk(s) broken ({names})",
+    ),
+    "checkup.ch.disk_space.msg_broken": (
+        "磁盘被标记为 broken，写盘会直接失败；查存储底层与 CH 日志",
+        "The disk is marked broken; writes will fail outright — check the underlying "
+        "storage and the ClickHouse logs",
+    ),
+    "checkup.ch.disk_space.detail_broken": ("{name}（{path}）is_broken=1", "{name} ({path}) is_broken=1"),
+    "checkup.ch.disk_space.value_readonly": (
+        "{n} 块盘只读（{names}）", "{n} disk(s) read-only ({names})",
+    ),
+    "checkup.ch.disk_space.msg_readonly": (
+        "磁盘被置只读（磁盘满或手动设置），写入会失败；查 free_space 与挂载",
+        "The disk has been set read-only (full disk or a manual setting); writes will fail — "
+        "check free_space and the mount",
+    ),
+    "checkup.ch.disk_space.detail_readonly": (
+        "{name}（{path}）is_read_only=1", "{name} ({path}) is_read_only=1",
+    ),
+    "checkup.ch.disk_space.value": ("最紧张 {name}（剩余 {pct}）", "tightest {name} ({pct} free)"),
+    "checkup.ch.disk_space.msg_warn": (
+        "磁盘剩余空间不足时 ClickHouse 会拒绝写入；清理过期 TTL 数据、"
+        "扩大磁盘或把冷数据移到其它存储卷",
+        "When a disk runs low on space, ClickHouse rejects writes; clean up expired TTL data, "
+        "grow the disk, or move cold data to another storage volume",
+    ),
+    "checkup.ch.disk_space.msg_ok": ("数据盘剩余空间充足", "The data disk has plenty of free space"),
+    "checkup.ch.disk_space.detail": (
+        "{name}（{path}）— 剩余 {free} / {total}", "{name} ({path}) — {free} free / {total}",
+    ),
+    "checkup.ch.disk_space.detail_reserved_suffix": (
+        "（扣除预留后 {unreserved}）", " (after reservations: {unreserved})",
+    ),
+    "checkup.ch.failed_queries.title": ("失败查询", "Failed Queries"),
+    "checkup.ch.failed_queries.msg_err": (
+        "查 system.events 失败：{err}", "Failed to query system.events: {err}",
+    ),
+    "checkup.ch.failed_queries.msg_no_metric": (
+        "system.events 没有 FailedQuery 指标", "system.events has no FailedQuery metric",
+    ),
+    "checkup.ch.failed_queries.value_none": ("无失败查询", "No failed queries"),
+    "checkup.ch.failed_queries.msg_none": (
+        "启动以来没有查询失败", "No query has failed since startup",
+    ),
+    "checkup.ch.failed_queries.value": ("{n} 次", "{n}"),
+    "checkup.ch.failed_queries.rate_suffix": ("（约 {rate} 次/小时）", " (about {rate}/hour)"),
+    "checkup.ch.failed_queries.msg_warn": (
+        "失败查询明显变多时查 system.query_log 的 type='ExceptionWhileProcessing' 看具体错误",
+        "When failed queries increase noticeably, check system.query_log where "
+        "type='ExceptionWhileProcessing' for the specific errors",
+    ),
+    "checkup.ch.failed_queries.msg_info": (
+        "参考值：累计失败的查询数；突然飙升才需关注",
+        "Informational: cumulative count of failed queries; only worth attention on a sudden spike",
+    ),
+})
+
+
 def _clickhouse_checks(engine: SAEngine, schema: str | None) -> list[Check]:
     checks: list[Check] = []
     try:
         version = str(_scalar(engine, "SELECT version()"))
     except Exception:
-        version = "未知"
+        version = t("checkup.common.unknown")
     try:
         uptime = _to_num(_scalar(engine, "SELECT uptime()"))
     except Exception:
         uptime = None
-    checks.append(Check("server", "服务器", "info", f"ClickHouse {version}",
-                        f"已运行 {_human_duration(uptime)}" if uptime is not None else "取不到 uptime",
+    checks.append(Check("server", t("checkup.ch.server.title"), "info", f"ClickHouse {version}",
+                        t("checkup.ch.server.msg_running", dur=_human_duration(uptime))
+                        if uptime is not None else t("checkup.ch.server.msg_no_uptime"),
                         dimension="availability"))
 
     # --- 磁盘空间（system.disks；CH 的数据盘满了会直接拒绝写入） ---
@@ -1643,19 +2674,20 @@ def _clickhouse_checks(engine: SAEngine, schema: str | None) -> list[Check]:
         metrics = {str(r[0]): _to_num(r[1]) for r in rows}
         if metrics:
             checks.append(Check(
-                "metrics", "核心指标", "info", f"{len(metrics)} 项",
-                "Query=正在执行的查询数；Merge/BackgroundMergesAndMutationsPoolTask=后台合并任务积压"
-                "（持续接近上限说明合并跟不上写入，逼近 too_many_parts 时新 part 会被拒绝写入）；"
-                "ReadonlyReplica>0 说明有副本只读",
+                "metrics", t("checkup.ch.metrics.title"), "info",
+                t("checkup.ch.metrics.value", n=len(metrics)),
+                t("checkup.ch.metrics.message"),
                 [f"{k} = {int(v)}" for k, v in sorted(metrics.items()) if v],
                 dimension="capacity",
             ))
         else:
-            checks.append(Check("metrics", "核心指标", "unknown", "未知",
-                                "system.metrics 没有匹配的指标", dimension="capacity"))
+            checks.append(Check("metrics", t("checkup.ch.metrics.title"), "unknown",
+                                t("checkup.common.unknown"), t("checkup.ch.metrics.msg_none"),
+                                dimension="capacity"))
     except Exception as e:
-        checks.append(Check("metrics", "核心指标", "unknown", "未知",
-                            f"查 system.metrics 失败：{type(e).__name__}", dimension="capacity"))
+        checks.append(Check("metrics", t("checkup.ch.metrics.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.ch.metrics.msg_err", err=type(e).__name__), dimension="capacity"))
 
     # --- 失败查询（system.events 的 FailedQuery 系列计数器） ---
     checks.append(_ch_failed_queries(engine, uptime))
@@ -1678,40 +2710,43 @@ def _clickhouse_checks(engine: SAEngine, schema: str | None) -> list[Check]:
             # 会话过期 = 与 Keeper 的连接断了，副本已停止同步，官方文档的确定性状态
             if expired:
                 level: Status = "critical"
-                msg = (f"副本会话已过期（{', '.join(r[0] + '.' + r[1] for r in expired)}）："
-                       "与 Keeper 的连接断开，同步已停止；查 Keeper 状态与网络")
+                msg = t("checkup.ch.replication_queue.msg_expired",
+                       tables=", ".join(r[0] + "." + r[1] for r in expired))
             elif worst >= 1000:
                 level = "critical"
-                msg = "队列积压过大，副本严重落后；查网络 / Keeper / 大 mutation"
+                msg = t("checkup.ch.replication_queue.msg_lag_critical")
             elif behind:
                 level = "warn"
-                msg = ("log_pointer 远小于 log_max_index：拉取线程落后于日志产生速度"
-                       "（官方文档明确指出这个差值过大意味着副本有问题）")
+                msg = t("checkup.ch.replication_queue.msg_pointer_behind")
             elif worst >= 100:
                 level = "warn"
-                msg = "queue_size 是待同步的日志条数；持续增长说明副本追不上，查网络/ZK/大 mutation"
+                msg = t("checkup.ch.replication_queue.msg_growing")
             else:
                 level = "ok"
-                msg = "副本同步队列正常消费"
+                msg = t("checkup.ch.replication_queue.msg_ok")
             checks.append(Check(
-                "replication_queue", "副本同步队列", level,
-                f"最长队列 {int(worst)}（{rows[0][0]}.{rows[0][1]}）",
+                "replication_queue", t("checkup.ch.replication_queue.title"), level,
+                t("checkup.ch.replication_queue.value", n=int(worst), table=f"{rows[0][0]}.{rows[0][1]}"),
                 msg,
-                [f"{r[0]}.{r[1]} — 队列 {int(float(r[2] or 0))}，待合并 {int(float(r[3] or 0))}，"
-                 f"绝对延迟 {int(float(r[4] or 0))}s"
-                 + ("，会话已过期" if r[5] else "")
-                 + (f"，log {int(float(r[7]) or 0)}/{int(float(r[6]) or 0)}"
+                [t("checkup.ch.replication_queue.detail", table=f"{r[0]}.{r[1]}",
+                   queue=int(float(r[2] or 0)), merges=int(float(r[3] or 0)),
+                   delay=int(float(r[4] or 0)))
+                 + (t("checkup.ch.replication_queue.detail_expired_suffix") if r[5] else "")
+                 + (t("checkup.ch.replication_queue.detail_log_suffix",
+                      pointer=int(float(r[7]) or 0), index=int(float(r[6]) or 0))
                     if r[6] is not None and r[7] is not None else "")
                  for r in rows],
                 dimension="replication",
             ))
         else:
-            checks.append(Check("replication_queue", "副本同步队列", "info", "无 ReplicatedMergeTree 表",
-                                "没有需要同步的副本表（非副本部署，或未用 ReplicatedMergeTree 引擎）",
+            checks.append(Check("replication_queue", t("checkup.ch.replication_queue.title"), "info",
+                                t("checkup.ch.replication_queue.value_none"),
+                                t("checkup.ch.replication_queue.msg_none"),
                                 dimension="replication"))
     except Exception as e:
-        checks.append(Check("replication_queue", "副本同步队列", "unknown", "未知",
-                            f"查 system.replicas 失败：{type(e).__name__}",
+        checks.append(Check("replication_queue", t("checkup.ch.replication_queue.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.ch.replication_queue.msg_err", err=type(e).__name__),
                             dimension="replication"))
 
     # --- part 数（too many parts 预警） ---
@@ -1729,18 +2764,21 @@ def _clickhouse_checks(engine: SAEngine, schema: str | None) -> list[Check]:
             worst = max(float(r[2]) for r in rows)
             level = "critical" if worst >= 300 else "warn"
             checks.append(Check(
-                "parts", "活跃 part 数", level, f"最多 {int(worst)}（{rows[0][0]}.{rows[0][1]}）",
-                "part 数逼近 too_many_parts 阈值时会拒绝写入；降低写入频率或扩大分区粒度",
-                [f"{r[0]}.{r[1]} — {int(float(r[2]))} 个活跃 part" for r in rows],
+                "parts", t("checkup.ch.parts.title"), level,
+                t("checkup.ch.parts.value", n=int(worst), table=f"{rows[0][0]}.{rows[0][1]}"),
+                t("checkup.ch.parts.message"),
+                [t("checkup.ch.parts.detail", table=f"{r[0]}.{r[1]}", n=int(float(r[2]))) for r in rows],
                 dimension="maintenance",
             ))
         else:
-            checks.append(Check("parts", "活跃 part 数", "ok",
-                                f"无超过 {CH_PARTS_WARN} part 的表", "合并跟得上写入",
+            checks.append(Check("parts", t("checkup.ch.parts.title"), "ok",
+                                t("checkup.ch.parts.value_none", threshold=CH_PARTS_WARN),
+                                t("checkup.ch.parts.msg_none"),
                                 dimension="maintenance"))
     except Exception as e:
-        checks.append(Check("parts", "活跃 part 数", "unknown", "未知",
-                            f"查 system.parts 失败：{type(e).__name__}", dimension="maintenance"))
+        checks.append(Check("parts", t("checkup.ch.parts.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.ch.parts.msg_err", err=type(e).__name__), dimension="maintenance"))
 
     # --- 未完成的 mutation ---
     try:
@@ -1751,17 +2789,19 @@ def _clickhouse_checks(engine: SAEngine, schema: str | None) -> list[Check]:
             schema_params(schema) if schema else None))
         if n is not None:
             checks.append(Check(
-                "mutations", "未完成的 mutation", "warn" if n > 0 else "ok", f"{int(n)} 个",
-                "ALTER ... UPDATE/DELETE 是异步 mutation；堆积的 mutation 会拖慢合并和查询"
-                if n > 0 else "没有在跑的 mutation",
+                "mutations", t("checkup.ch.mutations.title"), "warn" if n > 0 else "ok",
+                t("checkup.ch.mutations.value", n=int(n)),
+                t("checkup.ch.mutations.msg_warn") if n > 0 else t("checkup.ch.mutations.msg_ok"),
                 dimension="maintenance",
             ))
         else:
-            checks.append(Check("mutations", "未完成的 mutation", "unknown", "未知",
-                                "count 返回 NULL", dimension="maintenance"))
+            checks.append(Check("mutations", t("checkup.ch.mutations.title"), "unknown",
+                                t("checkup.common.unknown"), t("checkup.ch.mutations.msg_null"),
+                                dimension="maintenance"))
     except Exception as e:
-        checks.append(Check("mutations", "未完成的 mutation", "unknown", "未知",
-                            f"查 system.mutations 失败：{type(e).__name__}",
+        checks.append(Check("mutations", t("checkup.ch.mutations.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.ch.mutations.msg_err", err=type(e).__name__),
                             dimension="maintenance"))
 
     # --- 大表 TOP5 ---
@@ -1776,19 +2816,23 @@ def _clickhouse_checks(engine: SAEngine, schema: str | None) -> list[Check]:
         )
         if rows:
             checks.append(Check(
-                "big_tables", "大表 TOP5", "info",
-                f"最大 {rows[0][0]}.{rows[0][1]}（{_human_bytes(float(rows[0][2]))}）",
-                "最大的几张表是合并/存储成本的主要来源，TTL 与分区设计要重点 review",
-                [f"{r[0]}.{r[1]} — {_human_bytes(float(r[2]))}，{int(float(r[3] or 0)):,} 行"
+                "big_tables", t("checkup.ch.big_tables.title"), "info",
+                t("checkup.ch.big_tables.value", table=f"{rows[0][0]}.{rows[0][1]}",
+                  size=_human_bytes(float(rows[0][2]))),
+                t("checkup.ch.big_tables.message"),
+                [t("checkup.ch.big_tables.detail", table=f"{r[0]}.{r[1]}",
+                   size=_human_bytes(float(r[2])), rows=f"{int(float(r[3] or 0)):,}")
                  for r in rows],
                 dimension="maintenance",
             ))
         else:
-            checks.append(Check("big_tables", "大表 TOP5", "info", "无表",
-                                "没有可统计的 part", dimension="maintenance"))
+            checks.append(Check("big_tables", t("checkup.ch.big_tables.title"), "info",
+                                t("checkup.ch.big_tables.value_none"),
+                                t("checkup.ch.big_tables.msg_none"), dimension="maintenance"))
     except Exception as e:
-        checks.append(Check("big_tables", "大表 TOP5", "unknown", "未知",
-                            f"查 system.parts 大小失败：{type(e).__name__}",
+        checks.append(Check("big_tables", t("checkup.ch.big_tables.title"), "unknown",
+                            t("checkup.common.unknown"),
+                            t("checkup.ch.big_tables.msg_err", err=type(e).__name__),
                             dimension="maintenance"))
 
     return checks
@@ -1806,28 +2850,32 @@ def _ch_disk_space(engine: SAEngine) -> Check:
             " ORDER BY (free_space / NULLIF(total_space,0)) ASC LIMIT 5",
         )
     except Exception as e:
-        return Check("disk_space", "磁盘健康", "unknown", "未知",
-                     f"查 system.disks 失败：{type(e).__name__}", dimension="capacity")
+        return Check("disk_space", t("checkup.ch.disk_space.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.ch.disk_space.msg_err", err=type(e).__name__), dimension="capacity")
     if not rows:
-        return Check("disk_space", "磁盘健康", "unknown", "未知",
-                     "system.disks 没有磁盘记录", dimension="capacity")
+        return Check("disk_space", t("checkup.ch.disk_space.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.ch.disk_space.msg_no_disks"),
+                     dimension="capacity")
     # 确定性状态优先：有盘坏了或只读，其它空间指标都没意义了
     broken = [r for r in rows if r[6]]
     readonly = [r for r in rows if r[5] and not r[6]]
     if broken:
         return Check(
-            "disk_space", "磁盘健康", "critical",
-            f"{len(broken)} 块盘损坏（{', '.join(str(r[0]) for r in broken)}）",
-            "磁盘被标记为 broken，写盘会直接失败；查存储底层与 CH 日志",
-            [f"{r[0]}（{str(r[1])}）is_broken=1" for r in broken],
+            "disk_space", t("checkup.ch.disk_space.title"), "critical",
+            t("checkup.ch.disk_space.value_broken", n=len(broken),
+              names=", ".join(str(r[0]) for r in broken)),
+            t("checkup.ch.disk_space.msg_broken"),
+            [t("checkup.ch.disk_space.detail_broken", name=r[0], path=str(r[1])) for r in broken],
             dimension="capacity",
         )
     if readonly:
         return Check(
-            "disk_space", "磁盘健康", "warn",
-            f"{len(readonly)} 块盘只读（{', '.join(str(r[0]) for r in readonly)}）",
-            "磁盘被置只读（磁盘满或手动设置），写入会失败；查 free_space 与挂载",
-            [f"{r[0]}（{str(r[1])}）is_read_only=1" for r in readonly],
+            "disk_space", t("checkup.ch.disk_space.title"), "warn",
+            t("checkup.ch.disk_space.value_readonly", n=len(readonly),
+              names=", ".join(str(r[0]) for r in readonly)),
+            t("checkup.ch.disk_space.msg_readonly"),
+            [t("checkup.ch.disk_space.detail_readonly", name=r[0], path=str(r[1])) for r in readonly],
             dimension="capacity",
         )
     worst_pct = min((float(r[3]) / float(r[2]) for r in rows if r[2]))
@@ -1835,15 +2883,14 @@ def _ch_disk_space(engine: SAEngine) -> Check:
     level: Status = ("critical" if worst_pct < 1 - DISK_CRIT_PCT
                      else "warn" if worst_pct < 1 - DISK_WARN_PCT else "ok")
     return Check(
-        "disk_space", "磁盘健康", level,
-        f"最紧张 {str(worst_row[0])}（剩余 {worst_pct:.0%}）",
-        "磁盘剩余空间不足时 ClickHouse 会拒绝写入；清理过期 TTL 数据、"
-        "扩大磁盘或把冷数据移到其它存储卷"
-        if level != "ok" else "数据盘剩余空间充足",
-        [f"{r[0]}（{str(r[1])}）— 剩余 {_human_bytes(float(r[4] if r[4] is not None else r[3]))}"
-         f" / {_human_bytes(float(r[2]))}"
+        "disk_space", t("checkup.ch.disk_space.title"), level,
+        t("checkup.ch.disk_space.value", name=str(worst_row[0]), pct=f"{worst_pct:.0%}"),
+        t("checkup.ch.disk_space.msg_warn") if level != "ok" else t("checkup.ch.disk_space.msg_ok"),
+        [t("checkup.ch.disk_space.detail", name=r[0], path=str(r[1]),
+           free=_human_bytes(float(r[4] if r[4] is not None else r[3])),
+           total=_human_bytes(float(r[2])))
          + ("" if r[4] is None or float(r[4]) == float(r[3])
-            else f"（扣除预留后 {_human_bytes(float(r[4]))}）")
+            else t("checkup.ch.disk_space.detail_reserved_suffix", unreserved=_human_bytes(float(r[4]))))
          for r in rows],
         dimension="capacity",
     )
@@ -1859,23 +2906,28 @@ def _ch_failed_queries(engine: SAEngine, uptime: float | None) -> Check:
             " WHERE event IN ('FailedQuery','FailedSelectQuery','FailedInsertQuery')",
         )
     except Exception as e:
-        return Check("failed_queries", "失败查询", "unknown", "未知",
-                     f"查 system.events 失败：{type(e).__name__}", dimension="performance")
+        return Check("failed_queries", t("checkup.ch.failed_queries.title"), "unknown",
+                     t("checkup.common.unknown"),
+                     t("checkup.ch.failed_queries.msg_err", err=type(e).__name__),
+                     dimension="performance")
     got = {str(r[0]): _to_num(r[1]) for r in rows}
     failed = sum(v for k, v in got.items() if k == "FailedQuery")
     if failed is None:
-        return Check("failed_queries", "失败查询", "unknown", "未知",
-                     "system.events 没有 FailedQuery 指标", dimension="performance")
+        return Check("failed_queries", t("checkup.ch.failed_queries.title"), "unknown",
+                     t("checkup.common.unknown"), t("checkup.ch.failed_queries.msg_no_metric"),
+                     dimension="performance")
     rate = _rate_per_hour(failed, uptime)
     if failed <= 0:
-        return Check("failed_queries", "失败查询", "ok", "无失败查询",
-                     "启动以来没有查询失败", dimension="performance")
+        return Check("failed_queries", t("checkup.ch.failed_queries.title"), "ok",
+                     t("checkup.ch.failed_queries.value_none"),
+                     t("checkup.ch.failed_queries.msg_none"), dimension="performance")
     level: Status = "warn" if (rate or 0) > 10 or failed > 100 else "info"
     return Check(
-        "failed_queries", "失败查询", level,
-        f"{int(failed):,} 次" + (f"（约 {rate:.1f} 次/小时）" if rate is not None else ""),
-        "失败查询明显变多时查 system.query_log 的 type='ExceptionWhileProcessing' 看具体错误"
-        if level == "warn" else "参考值：累计失败的查询数；突然飙升才需关注",
+        "failed_queries", t("checkup.ch.failed_queries.title"), level,
+        t("checkup.ch.failed_queries.value", n=f"{int(failed):,}")
+        + (t("checkup.ch.failed_queries.rate_suffix", rate=f"{rate:.1f}") if rate is not None else ""),
+        t("checkup.ch.failed_queries.msg_warn") if level == "warn"
+        else t("checkup.ch.failed_queries.msg_info"),
         [f"{k} = {int(v or 0):,}" for k, v in sorted(got.items()) if v],
         dimension="performance",
     )
@@ -1914,8 +2966,8 @@ def run_checkup(engine: SAEngine, engine_kind: str, schema: str | None = None) -
     if runner is None:
         report.overall = "unknown"
         report.checks = [Check(
-            "unsupported", "不支持体检", "unknown", engine_kind,
-            f"该引擎暂不支持体检（支持：{', '.join(supported_engines())}）",
+            "unsupported", t("checkup.entry.unsupported_title"), "unknown", engine_kind,
+            t("checkup.entry.unsupported_message", engines=", ".join(supported_engines())),
         )]
         report.elapsed_ms = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
         return report
@@ -1926,9 +2978,9 @@ def run_checkup(engine: SAEngine, engine_kind: str, schema: str | None = None) -
         logger.warning("checkup: %s connection unreachable: %s", engine_kind, why)
         report.overall = "critical"
         report.checks = [Check(
-            "connectivity", "数据库连接", "critical", "无法连接",
-            f"数据库不可达：{why}。请确认数据库在运行、网络/SSH 隧道通畅，"
-            "恢复后点「重新体检」即可测量全部指标。",
+            "connectivity", t("checkup.entry.connectivity_title"), "critical",
+            t("checkup.entry.connectivity_value"),
+            t("checkup.entry.connectivity_message", why=why),
             dimension="availability",
         )]
         report.elapsed_ms = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
@@ -1939,7 +2991,8 @@ def run_checkup(engine: SAEngine, engine_kind: str, schema: str | None = None) -
     except Exception as e:  # noqa: BLE001 - 兜底：任何未预期的失败都给出可读报告，不裸抛
         logger.exception("checkup failed for %s", engine_kind)
         report.overall = "unknown"
-        report.checks = [Check("error", "体检执行失败", "unknown", type(e).__name__, str(e))]
+        report.checks = [Check("error", t("checkup.entry.error_title"), "unknown",
+                               type(e).__name__, str(e))]
         report.elapsed_ms = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
         return report
 
@@ -1987,14 +3040,14 @@ def merge_reports(engine_kind: str, reports: list[tuple[str, CheckupReport]]) ->
     if not reports:
         merged.overall = "unknown"
         merged.checks = [Check(
-            "no_databases", "无可体检的库", "unknown", "0",
-            "该连接下没有可体检的用户库（可能全是系统库，或账号无权限列出）。",
+            "no_databases", t("checkup.merge.no_databases_title"), "unknown", "0",
+            t("checkup.merge.no_databases_message"),
             dimension="availability",
         )]
         merged.elapsed_ms = int((dt.datetime.now(dt.timezone.utc) - started).total_seconds() * 1000)
         return merged
 
-    merged.scope = "全体 " + str(len(reports)) + " 个库"
+    merged.scope = t("checkup.merge.scope_all_databases", n=len(reports))
     total_ms = 0
     gaps: dict[str, PrivilegeGap] = {}
     # name -> [(db, check)]：按检查名归拢，同名才能比较「各库是否相同」

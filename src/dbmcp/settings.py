@@ -17,7 +17,10 @@ from .ai import DEFAULT_WORKFLOW_PROMPT as _AI_WF_PROMPT_DEFAULT
 # 已知设置项及默认值。get_all 始终返回全部键（缺失回落默认），前端无需兜底。
 DEFAULTS: dict[str, object] = {
     # ——整体
-    "theme": "dark",             # 界面主题：dark / light，作用于查询台与 Redis 控制台
+    "theme": "dark",             # 界面主题：dark / light，全站
+    # 后台里与 agent 共享的那类文案（风险判定理由、审批单错误、体检报告…）的语言：zh / en。
+    # 界面本身仍是中文；agent 通过 MCP 看到的恒为英文，不受此项影响（见 i18n.py）
+    "text_language": "zh",
     "ui_font_size": 14,          # 后台整体基础字号（px）
     # ——查询台（DB）
     "sql_page_size": 100,        # 结果每页行数
@@ -187,6 +190,8 @@ def _validate(key: str, raw: object) -> str:
     default = DEFAULTS[key]
     if key == "theme":
         return "light" if str(raw) == "light" else "dark"
+    if key == "text_language":
+        return "en" if str(raw).strip().lower() == "en" else "zh"
     if key == "ai_provider":
         v = str(raw).strip().lower()
         return v if v in _AI_PROVIDERS else str(default)
