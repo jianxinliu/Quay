@@ -21,6 +21,7 @@ from .audit.redis_rules import classify_command, command_fingerprint, parse_comm
 from .audit.risk import assess
 from .config import AppConfig, ConnectionConfig
 from .health import ConnectionUnavailable, HealthMonitor, is_connection_error
+from .i18n import current_locale, normalize_locale, use_locale
 from .masking import apply_mask, resolve_default_patterns
 from .metadata import MetadataCache
 from .budget import SessionBudget
@@ -1499,7 +1500,7 @@ class DbmService:
         if not stmt:
             raise QueryRejected("请先在编辑器写一条 SQL")
         verdict = classify(stmt, cfg.engine)
-        if "多语句" in verdict.reason:
+        if verdict.statement_kind == "MultiStatement":
             raise QueryRejected("EXPLAIN 只支持单条语句")
         # 计划前缀与输出格式由驱动决定（drivers/<engine>.py 的 explain_json_prefix/explain_format）
         from .drivers import get_driver
@@ -1885,12 +1886,27 @@ class DbmService:
         rollback_note: str = "",
         database: str | None = None,
     ) -> dict:
-        report = assess(sql, cfg.engine,
-                        self._meta_provider(project, connection, cfg, database=database))
+        provider = self._meta_provider(project, connection, cfg, database=database)
+        report = assess(sql, cfg.engine, provider)
         report_dict = report.to_dict()
         plan = self._try_explain(project, connection, cfg, sql, database=database)
         if plan:
             report_dict["explain"] = plan
+        # The approval ticket is a shared reader: the admin approval page renders its
+        # risk report under the admin's configured language (text_language, default zh),
+        # not the caller's locale. Agent calls run with locale=en (_AgentLocale), so a
+        # ticket created by an agent must still be persisted in the admin's language —
+        # otherwise the zh admin page would show English reasons for agent-created
+        # tickets. Re-assess once under the admin locale for storage; the dict returned
+        # to the caller below keeps its own ambient locale.
+        admin_locale = normalize_locale(self._setting("text_language"))
+        if current_locale() == admin_locale:
+            stored_report_dict = report_dict
+        else:
+            with use_locale(admin_locale):
+                stored_report_dict = assess(sql, cfg.engine, provider).to_dict()
+            if plan:
+                stored_report_dict["explain"] = plan
         change = self.approvals.create(
             project=project,
             connection=connection,
@@ -1900,7 +1916,7 @@ class DbmService:
             fingerprint=fingerprint(sql, cfg.engine),
             reason=reason,
             risk_level=report.level,
-            risk_report=report_dict,
+            risk_report=stored_report_dict,
             agent=caller.agent,
             session_id=caller.session_id,
             rollback_note=rollback_note,

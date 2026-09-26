@@ -17,6 +17,88 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .i18n import register, t
+
+register({
+    "workflow.name_required": ("workflow 名称不能为空", "Workflow name cannot be empty"),
+    "workflow.script_required": ("workflow 脚本不能为空", "Workflow script cannot be empty"),
+    "workflow.not_found": ("workflow {name} 不存在", "Workflow {name} does not exist"),
+    "workflow.graph_empty": ("流程为空：请先添加节点", "The flow is empty: add a node first"),
+    "workflow.node_name_invalid": (
+        "节点名 {name} 不合法（字母开头，仅字母/数字/下划线）",
+        "Node name {name} is invalid (must start with a letter; letters/digits/underscore only)",
+    ),
+    "workflow.node_name_duplicate": ("节点名 {name} 重复", "Node name {name} is duplicated"),
+    "workflow.node_missing_input": (
+        "节点「{name}」缺少输入连线",
+        "Node \"{name}\" is missing an input connection",
+    ),
+    "workflow.graph_has_cycle": (
+        "流程中存在环，请检查连线",
+        "The flow contains a cycle; check the connections",
+    ),
+    "workflow.source_no_connection": (
+        "取数节点「{name}」未选择连接",
+        "Source node \"{name}\" has no connection selected",
+    ),
+    "workflow.source_missing_sql": (
+        "取数节点「{name}」缺少 SQL",
+        "Source node \"{name}\" is missing its SQL",
+    ),
+    "workflow.file_missing_path": (
+        "文件节点「{name}」缺少路径",
+        "File node \"{name}\" is missing a path",
+    ),
+    "workflow.filter_missing_where": (
+        "过滤节点「{name}」缺少 WHERE 条件",
+        "Filter node \"{name}\" is missing a WHERE condition",
+    ),
+    "workflow.join_needs_two_inputs": (
+        "JOIN 节点「{name}」至少需要两个输入",
+        "JOIN node \"{name}\" needs at least two inputs",
+    ),
+    "workflow.join_too_many_inputs": (
+        "JOIN 节点「{name}」最多支持 16 路输入",
+        "JOIN node \"{name}\" supports at most 16 inputs",
+    ),
+    "workflow.join_missing_on": (
+        "JOIN 节点「{name}」缺少 ON 条件（用 a/b/c... 引用各输入表；两路时 a/b 等价老 l/r）",
+        "JOIN node \"{name}\" is missing an ON condition (reference each input table as "
+        "a/b/c...; with two inputs, a/b are equivalent to the old l/r)",
+    ),
+    "workflow.join_kind_unsupported": ("JOIN 类型 {kind} 不支持", "JOIN type {kind} is not supported"),
+    "workflow.aggregate_missing_expr": (
+        "聚合节点「{name}」缺少聚合表达式（如 count(*) AS n）",
+        "Aggregate node \"{name}\" is missing an aggregation expression (e.g. count(*) AS n)",
+    ),
+    "workflow.describe_missing_cols": (
+        "描述节点「{name}」需要指定要统计的列（cols，用逗号分隔）",
+        "Describe node \"{name}\" needs the columns to summarize (cols, comma-separated)",
+    ),
+    "workflow.percentile_missing_col": (
+        "分位数节点「{name}」缺少目标列（col）",
+        "Percentile node \"{name}\" is missing a target column (col)",
+    ),
+    "workflow.percentile_invalid_quantiles": (
+        "分位数节点「{name}」的 quantiles 无效（用 0-1 间的浮点数，逗号分隔）",
+        "Percentile node \"{name}\"'s quantiles are invalid (use comma-separated floats between 0 and 1)",
+    ),
+    "workflow.correlate_needs_two_cols": (
+        "相关节点「{name}」至少需要 2 列（cols）",
+        "Correlate node \"{name}\" needs at least 2 columns (cols)",
+    ),
+    "workflow.pivot_missing_on_or_using": (
+        "透视节点「{name}」缺少 on（透视列）或 using（聚合表达式）",
+        "Pivot node \"{name}\" is missing on (the pivot column) or using (the aggregation expression)",
+    ),
+    "workflow.sql_node_empty": (
+        "SQL 节点「{name}」内容为空",
+        "SQL node \"{name}\" has no content",
+    ),
+    "workflow.unknown_node_type": ("未知节点类型 {typ}", "Unknown node type {typ}"),
+    "workflow.preview_step_name": ("预览", "Preview"),
+})
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS analysis_workflow (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,9 +158,9 @@ class WorkflowStore:
              chart: dict | None = None, graph: dict | None = None) -> Workflow:
         name = (name or "").strip()
         if not name:
-            raise WorkflowError("workflow 名称不能为空")
+            raise WorkflowError(t("workflow.name_required"))
         if not (script or "").strip() and not graph:
-            raise WorkflowError("workflow 脚本不能为空")
+            raise WorkflowError(t("workflow.script_required"))
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             self._conn.execute(
@@ -101,7 +183,7 @@ class WorkflowStore:
             row = self._conn.execute(
                 "SELECT * FROM analysis_workflow WHERE name = ?", (name,)).fetchone()
         if row is None:
-            raise WorkflowError(f"workflow {name!r} 不存在")
+            raise WorkflowError(t("workflow.not_found", name=repr(name)))
         return _row(row)
 
     def list(self) -> list[Workflow]:
@@ -114,7 +196,7 @@ class WorkflowStore:
         with self._lock:
             cur = self._conn.execute("DELETE FROM analysis_workflow WHERE name = ?", (name,))
             if cur.rowcount == 0:
-                raise WorkflowError(f"workflow {name!r} 不存在")
+                raise WorkflowError(t("workflow.not_found", name=repr(name)))
             self._conn.commit()
 
     def close(self) -> None:
@@ -197,46 +279,46 @@ def compile_graph(graph: dict) -> dict:
     """
     nodes = {n.get("id"): n for n in (graph.get("nodes") or [])}
     if not nodes:
-        raise WorkflowError("流程为空：请先添加节点")
+        raise WorkflowError(t("workflow.graph_empty"))
     seen_names = set()
     for n in nodes.values():
         name = (n.get("name") or "").strip()
         if not _NODE_NAME_RE.match(name):
-            raise WorkflowError(f"节点名 {name!r} 不合法（字母开头，仅字母/数字/下划线）")
+            raise WorkflowError(t("workflow.node_name_invalid", name=repr(name)))
         if name.lower() in seen_names:
-            raise WorkflowError(f"节点名 {name!r} 重复")
+            raise WorkflowError(t("workflow.node_name_duplicate", name=repr(name)))
         seen_names.add(name.lower())
 
     # 入边：to_id -> {port: from_id}
     inputs: dict[str, dict[str, str]] = {nid: {} for nid in nodes}
     for e in graph.get("edges") or []:
-        f, t = e.get("from"), e.get("to")
-        if f not in nodes or t not in nodes:
+        f, to_id = e.get("from"), e.get("to")
+        if f not in nodes or to_id not in nodes:
             continue  # 悬空边（节点已删）直接忽略
-        inputs[t][e.get("port") or "in"] = f
+        inputs[to_id][e.get("port") or "in"] = f
 
     def _one_input(n: dict) -> dict:
         up = inputs[n["id"]].get("in")
         if not up:
-            raise WorkflowError(f"节点「{n['name']}」缺少输入连线")
+            raise WorkflowError(t("workflow.node_missing_input", name=n["name"]))
         return nodes[up]
 
     # Kahn 拓扑排序
     indeg = {nid: len(inputs[nid]) for nid in nodes}
     order, queue = [], sorted([nid for nid, d in indeg.items() if d == 0])
     downstream: dict[str, list[str]] = {nid: [] for nid in nodes}
-    for t, ports in inputs.items():
+    for to_id, ports in inputs.items():
         for f in ports.values():
-            downstream[f].append(t)
+            downstream[f].append(to_id)
     while queue:
         nid = queue.pop(0)
         order.append(nid)
-        for t in sorted(downstream[nid]):
-            indeg[t] -= 1
-            if indeg[t] == 0:
-                queue.append(t)
+        for nxt in sorted(downstream[nid]):
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                queue.append(nxt)
     if len(order) < len(nodes):
-        raise WorkflowError("流程中存在环，请检查连线")
+        raise WorkflowError(t("workflow.graph_has_cycle"))
 
     sources: list[dict] = []
     steps: list[dict] = []
@@ -251,9 +333,9 @@ def compile_graph(graph: dict) -> dict:
         if typ == "source":
             conn = (cfg.get("conn") or "").strip()
             if "/" not in conn:
-                raise WorkflowError(f"取数节点「{name}」未选择连接")
+                raise WorkflowError(t("workflow.source_no_connection", name=name))
             if not (cfg.get("sql") or "").strip():
-                raise WorkflowError(f"取数节点「{name}」缺少 SQL")
+                raise WorkflowError(t("workflow.source_missing_sql", name=name))
             project, connection = conn.split("/", 1)
             sources.append({"kind": "connection", "node": nid, "dataset": name,
                             "project": project, "connection": connection,
@@ -261,14 +343,14 @@ def compile_graph(graph: dict) -> dict:
                             "limit": cfg.get("limit"), "schema": cfg.get("schema") or None})
         elif typ == "file":
             if not (cfg.get("path") or "").strip():
-                raise WorkflowError(f"文件节点「{name}」缺少路径")
+                raise WorkflowError(t("workflow.file_missing_path", name=name))
             sources.append({"kind": "file", "node": nid, "dataset": name,
                             "path": cfg["path"].strip()})
         elif typ == "filter":
             up = _one_input(n)
             where = (cfg.get("where") or "").strip()
             if not where:
-                raise WorkflowError(f"过滤节点「{name}」缺少 WHERE 条件")
+                raise WorkflowError(t("workflow.filter_missing_where", name=name))
             sql = f"SELECT * FROM {_q(up['name'])} WHERE {where}"
             steps.append({"node": nid, "name": name,
                           "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS {sql}"})
@@ -291,17 +373,16 @@ def compile_graph(graph: dict) -> dict:
                 ordered.append((idx, v))
             ordered.sort(key=lambda x: x[0])
             if len(ordered) < 2:
-                raise WorkflowError(f"JOIN 节点「{name}」至少需要两个输入")
+                raise WorkflowError(t("workflow.join_needs_two_inputs", name=name))
             if len(ordered) > 16:
-                raise WorkflowError(f"JOIN 节点「{name}」最多支持 16 路输入")
+                raise WorkflowError(t("workflow.join_too_many_inputs", name=name))
             aliases = "abcdefghijklmnop"
             on = (cfg.get("on") or "").strip()
             if not on:
-                raise WorkflowError(
-                    f"JOIN 节点「{name}」缺少 ON 条件（用 a/b/c... 引用各输入表；两路时 a/b 等价老 l/r）")
+                raise WorkflowError(t("workflow.join_missing_on", name=name))
             kind = (cfg.get("kind") or "INNER").upper()
             if kind not in ("INNER", "LEFT", "RIGHT", "FULL"):
-                raise WorkflowError(f"JOIN 类型 {kind!r} 不支持")
+                raise WorkflowError(t("workflow.join_kind_unsupported", kind=repr(kind)))
             n = len(ordered)
             default_cols = ", ".join(f"{aliases[i]}.*" for i in range(n))
             # 两路兼容：用户老配置里 SELECT 可能写 "l.*, r.*"，替换成 a.*/b.*
@@ -332,7 +413,7 @@ def compile_graph(graph: dict) -> dict:
             up = _one_input(n)
             aggs = (cfg.get("aggs") or "").strip()
             if not aggs:
-                raise WorkflowError(f"聚合节点「{name}」缺少聚合表达式（如 count(*) AS n）")
+                raise WorkflowError(t("workflow.aggregate_missing_expr", name=name))
             group = (cfg.get("group") or "").strip()
             select = f"{group}, {aggs}" if group else aggs
             sql = f"SELECT {select} FROM {_q(up['name'])}"
@@ -345,8 +426,7 @@ def compile_graph(graph: dict) -> dict:
             up = _one_input(n)
             cols = _split_cols(cfg.get("cols"))
             if not cols:
-                raise WorkflowError(
-                    f"描述节点「{name}」需要指定要统计的列（cols，用逗号分隔）")
+                raise WorkflowError(t("workflow.describe_missing_cols", name=name))
             # 每列 UNION ALL 一行；SUMMARIZE 无法嵌 VIEW，改手写。DuckDB 强类型 union 需类型一致，用 DOUBLE 兜底
             def _row(c: str) -> str:
                 qc = _qcol(c)
@@ -378,11 +458,10 @@ def compile_graph(graph: dict) -> dict:
             up = _one_input(n)
             col = (cfg.get("col") or "").strip()
             if not col:
-                raise WorkflowError(f"分位数节点「{name}」缺少目标列（col）")
+                raise WorkflowError(t("workflow.percentile_missing_col", name=name))
             qs = _parse_quantiles(cfg.get("quantiles") or "0.25,0.5,0.75,0.95")
             if not qs:
-                raise WorkflowError(
-                    f"分位数节点「{name}」的 quantiles 无效（用 0-1 间的浮点数，逗号分隔）")
+                raise WorkflowError(t("workflow.percentile_invalid_quantiles", name=name))
             qsel = ", ".join(
                 f"quantile_cont({_qcol(col)}, {q}) AS p{int(round(q*100)):02d}" for q in qs)
             group = (cfg.get("group") or "").strip()
@@ -397,7 +476,7 @@ def compile_graph(graph: dict) -> dict:
             up = _one_input(n)
             cols = _split_cols(cfg.get("cols"))
             if len(cols) < 2:
-                raise WorkflowError(f"相关节点「{name}」至少需要 2 列（cols）")
+                raise WorkflowError(t("workflow.correlate_needs_two_cols", name=name))
             # 两两 corr()：对每对 (i<j) 生成一列 corr(a,b) AS "a__b"
             pairs = []
             for i in range(len(cols)):
@@ -414,8 +493,7 @@ def compile_graph(graph: dict) -> dict:
             on_col = (cfg.get("on") or "").strip()
             using = (cfg.get("using") or "").strip()
             if not on_col or not using:
-                raise WorkflowError(
-                    f"透视节点「{name}」缺少 on（透视列）或 using（聚合表达式）")
+                raise WorkflowError(t("workflow.pivot_missing_on_or_using", name=name))
             group = (cfg.get("group") or "").strip()
             # DuckDB: PIVOT (SELECT * FROM up) ON <on> USING <using> [GROUP BY <group>]
             sql = f"PIVOT (SELECT * FROM {_q(up['name'])}) ON {on_col} USING {using}"
@@ -428,7 +506,7 @@ def compile_graph(graph: dict) -> dict:
         elif typ == "sql":
             raw = (cfg.get("sql") or "").strip().rstrip(";")
             if not raw:
-                raise WorkflowError(f"SQL 节点「{name}」内容为空")
+                raise WorkflowError(t("workflow.sql_node_empty", name=name))
             steps.append({"node": nid, "name": name,
                           "sql": f"CREATE OR REPLACE VIEW {_q(name)} AS ({raw})"})
             last_view = name
@@ -444,13 +522,13 @@ def compile_graph(graph: dict) -> dict:
                 output_sql = sql
             steps.append({"node": nid, "name": name, "sql": sql, "is_output": True})
         else:
-            raise WorkflowError(f"未知节点类型 {typ!r}")
+            raise WorkflowError(t("workflow.unknown_node_type", typ=repr(typ)))
 
     if output_sql is None:  # 没画输出节点：预览最后一个视图（若全是数据源则预览最后的源）
         tail = last_view or (sources[-1]["dataset"] if sources else None)
         if tail:
             output_sql = f"SELECT * FROM {_q(tail)} LIMIT 1000"
-            steps.append({"node": None, "name": "预览", "sql": output_sql})
+            steps.append({"node": None, "name": t("workflow.preview_step_name"), "sql": output_sql})
     return {"sources": sources, "steps": steps, "output_sql": output_sql}
 
 

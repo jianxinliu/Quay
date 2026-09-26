@@ -17,6 +17,45 @@ from dataclasses import dataclass, field
 import sqlglot
 from sqlglot import exp
 
+from ..i18n import current_locale, register, t
+
+register({
+    "classify.engine_unsupported": ("引擎 {engine} 不支持 SQL 分类", "Engine {engine} does not support SQL classification"),
+    "classify.parse_failed": ("SQL 解析失败: {desc}", "Failed to parse SQL: {desc}"),
+    "classify.empty_statement": ("空语句", "Empty statement"),
+    "classify.multi_statement": (
+        "多语句批量提交（{count} 条：{kinds}），按写操作进审批流",
+        "Batch of {count} statements ({kinds}); routed to approval as a write operation",
+    ),
+    "classify.show_command": ("SHOW 命令", "SHOW command"),
+    "classify.unknown_command": ("无法识别的命令 {keyword}，按写操作处理", "Unrecognized command {keyword}; treated as a write operation"),
+    "classify.empty_keyword_placeholder": ("(空)", "(empty)"),
+    "classify.write_or_ddl": ("{kind} 属于写操作/DDL", "{kind} is a write operation/DDL"),
+    "classify.write_node_inside": (
+        "语句内部包含写操作节点 {node}（如 CTE 中的 DML）",
+        "The statement contains a write node {node} internally (e.g. DML inside a CTE)",
+    ),
+    "classify.select_for_update": (
+        "SELECT ... FOR UPDATE/SHARE 会加锁，按写操作处理",
+        "SELECT ... FOR UPDATE/SHARE acquires a lock; treated as a write operation",
+    ),
+    "classify.select_into": (
+        "SELECT ... INTO 会写出数据，按写操作处理",
+        "SELECT ... INTO writes data out; treated as a write operation",
+    ),
+    "classify.unsafe_function": (
+        "包含有副作用/危险函数 {name}()，不按只读放行（按写操作处理）",
+        "Contains the side-effecting/unsafe function {name}(); not allowed as read-only (treated as a write operation)",
+    ),
+    "classify.readonly_statement": ("只读语句", "Read-only statement"),
+    "classify.explain_missing_statement": ("EXPLAIN 后缺少语句", "EXPLAIN is missing a statement"),
+    "classify.explain_readonly": ("EXPLAIN 只读语句", "EXPLAIN of a read-only statement"),
+    "classify.explain_not_readonly": (
+        "EXPLAIN 的目标语句非只读: {reason}",
+        "EXPLAIN's target statement is not read-only: {reason}",
+    ),
+})
+
 _DIALECTS = {"mysql": "mysql", "postgres": "postgres", "sqlite": "sqlite",
              "clickhouse": "clickhouse"}
 
@@ -113,7 +152,7 @@ def classify(sql: str, engine: str) -> Verdict:
     """判定一条 SQL 是否只读。engine 为 mysql / postgres / sqlite。"""
     dialect = _DIALECTS.get(engine)
     if dialect is None:
-        return Verdict(False, f"引擎 {engine!r} 不支持 SQL 分类")
+        return Verdict(False, t("classify.engine_unsupported", engine=repr(engine)))
 
     try:
         parse_sql = normalize_sql_for_parse(sql, engine)
@@ -124,18 +163,19 @@ def classify(sql: str, engine: str) -> Verdict:
         # 给出正确提示而非误导的"确认写操作"卡片。
         errs = getattr(e, "errors", None)
         desc = errs[0].get("description") if errs else str(e)
-        return Verdict(False, f"SQL 解析失败: {desc}", "ParseError")
+        return Verdict(False, t("classify.parse_failed", desc=desc), "ParseError")
 
     if not statements:
-        return Verdict(False, "空语句")
+        return Verdict(False, t("classify.empty_statement"))
     if len(statements) > 1:
         # 多语句批量：按写操作统一进审批流（安全红线）。逐条评估在 risk.assess，
         # 执行时按语句拆开单事务逐条跑（engines.run_write）。
         kinds = [type(s).__name__ for s in statements]
-        tables = sorted({t for s in statements for t in _extract_tables(s)})
+        tables = sorted({tb for s in statements for tb in _extract_tables(s)})
+        sep = ", " if current_locale() == "en" else "、"
         return Verdict(
             False,
-            f"多语句批量提交（{len(statements)} 条：{'、'.join(kinds)}），按写操作进审批流",
+            t("classify.multi_statement", count=len(statements), kinds=sep.join(kinds)),
             "MultiStatement",
             tables,
         )
@@ -148,34 +188,35 @@ def classify(sql: str, engine: str) -> Verdict:
     if isinstance(stmt, exp.Command):
         keyword = str(stmt.this or "").strip().upper()
         if keyword == "SHOW":
-            return Verdict(True, "SHOW 命令", "Show", tables)
+            return Verdict(True, t("classify.show_command"), "Show", tables)
         if keyword == "EXPLAIN":
             return _classify_explain(sql, engine)
-        return Verdict(False, f"无法识别的命令 {keyword or '(空)'}，按写操作处理", kind, tables)
+        return Verdict(False, t("classify.unknown_command",
+                               keyword=keyword or t("classify.empty_keyword_placeholder")), kind, tables)
 
     # MySQL 等方言会把 SHOW（包括 SHOW CREATE TABLE）解析成独立的 Show 节点。
     # 必须在通用 AST 风险扫描前直接返回只读；SHOW 中的 CREATE/TABLE 等词描述的是
     # 要展示的元数据，并不代表执行 DDL。其他方言退化成 Command 的情况由上面统一处理。
     if isinstance(stmt, exp.Show):
-        return Verdict(True, "SHOW 命令", "Show", tables)
+        return Verdict(True, t("classify.show_command"), "Show", tables)
 
     if not isinstance(stmt, _READONLY_ROOTS):
-        return Verdict(False, f"{kind} 属于写操作/DDL", kind, tables)
+        return Verdict(False, t("classify.write_or_ddl", kind=kind), kind, tables)
 
     # 顶层是只读类型，仍需遍历整棵树排除 CTE/子查询中的写操作
     for node in stmt.walk():
         if isinstance(node, _WRITE_NODES):
-            return Verdict(False, f"语句内部包含写操作节点 {type(node).__name__}（如 CTE 中的 DML）", kind, tables)
+            return Verdict(False, t("classify.write_node_inside", node=type(node).__name__), kind, tables)
         if isinstance(node, exp.Lock):
-            return Verdict(False, "SELECT ... FOR UPDATE/SHARE 会加锁，按写操作处理", kind, tables)
+            return Verdict(False, t("classify.select_for_update"), kind, tables)
         if isinstance(node, exp.Into):
-            return Verdict(False, "SELECT ... INTO 会写出数据，按写操作处理", kind, tables)
+            return Verdict(False, t("classify.select_into"), kind, tables)
 
     unsafe = _unsafe_function_name(stmt)
     if unsafe:
-        return Verdict(False, f"包含有副作用/危险函数 {unsafe}()，不按只读放行（按写操作处理）", kind, tables)
+        return Verdict(False, t("classify.unsafe_function", name=unsafe), kind, tables)
 
-    return Verdict(True, "只读语句", kind, tables)
+    return Verdict(True, t("classify.readonly_statement"), kind, tables)
 
 
 def _classify_explain(sql: str, engine: str) -> Verdict:
@@ -193,11 +234,11 @@ def _classify_explain(sql: str, engine: str) -> Verdict:
         words.pop(0)
     inner = " ".join(words)
     if not inner:
-        return Verdict(False, "EXPLAIN 后缺少语句")
+        return Verdict(False, t("classify.explain_missing_statement"))
     inner_verdict = classify(inner, engine)
     if inner_verdict.readonly:
-        return Verdict(True, "EXPLAIN 只读语句", "Explain", inner_verdict.tables)
-    return Verdict(False, f"EXPLAIN 的目标语句非只读: {inner_verdict.reason}", "Explain", inner_verdict.tables)
+        return Verdict(True, t("classify.explain_readonly"), "Explain", inner_verdict.tables)
+    return Verdict(False, t("classify.explain_not_readonly", reason=inner_verdict.reason), "Explain", inner_verdict.tables)
 
 
 def _extract_tables(stmt: exp.Expression) -> list[str]:
