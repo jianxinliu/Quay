@@ -28,6 +28,7 @@ from .errors import translate_db_error
 from .budget import ResultBudgetExceeded, usage_note
 from .guide import USAGE_GUIDE
 from .health import ConnectionUnavailable
+from .i18n import use_locale
 from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
 from .sync import SyncSpec
 
@@ -340,6 +341,17 @@ async def _wait_then_execute(
     return {"status": "rejected", "change_id": cid, "reason": reason}
 
 
+class _AgentLocale(Middleware):
+    """MCP 工具调用一律用英文文案（见 i18n.py）：agent 的读者是模型，不是中文后台的人。
+
+    contextvar 在 call_next 期间生效，工具函数里的 anyio.to_thread 调用也继承它。
+    """
+
+    async def on_call_tool(self, context, call_next):  # noqa: ANN001, ANN201
+        with use_locale("en"):
+            return await call_next(context)
+
+
 class _FirstCallGuide(Middleware):
     """会话内第一次成功调用工具时，把使用说明随结果一起送出去。
 
@@ -535,6 +547,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         ),
     )
 
+    mcp.add_middleware(_AgentLocale())
     mcp.add_middleware(_FirstCallGuide(
         USAGE_GUIDE, enabled=lambda: service.guide_on_first_call()))
 

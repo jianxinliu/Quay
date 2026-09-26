@@ -36,7 +36,11 @@ def _settings_general_body(s: dict) -> str:
                             [("dark", "深色（默认）"), ("light", "浅色")],
                             "作用于全站：查询台、Redis 控制台与后台各页面。")
             + _num_setting("后台字号", "ui_font_size", s, 14,
-                           "后台各页面的基础字号，10–20 之间。", unit="px"))
+                           "后台各页面的基础字号，10–20 之间。", unit="px")
+            + _select_setting("判定文案语言", "text_language", s, "zh",
+                              [("zh", "中文（默认）"), ("en", "English")],
+                              "风险判定理由、审批单错误、体检报告这类与 agent 共享的文案在后台里用哪种语言；"
+                              "界面本身仍是中文。agent 看到的恒为英文，不受此项影响。"))
         + _set_section(
             "操作审计页", "打开审计页时的默认视图，随时可在页面上临时切换。",
             _bool_setting("自动刷新", "audit_auto_refresh", s, False,

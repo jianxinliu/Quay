@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     from ..service import CallerInfo, DbmService
 
+from ..i18n import use_locale
 from .common import _COOKIE_NAME, _authed, _local_request_ok, _page, _session_value, _wants_json
 
 
@@ -57,8 +58,16 @@ def build_context(mcp: "FastMCP", service: "DbmService", admin_token: str,
                         {"ok": False, "error": "登录已过期，请刷新页面重新登录"},
                         status_code=401)
                 return RedirectResponse(url="/admin/login", status_code=303)
-            return await handler(req)
+            # 后台里这类共享文案（风险理由/体检报告/错误）按系统设置选语言，默认中文
+            with use_locale(_text_locale()):
+                return await handler(req)
         return _wrapped
+
+    def _text_locale() -> str:
+        try:
+            return str(service.get_settings().get("text_language") or "zh")
+        except Exception:
+            return "zh"
 
     def _theme() -> str:
         """系统设置里的主题（dark / light），全站页面外壳共用；读不到按默认深色。"""
