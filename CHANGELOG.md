@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
+首个发布版本。以下是相对 main 上最近一次里程碑的变更。
+
+### Added
+- **零文件首跑**：`uvx --from "db-manage-mcp[keyring]" quay serve`（或 pipx）装完直接起；配置不存在时从包内模板生成（只含一条示例 SQLite 连接，其余引擎写法作注释），登录 token 首跑生成并存进 `~/.config/db-manage-mcp/env`；源码目录里跑仍用 `config/` 与 `data/`。新增 `quay` 命令别名。
+- **随包播种的示例库**：首次启动在 `data/demo/shop.sqlite3` 生成 customers / orders 两张表，示例流程「渠道ROI分析」与示例配置的 `demo/shop` 连接都指向它，新装实例上点 ▶ 就能跑通。
+- **看板首屏引导**：`/admin` 落在看板；一条连接都没有时显示三步引导；从未触达过的连接显示「未探测」而不是「正常」（新增健康位 `last_ok_at`，看板数据多一个 `unprobed` 计数）。
+- **通知里的一次性审批链接**（默认关，设置 `notify_action_links`）：Bark / 企微 / 飞书通知可附一个点开即批准/拒绝的链接，不用登录后台；令牌 sha256 入库、用一次即作废、随审批单过期、后台先决策则失效；`GET /admin/approvals/{id}/act` 只展示、`POST` 才决策。
+- `clickhouse` 安装 extra：ClickHouse 方言不再是硬依赖，缺失时建连给出安装提示。
+- 查询台：存档里引用了已删除连接的 tab，没有未保存内容的自动关掉，其余保留并在组头标「已删除」。
+
+### Changed
+- **后台内容页跟随主题**：看板 / 审批 / 审计 / 设置与查询台共用一套主题，默认深色（主题设置改为全站生效）；内容页样式改走语义 token，看板图表颜色随主题；「被挡下」系列改为蓝色（在深色底上与红色的色弱区分度不够）。
+- 启动信息改为 Quay 自己的一段（版本、后台/MCP 地址、配置与数据目录、token 来源），不再打印 FastMCP 横幅，也不再跑它的 PyPI 版本自检。
+- `admin.py` 拆成 `dbmcp/admin/` 包（按页面/接口分模块 + `AdminContext`），纯搬运、路由表不变。
+- 给 agent 看的文本（MCP instructions、28 个工具描述与参数说明、使用指南、结果元信息与错误提示）改为英文；面向后台操作者的中文界面不变。
+- `CLAUDE.md` 只保留规则、红线与模块地图；经验教训迁到 `docs/LESSONS.md`，功能日志迁到 `docs/HISTORY.md`；`AGENTS.md` 改为指向 `CLAUDE.md` 的符号链接。
+
 ### Fixed
 - 查询台：双击表名（以及右键「打开表数据」/「查看 DDL」、⌘P 表名搜索、⌘+点击表名）时，
   同一连接下的同一张表已经开着就切过去，不再重复开 tab；切换时若目标 tab 所在的连接分组是
@@ -84,4 +103,5 @@
 - **Redis 控制台**：对标 Medis 单开一页（库→键前缀树、类型徽章、命令窗口、命令文档面板）。
 - **Agent 侧**：MCP 工具（query/execute/analysis/workflow）；输出改紧凑 TSV + 结果大小双重硬限。
 
-[Unreleased]: https://github.com/jianxinliu/Quay/commits/main
+[Unreleased]: https://github.com/jianxinliu/Quay/compare/v0.1.0...main
+[0.1.0]: https://github.com/jianxinliu/Quay/releases/tag/v0.1.0

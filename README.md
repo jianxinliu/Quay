@@ -150,6 +150,8 @@ codex mcp add dbm --url http://127.0.0.1:8100/mcp
 
 协议层面：实现了 MCP 的 streamable HTTP 即可。URL 是 `http://127.0.0.1:8100/mcp`，本机回环、无鉴权——不要把 8100 暴露到局域网或公网。
 
+管理后台所有页面（看板 / 审批 / 审计 / 设置）与查询台共用一套主题，默认深色，可在系统设置切浅色。首次进入的看板会给出「新建连接 → 跑第一条 SQL → 接入 agent」的三步引导，从没连过的连接显示「未探测」而不是「正常」。
+
 ## 整体结构
 
 ```mermaid
@@ -225,6 +227,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 4. 等待超时返回 `approval_required`：审批单仍有效（60 分钟），agent 调 `wait_for_change` 续等。被拒绝时理由回给 agent，供其改完再提交。
 
 新审批单会进管理后台右上角铃铛，也可以在系统设置里打开 Bark / 企微 / 飞书。不主动推送成功——只在需要人点批准时通知。
+外部渠道还可以选择在通知里附一个**一次性审批链接**（默认关）：手机上点开就能批准或拒绝这一张单、不用登录后台；链接用一次即作废、随审批单一起过期，令牌会经过通知服务商，开启前请看 [SECURITY.md](SECURITY.md)。
 
 三条审批通道走哪条都会在审批单上留下完整记录。审批单 60 分钟未处理自动过期。
 
@@ -294,7 +297,7 @@ bash scripts/build-app.sh ~/Applications
 uv run dbm serve --stdio
 ```
 
-环境变量形式的密钥写在 `~/.config/db-manage-mcp/env`（600 权限）。仓库整体搬家后 `.app` 需要重建，路径是构建时写死的。
+环境变量形式的密钥写在 `~/.config/db-manage-mcp/env`（600 权限），`quay serve` 启动时也会读它；首跑生成的登录 token 就存在这里。用 pipx/uvx 安装时配置与数据都在 `~/.config/db-manage-mcp/` 下（`DBM_HOME` 可整体挪走），源码目录里跑则是 `config/connections.yaml` 与 `data/`。仓库整体搬家后 `.app` 需要重建，路径是构建时写死的。
 
 部署形态是本地进程，有意没做 Docker：单机场景下容器连宿主机的库要绕网络、容器里没有 keyring 后端、SSH key 还要改挂载路径，对这个场景只增加成本。
 
@@ -310,7 +313,7 @@ uv run dbm serve --stdio
 ## 开发
 
 ```bash
-uv sync --extra keyring --extra tokenizer
+uv sync --extra keyring --extra tokenizer --extra clickhouse
 uv run pytest          # 全量测试
 uv run ruff check .    # lint
 ```
