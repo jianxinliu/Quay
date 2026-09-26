@@ -105,15 +105,23 @@ def ensure_config(path: str | Path, data_dir: str | Path) -> bool:
 
 
 def persist_admin_token(token: str, path: Path | None = None) -> bool:
-    """把首次生成的管理 token 追加进 env 文件（600），下次启动沿用；写不了就返回 False。"""
+    """把首次生成的管理 token 写进 env 文件（600），下次启动沿用；写不了就返回 False。
+
+    文件里已有 DBM_ADMIN_TOKEN= 行就原地替换而不是再追加一行——两行同名值对读文件的人是误导。
+    """
     path = path or env_file_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        existed = path.exists()
-        with path.open("a", encoding="utf-8") as f:
-            if existed and path.stat().st_size and not path.read_text(encoding="utf-8").endswith("\n"):
-                f.write("\n")
-            f.write(f"DBM_ADMIN_TOKEN={token}\n")
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        new_line = f"DBM_ADMIN_TOKEN={token}"
+        replaced = False
+        for i, line in enumerate(lines):
+            if line.strip().removeprefix("export ").startswith("DBM_ADMIN_TOKEN="):
+                lines[i] = new_line
+                replaced = True
+        if not replaced:
+            lines.append(new_line)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         path.chmod(0o600)
         return True
     except OSError:
@@ -258,12 +266,16 @@ def _cmd_serve(args: argparse.Namespace) -> None:
             if args.no_auth:
                 token_note = "登录      --no-auth 模式，后台无需登录（仅供本机测试）"
             elif not os.environ.get("DBM_ADMIN_TOKEN"):
-                # 未设置则生成一个并存进 env 文件（600），下次启动沿用；存不了就只打印这一次
-                if persist_admin_token(admin_token):
-                    token_note = (f"登录 token  {admin_token}\n"
+                # 未设置则生成一个并存进 env 文件（600），下次启动沿用；存不了就只打印这一次。
+                # 明文只在交互终端里打（人正等着登录）；stderr 进了日志文件（launchd）就只给路径，
+                # 免得 token 躺在权限更宽的日志里。
+                saved = persist_admin_token(admin_token)
+                show = admin_token if (sys.stderr.isatty() or not saved) else "（见 env 文件）"
+                if saved:
+                    token_note = (f"登录 token  {show}\n"
                                   f"              已保存到 {env_file_path()}，下次启动沿用")
                 else:
-                    token_note = f"登录 token  {admin_token}（本次随机生成，未能保存到 {env_file_path()}）"
+                    token_note = f"登录 token  {show}（本次随机生成，未能保存到 {env_file_path()}）"
             else:
                 token_note = "登录 token  来自 DBM_ADMIN_TOKEN"
             print(_startup_banner(args, config, token_note), file=sys.stderr)

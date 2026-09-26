@@ -149,7 +149,9 @@ def seed_examples(workflows, data_dir: str | Path) -> bool:
     """
     seed_demo_db(data_dir)
     csv_path = Path(data_dir) / EXAMPLE_CSV_REL
-    if not csv_path.exists():
+    # 旧版播种的 CSV 是另一套渠道名（douyin/wechat…），与新示例库对不上会让 ROI 那步 JOIN 出空表；
+    # 只在它还是旧内容时重写，用户自己改过的不动
+    if not csv_path.exists() or "paid_search" not in csv_path.read_text(encoding="utf-8"):
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         csv_path.write_text(EXAMPLE_CSV, encoding="utf-8")
     if workflows.list():

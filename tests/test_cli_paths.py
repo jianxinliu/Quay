@@ -81,14 +81,12 @@ class TestEnvFile:
     def test_missing_env_file_is_fine(self, home):
         assert cli.load_env_file() == 0
 
-    def test_persist_token_creates_600_file_and_appends(self, home):
+    def test_persist_token_creates_600_file_and_replaces_in_place(self, home):
         env = home / "env"
         assert cli.persist_admin_token("t1") is True
         assert stat.S_IMODE(env.stat().st_mode) == 0o600
         env.write_text(env.read_text(encoding="utf-8") + "OTHER=1", encoding="utf-8")  # 无尾换行
         assert cli.persist_admin_token("t2") is True
         lines = env.read_text(encoding="utf-8").splitlines()
-        assert lines == ["DBM_ADMIN_TOKEN=t1", "OTHER=1", "DBM_ADMIN_TOKEN=t2"]
-        # 再读回来：第一条生效（shell 语义是最后一条，但这里只保证「有值可用」；
-        # 真实流程里第二次启动不会再生成——token 已从文件注入环境）
-        assert cli.load_env_file() == 2
+        assert lines == ["DBM_ADMIN_TOKEN=t2", "OTHER=1"]   # 原地替换，不留两行同名值
+        assert cli.load_env_file() == 2 and os.environ["DBM_ADMIN_TOKEN"] == "t2"

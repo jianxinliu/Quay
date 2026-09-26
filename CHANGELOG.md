@@ -11,7 +11,7 @@
 
 ### Added
 - **零文件首跑**：`uvx --from "db-manage-mcp[keyring]" quay serve`（或 pipx）装完直接起；配置不存在时从包内模板生成（只含一条示例 SQLite 连接，其余引擎写法作注释），登录 token 首跑生成并存进 `~/.config/db-manage-mcp/env`；源码目录里跑仍用 `config/` 与 `data/`。新增 `quay` 命令别名。
-- **随包播种的示例库**：首次启动在 `data/demo/shop.sqlite3` 生成 customers / orders 两张表，示例流程「渠道ROI分析」与示例配置的 `demo/shop` 连接都指向它，新装实例上点 ▶ 就能跑通。
+- **随包播种的示例库**：首次启动在 `data/demo/shop.sqlite3` 生成 customers / orders 两张表，示例流程「渠道ROI分析」与示例配置的 `demo/shop` 连接都指向它，新装实例上点 ▶ 就能跑通。升级的实例：示例库与成本 CSV 会补齐，但已存在的旧示例流程仍指向 `local/demo-mysql`——删掉它（且没有别的流程）后重启会按新模板重新播种，或在画布上把取数节点改成 `demo/shop`。
 - **看板首屏引导**：`/admin` 落在看板；一条连接都没有时显示三步引导；从未触达过的连接显示「未探测」而不是「正常」（新增健康位 `last_ok_at`，看板数据多一个 `unprobed` 计数）。
 - **通知里的一次性审批链接**（默认关，设置 `notify_action_links`）：Bark / 企微 / 飞书通知可附一个点开即批准/拒绝的链接，不用登录后台；令牌 sha256 入库、用一次即作废、随审批单过期、后台先决策则失效；`GET /admin/approvals/{id}/act` 只展示、`POST` 才决策。
 - `clickhouse` 安装 extra：ClickHouse 方言不再是硬依赖，缺失时建连给出安装提示。
