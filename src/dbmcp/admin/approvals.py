@@ -100,6 +100,7 @@ def mount(ctx: AdminContext) -> None:
     service = ctx.service
     guard = ctx.guard
     _shell = ctx._shell
+    _theme = ctx._theme
 
     @mcp.custom_route("/admin/approvals", methods=["GET"])
     @guard
@@ -141,7 +142,8 @@ def mount(ctx: AdminContext) -> None:
         try:
             c = service.get_change(change_id)
         except ApprovalError as e:
-            return HTMLResponse(_page("审批单", f"<div class='card'>{_esc(e)}</div>"), status_code=404)
+            return HTMLResponse(_page("审批单", f"<div class='card'>{_esc(e)}</div>", theme=_theme()),
+                                status_code=404)
 
         st = c.effective_status()
         risk = c.risk_report
@@ -234,7 +236,8 @@ def mount(ctx: AdminContext) -> None:
                 _page("执行失败", f"<div class='card'><h3>审批单 #{change_id} 执行失败</h3>"
                       f"<pre>{_esc(f'{type(e).__name__}: {e}')}</pre>"
                       f"<p>审批单已被核销，如需重试请让 agent 重新提交。</p>"
-                      f"<p><a href='/admin/approvals/{change_id}'>← 返回审批单</a></p></div>"),
+                      f"<p><a href='/admin/approvals/{change_id}'>← 返回审批单</a></p></div>",
+                      theme=_theme()),
                 status_code=500,
             )
         return RedirectResponse(url=f"/admin/approvals/{change_id}", status_code=303)

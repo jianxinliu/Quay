@@ -176,19 +176,22 @@
     return charts[id];
   }
 
+  // 图表颜色从 CSS 变量取（admin-chrome.css 的 --chart-*），深浅主题各一套；
+  // 样式表在 <head>、本脚本在 body 末尾，初始化时变量已可读。
+  const cv = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const AXIS_STYLE = {
-    axisLine: { lineStyle: { color: "#e6e8ec" } },
+    axisLine: { lineStyle: { color: cv("--chart-axis") } },
     axisTick: { show: false },
-    axisLabel: { color: "#9aa1ac", fontSize: 11 },
+    axisLabel: { color: cv("--chart-label"), fontSize: 11 },
   };
   const GRID = { left: 8, right: 12, top: 28, bottom: 4, containLabel: true };
   const TOOLTIP_BASE = {
     trigger: "axis",
     axisPointer: { type: "shadow" },
-    backgroundColor: "rgba(20,24,31,.94)",
+    backgroundColor: cv("--chart-tip-bg"),
     borderWidth: 0,
     padding: [8, 11],
-    textStyle: { color: "#e6e8ec", fontSize: 12 },
+    textStyle: { color: cv("--chart-tip-ink"), fontSize: 12 },
     extraCssText: "border-radius:8px;box-shadow:0 6px 20px rgba(15,20,27,.22)",
   };
 
@@ -216,7 +219,7 @@
       grid: GRID,
       legend: {
         top: 0, right: 0, itemWidth: 9, itemHeight: 9, itemGap: 14,
-        textStyle: { color: "#6b7280", fontSize: 11 },
+        textStyle: { color: cv("--chart-legend"), fontSize: 11 },
         data: ["成功", "被挡下", "出错"],
       },
       tooltip: {
@@ -233,18 +236,18 @@
       xAxis: { type: "category", data: labels, ...AXIS_STYLE },
       yAxis: {
         type: "value", minInterval: 1, ...AXIS_STYLE,
-        splitLine: { lineStyle: { color: "#f1f3f5" } },
+        splitLine: { lineStyle: { color: cv("--chart-grid") } },
       },
       series: [
         { name: "成功", type: "bar", stack: "ops", data: ok,
-          itemStyle: { color: "#0d9488", borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: "#0f766e" } } },
+          itemStyle: { color: cv("--chart-ok"), borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: cv("--chart-ok-2") } } },
         { name: "被挡下", type: "bar", stack: "ops", data: rejected,
-          itemStyle: { color: "#d9a441", borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: "#c08e2c" } } },
+          itemStyle: { color: cv("--chart-blocked"), borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: cv("--chart-blocked-2") } } },
         { name: "出错", type: "bar", stack: "ops", data: errors,
-          itemStyle: { color: "#c0392b", borderRadius: [2, 2, 0, 0] },
-          emphasis: { itemStyle: { color: "#a5281c" } } },
+          itemStyle: { color: cv("--chart-err"), borderRadius: [2, 2, 0, 0] },
+          emphasis: { itemStyle: { color: cv("--chart-err-2") } } },
       ],
     }, { notMerge: true });
     chart.resize();
@@ -271,17 +274,17 @@
       yAxis: {
         type: "value", ...AXIS_STYLE,
         axisLabel: { ...AXIS_STYLE.axisLabel, formatter: (v) => bytes(v) },
-        splitLine: { lineStyle: { color: "#f1f3f5" } },
+        splitLine: { lineStyle: { color: cv("--chart-grid") } },
       },
       series: [{
         name: "读出数据量", type: "line", data: vals, smooth: true,
         showSymbol: false, symbolSize: 6,
-        lineStyle: { width: 2, color: "#0d9488" },
-        itemStyle: { color: "#0d9488" },
+        lineStyle: { width: 2, color: cv("--chart-ok") },
+        itemStyle: { color: cv("--chart-ok") },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: "rgba(13,148,136,.28)" },
-            { offset: 1, color: "rgba(13,148,136,.02)" },
+            { offset: 0, color: cv("--chart-area-0") },
+            { offset: 1, color: cv("--chart-area-1") },
           ]),
         },
       }],
@@ -517,7 +520,7 @@
       + items.map((b) => {
         // 只在接近/超出配额时上色——平时全绿一片反而看不出哪个该管
         const pct = b.percent;
-        const color = pct >= 100 ? "#c0392b" : pct >= 75 ? "#b45309" : "";
+        const color = pct >= 100 ? cv("--danger-ink") : pct >= 75 ? cv("--warn-ink") : "";
         return "<tr>"
           + `<td><span class="mono">${esc((b.session_id || "-").slice(0, 12))}</span></td>`
           + `<td class="num">${num(b.used_chars)} 字符<br>`

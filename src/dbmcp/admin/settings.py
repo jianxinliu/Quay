@@ -31,10 +31,10 @@ from .context import AdminContext
 def _settings_general_body(s: dict) -> str:
     return _settings_layout(
         _set_section(
-            "外观", "后台各页面的基础观感。查询台与 Redis 是独立的深色 IDE，主题在这里切。",
+            "外观", "后台各页面的基础观感。",
             _select_setting("界面主题", "theme", s, "dark",
                             [("dark", "深色（默认）"), ("light", "浅色")],
-                            "作用于查询台与 Redis 控制台；后台其余页面始终是浅色。")
+                            "作用于全站：查询台、Redis 控制台与后台各页面。")
             + _num_setting("后台字号", "ui_font_size", s, 14,
                            "后台各页面的基础字号，10–20 之间。", unit="px"))
         + _set_section(

@@ -378,9 +378,7 @@ def _connection_form(project: str, connection: str, cfg, identities: list[str]) 
     resultBox.style.padding = '10px 14px';
     resultBox.style.borderRadius = '8px';
     resultBox.style.fontSize = '14px';
-    resultBox.style.background = ok ? '#f0fdf4' : '#fef2f2';
-    resultBox.style.border = '1px solid ' + (ok ? '#86efac' : '#fca5a5');
-    resultBox.style.color = ok ? '#166534' : '#b00020';
+    resultBox.className = ok ? 'test-result ok' : 'test-result bad';
     resultBox.innerHTML = html;
   }}
   async function runTest(url, btn){{
@@ -660,9 +658,9 @@ def mount(ctx: AdminContext) -> None:
             # 前端用 fetch 提交（Accept: json）→ 返回 JSON，页面 inline 提示、不清空表单
             if "application/json" in req.headers.get("accept", ""):
                 return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-            body = f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>" \
+            body = f"<div class='card'><h2>保存失败</h2><p style='color:var(--danger-ink)'>{_esc(e)}</p>" \
                    f"<a href='/admin/settings?tab=connections'>← 返回</a></div>"
-            return HTMLResponse(_page("保存失败", body), status_code=400)
+            return HTMLResponse(_page("保存失败", body, theme=ctx._theme()), status_code=400)
         if "application/json" in req.headers.get("accept", ""):
             return JSONResponse({"ok": True})
         return RedirectResponse(url="/admin/settings?tab=connections", status_code=303)
@@ -676,7 +674,7 @@ def mount(ctx: AdminContext) -> None:
         try:
             service.delete_connection(str(f.get("project")), str(f.get("connection")), _caller(req))
         except (ConnectionAdminError, QueryRejected) as e:
-            return HTMLResponse(_page("删除失败", f"<div class='card'>{_esc(e)}</div>"), status_code=400)
+            return HTMLResponse(_page("删除失败", f"<div class='card'>{_esc(e)}</div>", theme=ctx._theme()), status_code=400)
         return RedirectResponse(url="/admin/settings?tab=connections", status_code=303)
 
     @mcp.custom_route("/admin/ssh-identities/save", methods=["POST"])
@@ -695,9 +693,9 @@ def mount(ctx: AdminContext) -> None:
                 port=str(f.get("port") or "").strip() or None,
             )
         except ConnectionAdminError as e:
-            body = (f"<div class='card'><h2>保存失败</h2><p style='color:#b00020'>{_esc(e)}</p>"
+            body = (f"<div class='card'><h2>保存失败</h2><p style='color:var(--danger-ink)'>{_esc(e)}</p>"
                     "<a href='/admin/settings?tab=ssh'>← 返回</a></div>")
-            return HTMLResponse(_page("保存失败", body), status_code=400)
+            return HTMLResponse(_page("保存失败", body, theme=ctx._theme()), status_code=400)
         return RedirectResponse(url="/admin/settings?tab=ssh", status_code=303)
 
     @mcp.custom_route("/admin/ssh-identities/delete", methods=["POST"])
@@ -708,9 +706,9 @@ def mount(ctx: AdminContext) -> None:
         try:
             service.delete_ssh_identity(str(f.get("name") or "").strip(), _caller(req))
         except ConnectionAdminError as e:
-            body = (f"<div class='card'><h2>删除失败</h2><p style='color:#b00020'>{_esc(e)}</p>"
+            body = (f"<div class='card'><h2>删除失败</h2><p style='color:var(--danger-ink)'>{_esc(e)}</p>"
                     "<a href='/admin/settings?tab=ssh'>← 返回</a></div>")
-            return HTMLResponse(_page("删除失败", body), status_code=400)
+            return HTMLResponse(_page("删除失败", body, theme=ctx._theme()), status_code=400)
         return RedirectResponse(url="/admin/settings?tab=ssh", status_code=303)
 
     def _form_fields(f) -> dict:  # noqa: ANN001

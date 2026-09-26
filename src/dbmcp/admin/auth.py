@@ -12,7 +12,7 @@ from .context import AdminContext
 
 
 def _login_page(error: str = "") -> str:
-    err = (f"<div style='background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;"
+    err = (f"<div style='background:rgba(229,72,77,.14);border:1px solid rgba(229,72,77,.5);color:#fca5a5;"
            f"padding:9px 13px;border-radius:8px;font-size:13px;margin-bottom:14px'>{_esc(error)}</div>"
            if error else "")
     mono = "ui-monospace,'SF Mono',Menlo,monospace"

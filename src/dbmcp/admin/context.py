@@ -22,7 +22,7 @@ class AdminContext:
     """各路由模块共享的状态；属性名与原闭包变量名保持一致。"""
 
     __slots__ = ("mcp", "service", "admin_token", "no_auth", "expected_cookie",
-                 "guard", "_shell", "_caller", "_analysis_ws", "_resolve_conn",
+                 "guard", "_shell", "_theme", "_caller", "_analysis_ws", "_resolve_conn",
                  "_db_param", "_jobmgr", "_solo_key")
 
     def __init__(self, **kw: object) -> None:
@@ -60,6 +60,13 @@ def build_context(mcp: "FastMCP", service: "DbmService", admin_token: str,
             return await handler(req)
         return _wrapped
 
+    def _theme() -> str:
+        """系统设置里的主题（dark / light），全站页面外壳共用；读不到按默认深色。"""
+        try:
+            return "light" if service.get_settings().get("theme") == "light" else "dark"
+        except Exception:
+            return "dark"
+
     def _shell(title: str, body: str, doc: bool = True,
                extra_head: str = "") -> HTMLResponse:
         """渲染登录后的页面，自动注入待审批数（侧栏角标 + 顶部横幅）。"""
@@ -76,7 +83,7 @@ def build_context(mcp: "FastMCP", service: "DbmService", admin_token: str,
             except Exception:
                 fs = None
         return HTMLResponse(_page(title, body, pending=pending, doc=doc, font_size=fs,
-                                  extra_head=extra_head))
+                                  extra_head=extra_head, theme=_theme()))
 
     def _caller(req: Request) -> "CallerInfo":
         from ..service import CallerInfo
@@ -119,4 +126,4 @@ def build_context(mcp: "FastMCP", service: "DbmService", admin_token: str,
         """给不参与串行的任务（workflow/画布 DAG）一个唯一 key，使其立即并行执行。"""
         return object()
 
-    return AdminContext(mcp=mcp, service=service, admin_token=admin_token, no_auth=no_auth, expected_cookie=expected_cookie, guard=guard, _shell=_shell, _caller=_caller, _analysis_ws=_analysis_ws, _resolve_conn=_resolve_conn, _db_param=_db_param, _jobmgr=_jobmgr, _solo_key=_solo_key)
+    return AdminContext(mcp=mcp, service=service, admin_token=admin_token, no_auth=no_auth, expected_cookie=expected_cookie, guard=guard, _shell=_shell, _theme=_theme, _caller=_caller, _analysis_ws=_analysis_ws, _resolve_conn=_resolve_conn, _db_param=_db_param, _jobmgr=_jobmgr, _solo_key=_solo_key)

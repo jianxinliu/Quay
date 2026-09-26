@@ -175,7 +175,7 @@ _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
 def _page(title: str, body: str, pending: int = 0, doc: bool = True,
-          font_size: int | None = None, extra_head: str = "") -> str:
+          font_size: int | None = None, extra_head: str = "", theme: str = "dark") -> str:
     nav_badge = f"<span class='nav-count'>{pending}</span>" if pending else ""
     banner = (f"<a class='pending-banner' href='/admin/approvals'>"
               f"⚠ <b>{pending}</b> 条数据变更待审批，点此处理 →</a>" if pending else "")
@@ -183,8 +183,9 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
                if doc else '')
     # 整体字号（系统设置 ui_font_size）：只作用于服务端渲染页，SPA（查询台/Redis）另有字号设置
     font_css = f"<style>body{{font-size:{font_size}px}}</style>" if font_size else ""
+    theme_cls = "theme-light" if theme == "light" else "theme-dark"
     return f"""<!doctype html>
-<html lang="zh"><head><meta charset="utf-8">
+<html lang="zh" class="{theme_cls}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(title)} · Quay</title>
 {_FAVICON_LINK}

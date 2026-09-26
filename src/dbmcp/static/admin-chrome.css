@@ -8,8 +8,48 @@
   /* 导航状态色：图标与文字同色（图标走 CSS mask + background-color），
      所以一个 color 就决定了整项的观感，idle/hover/active 三档而已 */
   --nav-idle:#8b95a4; --nav-hover:#e7ebf1; --nav-active:#5eead4; --nav-bar:#14b8a6;
+  --accent-soft-2:#ccfbf1;
+  /* 内容页用到的语义色：状态框、代码块、芯片、输入底。深色主题只换这些值，
+     规则一行不改——所以 admin-doc / settings / dashboard 里不允许再出现裸色值。 */
+  --code-bg:#f6f7f9; --code-ink:#334155; --row-hover:#fafbfc; --chip:#eceef1; --chip-hover:#e3e6ea;
+  --input-bg:#fff; --switch-off:#d6dae0; --shadow:rgba(0,0,0,.14);
+  --danger-bg:#fef2f2; --danger-border:#fca5a5; --danger-ink:#b91c1c; --danger-bg-hover:#fee2e2;
+  --ok-bg:#dcfce7; --ok-border:#86efac; --ok-ink:#166534;
+  --warn-bg:#fffbeb; --warn-border:#fbbf24; --warn-ink:#b45309;
+  --warn-chip:#fdf0d8; --warn-chip-border:#f0d9ae;
+  --guard:#b45309; --guard-soft:#fffbeb; --guard-border:#f3ddb4; --guard-line:#f0e3cd;
+  --pre-bg:#14181f; --pre-ink:#e2e8f0; --pre-border:#262d38;
+  /* 看板图表：坐标轴/网格/标签随主题，三个系列色是状态色（成功=青 / 被挡下=蓝 / 出错=红）。
+     「被挡下」是审批流的正常一步而不是警告，用蓝而非琥珀：琥珀在深色底上与红色在
+     红绿色弱视下几乎不可分（ΔE 3.5），蓝红两套主题都过 dataviz 校验器（CVD ΔE ≥ 8、对底 ≥ 3:1）。 */
+  --chart-axis:#e6e8ec; --chart-grid:#f1f3f5; --chart-label:#9aa1ac; --chart-legend:#6b7280;
+  --chart-tip-bg:rgba(20,24,31,.94); --chart-tip-ink:#e6e8ec;
+  --chart-ok:#0d9488; --chart-ok-2:#0f766e; --chart-blocked:#4f7bd9; --chart-blocked-2:#3d6fd1;
+  --chart-err:#c0392b; --chart-err-2:#a5281c;
+  --chart-area-0:rgba(13,148,136,.28); --chart-area-1:rgba(13,148,136,.02);
   --mono:ui-monospace,'SF Mono',Menlo,Monaco,'Cascadia Code',monospace;
   --sans:-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif;
+}
+/* 深色主题（默认）。底色/边框/文字取自查询台的 --dg-* 深色板，让内容页与 IDE 页
+   读起来是同一个产品；强调色仍是侧栏那一支青绿。 */
+html.theme-dark{
+  --paper:#1e1f22; --surface:#2b2d30; --border:#3b3e43; --line:#34373b;
+  --text:#c9ccd1; --muted:#9296a0; --faint:#6c7079;
+  --accent:#14b8a6; --accent-ink:#5eead4; --accent-soft:rgba(20,184,166,.14); --accent-soft-2:rgba(20,184,166,.24);
+  --code-bg:#1e1f22; --code-ink:#c9ccd1; --row-hover:#323539; --chip:#35383d; --chip-hover:#3d4046;
+  --input-bg:#1e1f22; --switch-off:#4a4e55; --shadow:rgba(0,0,0,.5);
+  --danger-bg:rgba(229,72,77,.12); --danger-border:rgba(229,72,77,.45); --danger-ink:#fca5a5; --danger-bg-hover:rgba(229,72,77,.2);
+  --ok-bg:rgba(34,197,94,.14); --ok-border:rgba(34,197,94,.45); --ok-ink:#86efac;
+  --warn-bg:rgba(245,158,11,.12); --warn-border:rgba(245,158,11,.5); --warn-ink:#fcd34d;
+  --warn-chip:rgba(245,158,11,.16); --warn-chip-border:rgba(245,158,11,.4);
+  --guard:#fbbf24; --guard-soft:rgba(245,158,11,.08); --guard-border:rgba(245,158,11,.35); --guard-line:rgba(245,158,11,.2);
+  --pre-bg:#17181b; --pre-ink:#d5d8de; --pre-border:#34373b;
+  --chart-axis:#3b3e43; --chart-grid:#34373b; --chart-label:#8b8f97; --chart-legend:#9296a0;
+  --chart-tip-bg:rgba(43,45,48,.96); --chart-tip-ink:#e6e8ec;
+  --chart-ok:#0d9488; --chart-ok-2:#14b8a6; --chart-blocked:#6b8de6; --chart-blocked-2:#8aa4ee;
+  --chart-err:#d94848; --chart-err-2:#e5484d;
+  --chart-area-0:rgba(20,184,166,.28); --chart-area-1:rgba(20,184,166,.02);
+  color-scheme:dark;
 }
 *{box-sizing:border-box}
 body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
@@ -53,9 +93,9 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 .nav-count{margin-left:auto;background:#e5484d;color:#fff;font-size:11px;font-weight:700;
   min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;
   box-shadow:0 0 0 2px var(--ink)}
-.pending-banner{display:block;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;
+.pending-banner{display:block;background:var(--danger-bg);border:1px solid var(--danger-border);color:var(--danger-ink);
   padding:11px 16px;border-radius:10px;margin-bottom:20px;font-size:14px;font-weight:500;text-decoration:none}
-.pending-banner:hover{background:#fee2e2;text-decoration:none} .pending-banner b{font-size:16px}
+.pending-banner:hover{background:var(--danger-bg-hover);text-decoration:none} .pending-banner b{font-size:16px}
 .side .foot{margin-top:auto;border-top:1px solid rgba(255,255,255,.07);padding-top:10px}
 .side .foot a{color:var(--nav-idle);font-size:13px;padding:8px 12px;display:block;border-radius:9px;
   transition:background .14s,color .14s}
@@ -70,7 +110,7 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 
 /* -------- 全站铃铛（fixed，不占文档流 → SPA/服务端渲染页共用） -------- */
 .dbm-bell{position:fixed;top:14px;right:20px;z-index:9999;
-  width:34px;height:34px;border-radius:50%;background:#fff;border:1px solid var(--border);
+  width:34px;height:34px;border-radius:50%;background:var(--surface);border:1px solid var(--border);
   box-shadow:0 1px 3px rgba(0,0,0,.06);cursor:pointer;display:flex;align-items:center;justify-content:center;
   color:var(--text);font-size:16px;line-height:1;user-select:none;transition:background .12s}
 .dbm-bell:hover{background:var(--paper)}
@@ -87,11 +127,11 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 .dbm-bell[data-fallback]{background:#fff;border-color:#e6e8ec;color:#1a1f28}
 
 .dbm-panel{position:fixed;top:56px;right:20px;z-index:9998;width:380px;max-height:70vh;
-  background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.14);
+  background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 6px 24px var(--shadow);
   overflow:hidden;display:none;flex-direction:column;font-family:var(--sans)}
 .dbm-panel.open{display:flex}
 .dbm-panel-hd{display:flex;align-items:center;justify-content:space-between;
-  padding:10px 14px;border-bottom:1px solid var(--line);background:#fafbfc}
+  padding:10px 14px;border-bottom:1px solid var(--line);background:var(--row-hover)}
 .dbm-panel-hd b{font-size:13px;font-weight:600}
 .dbm-panel-hd .dbm-clear{background:none;border:none;color:var(--accent-ink);font-size:12px;cursor:pointer;padding:2px 6px}
 .dbm-panel-hd .dbm-clear:hover{text-decoration:underline}
@@ -101,8 +141,8 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
   text-decoration:none;color:var(--text);transition:background .12s;cursor:pointer}
 .dbm-item:last-child{border-bottom:none}
 .dbm-item:hover{background:var(--paper)}
-.dbm-item.unread{background:#f0fdfa}
-.dbm-item.unread:hover{background:#ccfbf1}
+.dbm-item.unread{background:var(--accent-soft)}
+.dbm-item.unread:hover{background:var(--accent-soft-2)}
 .dbm-item-title{font-size:13px;font-weight:500;color:var(--text);margin-bottom:3px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dbm-item.unread .dbm-item-title::before{content:'●';color:var(--accent);margin-right:5px;font-size:10px}
