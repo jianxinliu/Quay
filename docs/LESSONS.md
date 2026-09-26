@@ -2,6 +2,10 @@
 
 开发中真实踩过的坑，每条尽量写「现象 → 根因 → 修法 → 回归测试」。动手前必须记得的操作规则已提炼到 `CLAUDE.md`「开发注意」；这里是完整记录，按时间倒序（新的在前）。
 
+- **拆大文件用 AST 切片脚本、别手搬**（admin.py 4000 行 → admin/ 包）：按 `ast` 找到顶层辅助函数与闭包内每条语句的行区间（含前导注释、装饰器），按路由前缀分模块、按「被哪些模块引用」自动决定辅助函数归属（只被一个模块用 → 跟它走，多个 → common），跨模块引用生成 import 并断言无环；闭包共享变量收进一个上下文对象，各模块 `mount(ctx)` 里用同名别名，路由体一字不改。证明「纯搬运」的办法：拆前后 path+methods 集合相等 + 全量测试 + 起两个实例对每条路由 curl 状态码对拍（0 差异）。两个坑：包内相对导入要加深一级（`from .x` → `from ..x`，函数体内的惰性导入也要）；`Path(__file__).parent` 这类相对路径随文件搬家而变。
+- **全量 curl 对拍路由要给 `-m` 超时并跳过 SSE 端点**：`/admin/notifications/stream` 永不结束，循环卡在那里会被当成「命令跑不完」。
+- **浏览器扩展的 click 偶尔不触发 inline `onclick`**（「新增连接」按钮按坐标/按 ref 点都没开弹窗），用 `javascript_tool` 直接 `el.click()` 即触发——先用 JS 复核再下「功能坏了」的结论。
+- **看板图表的深色配色不能只把浅色值调暗**：琥珀（被挡下）与红（出错）在深色底上、红绿色弱视下 ΔE 只有 3.5，dataviz 校验器直接 FAIL；换成蓝才两套主题都过。「被挡下」本就是审批流的正常一步而非警告，蓝反而更准确。
 - **包名是 `dbmcp`，不是 `dbm`**：`dbm` 是 Python 标准库模块，会被 stdlib 遮蔽导致 import 全挂。CLI 命令仍叫 `dbm`。
 - **本机测本地服务要绕过代理**：这台机器 shell 有 SOCKS 代理环境变量，不绕过会把 127.0.0.1 请求发进代理得到 502。curl 用 `--noproxy '*'`；fastmcp Client（底层 httpx）用 `env NO_PROXY='*' no_proxy='*'`（单纯 `-u ALL_PROXY` 不够，httpx 还会读其他代理变量，NO_PROXY 最稳）。MCP 客户端同样：接入指南里要写 `NO_PROXY=127.0.0.1,localhost`。
 - **MCP 接入指南别只写 Claude Code 一条命令**：各家配置格式不同——Codex 是 TOML `[mcp_servers.x]`（不是 JSON）；Cursor HTTP 的 `type` 必须 `"http"`（`"streamable-http"` 会让 `cursor-agent` 静默丢掉整份 `mcp.json`）；DeepSeek Harness 走 `cordis.yml` 的 `@deepseek-ai/dsh-mcp-client`，模型看到的工具名带 `mcp__<serverName>__` 前缀；Gemini CLI streamable HTTP 字段是 `httpUrl`（`url` 是旧 SSE）；Windsurf 远程端点字段是 `serverUrl`；Claude Desktop 的 `claude_desktop_config.json` 只认 stdio，HTTP 要走 Settings → Connectors，把 `url` 写进 JSON 会被整段抹掉。**推荐一律接常驻 HTTP `http://127.0.0.1:8100/mcp`**，不要给每个 agent 再起一份 `--stdio`（审批单对不上正在看的后台）。审批等待默认 120s，客户端默认超时常是 60s（Codex `tool_timeout_sec`、DeepSeek `toolCallTimeoutMs`）必须调到 ≥180s。完整配方在 README「接入 Agent」。
