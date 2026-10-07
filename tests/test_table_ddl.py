@@ -91,7 +91,8 @@ async def test_table_ddl_tool(service):
 
     mcp = build_mcp(service)
     async with Client(mcp) as c:
-        assert "table_ddl" in {t.name for t in await c.list_tools()}
+        assert "table_ddl" in {item["name"] for item in
+                               (await c.call_tool("list_capabilities", {})).data}
 
         one = (await c.call_tool("table_ddl", {
             "project": "demo", "connection": "prod", "table": "users"})).data
@@ -186,7 +187,8 @@ async def test_sync_table_ddl_tool(service, tmp_path):
 
     mcp = build_mcp(service)
     async with Client(mcp) as c:
-        assert "sync_table_ddl" in {t.name for t in await c.list_tools()}
+        assert "sync_table_ddl" in {item["name"] for item in
+                                    (await c.call_tool("list_capabilities", {})).data}
         out = (await c.call_tool("sync_table_ddl", {
             "source_project": "demo", "source_connection": "prod",
             "target_project": "demo", "target_connection": "local",

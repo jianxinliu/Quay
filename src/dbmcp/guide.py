@@ -1,5 +1,4 @@
-"""Usage guide and best practices for the agent (attached to the result on the
-session's first tool call).
+"""Short first-call hint and on-demand usage guide for the agent.
 
 **Why not rely solely on MCP instructions**: `instructions` are rendered by the client at
 connect time, and clients handle it very differently (some truncate it, some collapse it,
@@ -7,8 +6,8 @@ some only show it once at the very top of the system prompt) — in practice age
 never see it, or see it once and forget. So on top of keeping `instructions`, we prepare a
 full guide here that `server._FirstCallGuide` middleware attaches to the result on the
 **first successful tool call of each session** — that's when the agent is about to act on
-it, so the odds it actually gets read are highest, and it's only sent once per session so
-it doesn't keep eating context. The agent can also re-read it anytime via `usage_guide()`.
+it. Keep this hint short; the full guide is discoverable on demand via
+`call_capability(name="usage_guide", arguments={})`.
 
 Content strategy: **organize by scenario**, not by tool listing. Misuse is rarely caused by
 not knowing a tool exists — it's caused by not knowing which combination fits the
@@ -18,10 +17,20 @@ happen in SQL, or changing data without leaving a rollback trail all come from t
 
 from __future__ import annotations
 
+FIRST_CALL_GUIDE = (
+    "Quay: use query for reads; execute or transaction for changes (human approval). "
+    "For optional tools call list_capabilities, then capability_detail(name), then "
+    "call_capability(name, arguments). The full scenario guide is available as the "
+    "usage_guide capability. Name this session with begin_session when practical."
+)
+
 USAGE_GUIDE = """\
 # Quay Database Service · Usage Guide & Best Practices
 
-(This guide is sent once per session; re-read it anytime with `usage_guide()`.)
+(Load this guide on demand with `call_capability(name="usage_guide", arguments={})`.)
+
+Optional tools are discoverable with `list_capabilities`, described in full by
+`capability_detail(name)`, and callable through `call_capability(name, arguments)`.
 
 ## 0. Do this first
 
@@ -129,6 +138,11 @@ Follow this order, don't skip steps:
 5. Migration-style changes (e.g. ALTER + a backfill UPDATE) can be submitted as multiple
    statements in one call (semicolon-separated) — one approval covers the whole batch,
    executed statement by statement in the same transaction.
+6. To build a batch over several calls, use `transaction(action="begin")`, then
+   `transaction(action="add", transaction_id=..., sql=...)` repeatedly. Preview before
+   `transaction(action="commit", transaction_id=...)`; one approval covers the frozen
+   batch. `transaction(action="rollback", ...)` discards the draft. MySQL transaction
+   drafts accept DML only because DDL implicitly commits there.
 
 ### Getting production data onto local
 - **Just the table structure** (rebuild an empty table locally that mirrors production) →

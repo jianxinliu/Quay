@@ -936,7 +936,7 @@ async def test_mcp_tool_registered_and_callable(service):
 
     mcp = build_mcp(service)
     async with Client(mcp) as c:
-        names = {t.name for t in await c.list_tools()}
+        names = {item["name"] for item in (await c.call_tool("list_capabilities", {})).data}
         assert "db_checkup" in names
 
         r = await c.call_tool("db_checkup",

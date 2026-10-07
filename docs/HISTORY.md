@@ -2,6 +2,11 @@
 
 每一项功能做完时记下的实现细节、验证方式与有意没做的部分，按时间倒序。用户可见的变更摘要见 `CHANGELOG.md`；这里保留细节供回溯。
 
+- [x] TODO：事务草稿与 MCP 能力发现（2026-10-07）：
+  - `DbmService` 管理会话绑定的内存草稿（随机 ID、100 条/128 KB 上限、1 小时 TTL、housekeeping 回收）。加入 SQL 不触库；agent 提交冻结的多语句文本，沿用 `execute` 审批单与 `change_id` 指纹核销，审批单 `kind=transaction`；后台查询台预览整批风险并以指纹确认，通过 writer 在 `engines.run_write` 的单一事务中执行。每条 SQL 另记 `transaction_statement` 审计，成功记影响行数，失败记整批回滚。MySQL DDL 隐式提交，因此草稿仅收 INSERT/UPDATE/DELETE/REPLACE；PG/SQLite 可在草稿中执行其事务支持的 DDL。
+  - MCP 仅列 10 个常用入口；其余工具由能力目录返回简介、详情返回完整描述与输入/输出 schema，通用入口调用原工具，仍经过中间件和 service 权限治理。首次工具调用的长指南改为短提示；`usage_guide` 保留为按需能力。旧客户端仍可按名称直接调用既有工具。
+  - 测试：SQLite 服务/MCP/后台接口覆盖审批、所有语句的审计、失败回滚、会话隔离、过期与指纹绑定；临时 MySQL 8.2/PostgreSQL 17 容器真实验证提交与回滚；8201 测试服务真实 HTTP 验证后台草稿闭环和静态界面资产。
+
 - [x] PostgreSQL 跨库（据反馈「只有面板支持跨库，编辑器和 MCP 都不支持」，分支 `feat/pg-cross-database`）：
   - **MCP**：新增 `list_server_databases`；`query`/`execute`/`sample_rows`/`list_databases`/`list_tables`/`describe_table`/`table_ddl`/`export_table`/`analysis_import` 加 `pg_database`，`sync_table`/`sync_table_ddl` 加 `source_pg_database`/`target_pg_database`。**原有 `database` 参数对 PG 仍指 schema，没改语义**（改了会让已接入的 agent 行为突变）。
   - **审批**：`change_request` 加 `database` 列（老库自动 ALTER），风险评估/执行计划/核销执行都在该库上做；带 change_id 重提时声明了不同的库即拒绝、不核销。后台「批准并立即执行」同样用存下的库。审批页显示「执行库」。`SyncSpec` 新字段未指定时不进 `to_dict()`，升级前批准的同步单指纹不变。元数据缓存按 `库::表` 区分。analysis 的 provenance 记下 `database`，workflow 重跑时带上。

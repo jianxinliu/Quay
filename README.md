@@ -244,6 +244,10 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 
 ## MCP 工具
 
+默认只列出 10 个常用入口。其余工具由 `list_capabilities()` 查名称与简介，
+`capability_detail(name)` 查完整说明和参数，`call_capability(name, arguments)` 调用；
+已知工具名的旧客户端仍可直接调用。下表列出所有主要能力。
+
 | 工具 | 说明 |
 |---|---|
 | `begin_session(title, note?)` | 声明本次会话名字/背景；之后本会话的 SQL 在审计页按会话归类 |
@@ -253,6 +257,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 | `query(project, connection, sql)` | 只读 SQL；非只读一律拒绝并审计；缺 LIMIT 自动注入 |
 | `export_table(...)` | 按表导出 CSV / JSON / Markdown / xlsx，返回短期下载链接（正文不进上下文） |
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | 写操作：生成审批单并等待批准，批准即自动执行 |
+| `transaction(action, project, connection, transaction_id?, sql?)` | 分次暂存写 SQL；`begin` / `add` / `preview` / `commit` / `rollback`（丢弃草稿），提交时整批一次审批并原子执行。MySQL 草稿只接受 DML |
 | `wait_for_change(change_id)` / `get_change_status(change_id)` | 超时后续等 / 立即查审批单状态 |
 | `sync_table(...)` | 把表从一个库同步到另一个库（典型：线上 → 本地）：结构 + 按条件取的少量数据。目标是 local/dev 连接直接执行（仍审计），staging 才走 execute 那套审批；目标不能是 prod |
 | `sync_table_ddl(...)` | 批量只同步表结构、不带数据（在本地照着线上重建一套空表），表名逗号分隔 |
@@ -262,7 +267,7 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 | `test_connection` | 连通性检查 |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB 跨源分析（取数受审计和行数上限约束，沙箱内自由计算） |
 | `save_workflow` / `run_workflow` | 把分析沉淀成可重跑的流程（脚本或 DAG 画布） |
-| `usage_guide()` | 完整用法与最佳实践；会话第一次调用工具时已自动附过一份 |
+| `usage_guide()` | 按需获取完整用法与最佳实践（通过能力目录调用） |
 | `allow_more_results(reason)` | 会话结果配额用尽后、**问过用户并得到同意**才调，放行一个额度 |
 
 给 agent 的查询结果做了几项针对性处理：
@@ -270,9 +275,8 @@ Redis 的键值模型和 SQL 的关系模型差别很大，共用一个界面会
 - 输出用紧凑的 TSV 格式而不是 JSON，实测省 25% 左右的 token。
 - 结果有两级硬上限：行数（默认 1000）和字符数（默认 40000，约 12k token），超限截断并提示用 WHERE / 聚合收窄——上限在服务端强制，agent 无法拉爆自己的上下文。
 - 超出 JavaScript 安全整数范围（2⁵³−1）的大整数以字符串返回，雪花 ID 之类的值不丢精度。
-- **会话第一次调用工具时随结果附一份完整使用说明**（各场景该用哪套工具组合、结果上限、
-  错误怎么读）。MCP instructions 各客户端处理不一，实测 agent 常常读不到；说明在它正要
-  用工具时送达，一个会话只发一次。可在系统设置里关掉，agent 仍可主动调 `usage_guide()`。
+- **会话第一次调用工具时随结果附简短提示**，完整使用说明按需通过 `usage_guide` 能力获取。
+  这样不会在每个新会话里自动占用大量上下文；首次提示可在系统设置里关闭。
 - **token 计数**：装了可选依赖 `tokenizer`（tiktoken）就用真实分词计数，否则按字符类别
   估算并在界面上标「粗估」。差别不小——查询结果 TSV 里制表符、数字 id、短字段各自成 token，
   启发式会少报近一半。词表首次加载后缓存在数据目录，之后全离线。

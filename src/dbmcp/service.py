@@ -10,11 +10,12 @@ import hmac
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from .approvals import KIND_SYNC, ApprovalError, ApprovalStore
+from .approvals import KIND_SYNC, KIND_TRANSACTION, ApprovalError, ApprovalStore
 from .audit.classify import classify, fingerprint
 from .audit.log import AuditRecord, AuditStore, parse_time_filter
 from .audit.redis_rules import classify_command, command_fingerprint, parse_command
@@ -314,6 +315,155 @@ class DbmService:
         # PG：连接上可切换的 database 清单缓存（(project, connection) → (取数时刻, 库名列表)），
         # 校验 agent 传入的 pg_database 用，避免每次调用都多打一条 pg_database 查询
         self._pg_db_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+        self._transaction_drafts: dict[str, dict] = {}
+        self._transaction_lock = threading.RLock()
+
+    # ---------- 跨调用事务草稿（提交时才占用数据库连接）----------
+
+    def _transaction_draft(self, transaction_id: str, caller: CallerInfo) -> dict:
+        draft = self._transaction_drafts.get(transaction_id)
+        if draft is None or draft["owner"] != (caller.agent, caller.session_id):
+            raise QueryRejected("Transaction draft not found or owned by another session")
+        if time.monotonic() - draft["updated"] > 3600:
+            del self._transaction_drafts[transaction_id]
+            raise QueryRejected("Transaction draft expired; begin a new transaction")
+        return draft
+
+    def _reap_transaction_drafts(self) -> int:
+        with self._transaction_lock:
+            expired = [tid for tid, draft in self._transaction_drafts.items()
+                       if time.monotonic() - draft["updated"] > 3600]
+            for tid in expired:
+                del self._transaction_drafts[tid]
+            return len(expired)
+
+    def begin_transaction(
+        self, project: str, connection: str, caller: CallerInfo,
+        schema: str | None = None, database: str | None = None,
+    ) -> dict:
+        cfg = self.config.get_connection(project, connection)
+        if cfg.engine not in ("mysql", "postgres", "sqlite"):
+            raise QueryRejected(f"Transactional SQL batches are unsupported for {cfg.engine}")
+        database = self.resolve_pg_database(project, connection, database, cfg)
+        transaction_id = uuid.uuid4().hex
+        with self._transaction_lock:
+            self._transaction_drafts[transaction_id] = {
+                "owner": (caller.agent, caller.session_id), "project": project,
+                "connection": connection, "schema": schema, "database": database,
+                "engine": cfg.engine, "statements": [], "updated": time.monotonic(),
+            }
+        return {"transaction_id": transaction_id, "status": "draft", "count": 0}
+
+    def add_transaction_sql(
+        self, transaction_id: str, sql: str, caller: CallerInfo,
+    ) -> dict:
+        from .workflows import split_statements
+
+        statements = split_statements(sql)
+        if not statements:
+            raise QueryRejected("Transaction SQL cannot be empty")
+        with self._transaction_lock:
+            draft = self._transaction_draft(transaction_id, caller)
+            if len(draft["statements"]) + len(statements) > 100 or (
+                sum(len(s) for s in draft["statements"] + statements) > 128_000
+            ):
+                raise QueryRejected("Transaction draft exceeds 100 statements or 128 KB")
+            for statement in statements:
+                keyword = engines.first_sql_keyword(statement).upper()
+                if keyword in ("BEGIN", "START", "COMMIT", "ROLLBACK", "SAVEPOINT"):
+                    raise QueryRejected("Transaction control statements belong to the draft API")
+                if draft["engine"] == "mysql" and keyword not in (
+                    "INSERT", "UPDATE", "DELETE", "REPLACE",
+                ):
+                    raise QueryRejected("MySQL atomic drafts accept only DML; DDL implicitly commits")
+                verdict = classify(statement, draft["engine"])
+                if caller.agent == "admin-ui" and verdict.statement_kind == "ParseError":
+                    raise QueryRejected(f"SQL syntax error: {verdict.reason}")
+                if verdict.readonly:
+                    raise QueryRejected("Run read-only SQL through query outside the transaction draft")
+            draft["statements"].extend(statements)
+            draft["updated"] = time.monotonic()
+            return {"transaction_id": transaction_id, "status": "draft",
+                    "count": len(draft["statements"])}
+
+    def preview_transaction(
+        self, transaction_id: str, caller: CallerInfo, admin: bool = False,
+    ) -> dict:
+        with self._transaction_lock:
+            draft = self._transaction_draft(transaction_id, caller)
+            statements = list(draft["statements"])
+            if not statements:
+                raise QueryRejected("Transaction draft is empty")
+            sql = ";\n".join(statements)
+            out = {"transaction_id": transaction_id, "status": "draft",
+                   "count": len(statements), "project": draft["project"],
+                   "connection": draft["connection"], "database": draft["database"],
+                   "fingerprint": fingerprint(sql, draft["engine"])}
+            if admin:
+                out["statements"] = statements
+            scope = (draft["project"], draft["connection"], draft["schema"], draft["database"])
+        if admin:
+            project, connection, schema, database = scope
+            out.update(self.admin_assess_batch(project, connection, statements, caller,
+                                               schema=schema, database=database))
+        return out
+
+    def rollback_transaction(self, transaction_id: str, caller: CallerInfo) -> dict:
+        with self._transaction_lock:
+            self._transaction_draft(transaction_id, caller)
+            del self._transaction_drafts[transaction_id]
+        return {"transaction_id": transaction_id, "status": "discarded"}
+
+    def commit_transaction(
+        self, transaction_id: str, caller: CallerInfo, *, admin: bool = False,
+        expect_fingerprint: str | None = None, reason: str = "",
+        rollback_note: str = "",
+    ) -> dict:
+        with self._transaction_lock:
+            draft = self._transaction_draft(transaction_id, caller)
+            if not draft["statements"]:
+                raise QueryRejected("Transaction draft is empty")
+            sql = ";\n".join(draft["statements"])
+            fp = fingerprint(sql, draft["engine"])
+            if admin and (not expect_fingerprint or not hmac.compare_digest(fp, expect_fingerprint)):
+                raise QueryRejected("Transaction changed since preview; review it again")
+            del self._transaction_drafts[transaction_id]
+        try:
+            if admin:
+                result = self.admin_run_sql(
+                    draft["project"], draft["connection"], sql, caller, confirm=True,
+                    schema=draft["schema"], database=draft["database"],
+                    expect_fingerprint=fp, transaction_batch=True,
+                )
+            else:
+                result = self.execute(
+                    draft["project"], draft["connection"], sql, caller,
+                    reason=reason, rollback_note=rollback_note, database=draft["database"],
+                    transaction_batch=True,
+                )
+        except Exception:
+            with self._transaction_lock:
+                self._transaction_drafts[transaction_id] = draft
+            raise
+        return {"transaction_id": transaction_id, **result}
+
+    def _audit_transaction_statements(
+        self, project: str, connection: str, cfg: ConnectionConfig, sql: str,
+        caller: CallerInfo, *, change_id: int | None = None,
+        result: "engines.QueryResult | None" = None,
+    ) -> None:
+        from .workflows import split_statements
+
+        for index, statement in enumerate(split_statements(sql)):
+            rec = self._base_record(project, connection, cfg, "transaction_statement",
+                                    statement, caller)
+            rec.change_id = change_id
+            rec.status = "ok" if result is not None else "error"
+            rec.detail = "committed" if result is not None else "batch rolled back"
+            if result is not None:
+                rec.row_count = result.statement_rows[index]
+                rec.duration_ms = result.duration_ms
+            self.store.record(rec)
 
     # ---------- 元信息 ----------
 
@@ -768,6 +918,7 @@ class DbmService:
         on_start=None,  # noqa: ANN001
         confirm_text: str | None = None, expect_fingerprint: str | None = None,
         database: str | None = None,
+        transaction_batch: bool = False,
     ) -> dict:
         """管理后台查询台专用入口。**只挂在已认证的后台路由上，agent 无法触达。**
 
@@ -855,11 +1006,15 @@ class DbmService:
         try:
             result = self._run_touching_db(project, connection, _do, rec)
         except ConnectionUnavailable as e:
+            if transaction_batch:
+                self._audit_transaction_statements(project, connection, cfg, sql, caller)
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
             self.store.record(rec)
             raise
         except Exception as e:
+            if transaction_batch:
+                self._audit_transaction_statements(project, connection, cfg, sql, caller)
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
             self.store.record(rec)
@@ -869,6 +1024,9 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
+        if transaction_batch:
+            self._audit_transaction_statements(project, connection, cfg, sql, caller,
+                                               result=result)
         return {"kind": "write", "affected_rows": result.row_count,
                 "duration_ms": result.duration_ms}
 
@@ -1841,6 +1999,7 @@ class DbmService:
         change_id: int | None = None,
         rollback_note: str = "",
         database: str | None = None,
+        transaction_batch: bool = False,
     ) -> dict:
         """写操作统一入口。database 仅 PG：在哪个 database 上执行（随审批单存下）。
 
@@ -1873,7 +2032,8 @@ class DbmService:
             return {"status": "executed", "readonly": True,
                     **self.query(project, connection, sql, caller, database=database)}
         return self._request_approval(project, connection, cfg, sql, reason, caller,
-                                      rollback_note=rollback_note, database=database)
+                                      rollback_note=rollback_note, database=database,
+                                      kind=KIND_TRANSACTION if transaction_batch else "sql")
 
     def _request_approval(
         self,
@@ -1885,6 +2045,7 @@ class DbmService:
         caller: CallerInfo,
         rollback_note: str = "",
         database: str | None = None,
+        kind: str = "sql",
     ) -> dict:
         provider = self._meta_provider(project, connection, cfg, database=database)
         report = assess(sql, cfg.engine, provider)
@@ -1921,6 +2082,7 @@ class DbmService:
             session_id=caller.session_id,
             rollback_note=rollback_note,
             database=database,
+            kind=kind,
         )
         rec = self._base_record(project, connection, cfg, "execute", sql, caller)
         rec.change_id = change.id
@@ -2007,11 +2169,17 @@ class DbmService:
         try:
             result = self._run_touching_db(project, connection, _do, rec)
         except ConnectionUnavailable as e:
+            if change.kind == KIND_TRANSACTION:
+                self._audit_transaction_statements(project, connection, cfg, change.sql,
+                                                   caller, change_id=change_id)
             rec.status = "error"
             rec.detail = f"ConnectionUnavailable[{e.state}]: {e}"
             self.store.record(rec)
             raise
         except Exception as e:
+            if change.kind == KIND_TRANSACTION:
+                self._audit_transaction_statements(project, connection, cfg, change.sql,
+                                                   caller, change_id=change_id)
             rec.status = "error"
             rec.detail = f"{type(e).__name__}: {e}"
             self.store.record(rec)
@@ -2024,6 +2192,9 @@ class DbmService:
         rec.row_count = result.row_count
         rec.duration_ms = result.duration_ms
         self.store.record(rec)
+        if change.kind == KIND_TRANSACTION:
+            self._audit_transaction_statements(project, connection, cfg, change.sql, caller,
+                                               change_id=change_id, result=result)
         payload = {
             "status": "executed",
             "change_id": change_id,
@@ -3717,10 +3888,12 @@ class DbmService:
         from .inbox import DEFAULT_RETENTION_DAYS as INBOX_RETENTION
         stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0,
                  "changes_purged": 0, "notifications_purged": 0,
-                 "workflow_runs_purged": 0, "exports_purged": 0}
+                 "workflow_runs_purged": 0, "exports_purged": 0,
+                 "transactions_reaped": 0}
         for key, fn in (
             ("engines_reaped", self.pool.reap_idle),
             ("redis_reaped", self.redis_pool.reap_idle),
+            ("transactions_reaped", self._reap_transaction_drafts),
             ("audit_purged", lambda: self.store.purge_old(retention_days)),
             ("changes_purged",
              (lambda: self.approvals.purge_old(retention_days)) if self.approvals else (lambda: 0)),

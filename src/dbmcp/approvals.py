@@ -84,6 +84,7 @@ STATUS_EXPIRED = "expired"
 # 审批单种类：sql = 一条/一批 SQL 原文；sync = 跨连接表同步计划（执行的是计划而非 SQL 文本）
 KIND_SQL = "sql"
 KIND_SYNC = "sync"
+KIND_TRANSACTION = "transaction"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS change_request (

@@ -869,6 +869,59 @@
       },
     },
     methods: {
+      txRequest: function (t, action, extra) {
+        return apiPost("/admin/sql/transaction", Object.assign({
+          conn: t.conn, action: action, transaction_id: t.tx ? t.tx.id : null,
+          schema: t.schema || null, db: t.db || null
+        }, extra || {})).then(function (d) {
+          if (!d.ok) throw new Error(d.error || "事务操作失败");
+          return d;
+        });
+      },
+      txBegin: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.conn) { this.flash("请先选择连接"); return; }
+        this.txRequest(t, "begin").then(function (d) {
+          t.tx = { id: d.transaction_id, count: 0, conn: t.conn,
+                   schema: t.schema || "", db: t.db || "", preview: null };
+          self.persist(); self.flash("事务草稿已开始");
+        }).catch(function (e) { self.flash(String(e)); });
+      },
+      txAdd: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.tx) return;
+        if (t.tx.conn !== t.conn || t.tx.schema !== (t.schema || "") || t.tx.db !== (t.db || "")) {
+          this.flash("事务草稿绑定了原连接和库，请切回后再添加"); return;
+        }
+        var sql = this.stmtAtCursor();
+        if (!sql.trim()) { this.flash("请输入 SQL"); return; }
+        this.txRequest(t, "add", { sql: sql }).then(function (d) {
+          t.tx.count = d.count; t.tx.preview = null;
+          self.persist(); self.flash("已加入事务草稿（" + d.count + " 条）");
+        }).catch(function (e) { self.flash(String(e)); });
+      },
+      txPreview: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.tx) return;
+        this.txRequest(t, "preview").then(function (d) {
+          t.tx.preview = d; self.persist();
+        }).catch(function (e) { self.flash(String(e)); });
+      },
+      txCommit: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.tx || !t.tx.preview) return;
+        this.txRequest(t, "commit", { fingerprint: t.tx.preview.fingerprint }).then(function (d) {
+          t.tx = null; self.persist(); self.flash("事务已提交（" + d.affected_rows + " 行受影响）");
+          self.refreshTree();
+        }).catch(function (e) { self.flash(String(e)); });
+      },
+      txDiscard: function () {
+        var self = this, t = this.activeTab;
+        if (!t || !t.tx) return;
+        this.txRequest(t, "rollback").then(function () {
+          t.tx = null; self.persist(); self.flash("事务草稿已丢弃");
+        }).catch(function (e) { self.flash(String(e)); });
+      },
       renderMd: function (text) { return renderMd(text); },
       flash: function (m) { var self = this; this.toast = m; clearTimeout(this._tt);
         this._tt = setTimeout(function () { self.toast = ""; }, 2600); },
@@ -936,7 +989,7 @@
                     // PG 的执行库：新 tab 取左树当前选中的库；之后每个 tab 各自独立
                     db: opts.db != null ? opts.db
                       : ((_conn === this.lastLoadedConn && this.pgDb) || this.pgDbSel[_conn] || ""),
-                    sql: opts.sql || "", result: null, confirm: null, ok: null, err: null, errKind: "", running: false,
+                    sql: opts.sql || "", result: null, confirm: null, tx: null, ok: null, err: null, errKind: "", running: false,
                     pinned: false, snippetId: opts.snippetId || null,   // 已保存到服务端片段库的 id（⌘S 覆盖同一条）
                     snipNote: opts.snipNote || "",                     // 片段备注（覆盖保存时保留，不被清空）
                     savedSql: opts.sql || "", dirty: false,            // 未保存改动标记（标题后 *）
@@ -3803,6 +3856,8 @@
                      ok: t.ok, err: t.err, pinned: !!t.pinned,
                      snippetId: t.snippetId || null, snipNote: t.snipNote || "",
                      savedSql: t.savedSql || "", dirty: !!t.dirty, bookmarks: t.bookmarks || [],
+                     tx: t.tx ? { id: t.tx.id, count: t.tx.count, conn: t.tx.conn,
+                       schema: t.tx.schema, db: t.tx.db } : null,
                      where: t.where || "", orderBy: t.orderBy || "",
                      lastPage: t.lastPage || 0, readSql: t.readSql, explain: t.explain,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0, pendingSql: t.pendingSql,
@@ -3879,6 +3934,7 @@
                      lastPage: t.lastPage || 0, readSql: t.readSql || null, explain: t.explain || null,
                      jobId: t.jobId || null, jobPage: t.jobPage || 0,
                      pendingSql: t.pendingSql || null, edit: null, confirm: null,
+                     tx: t.tx || null,
                      wfName: t.wfName || "", wfSteps: t.wfSteps || null, vsel: null,
                      view: t.view || "table", chart: t.chart || null,
                      rowSel: {}, lastSelRi: -1, newRow: null, resQ: null, cellSel: null, curRow: -1,
@@ -4562,6 +4618,29 @@
     <div class="dg-hsplit" v-show="activeTab && activeTab.type==='query'" @mousedown="beginDrag($event, 'y')"></div>
     <div class="dg-results" v-show="activeTab && activeTab.type!=='ddl'">
       <template v-if="activeTab">
+        <div v-if="activeTab.type==='query' && !isAnalysis" class="dg-toolbar dg-txbar">
+          <span class="tb-pending">事务草稿</span>
+          <button v-if="!activeTab.tx" class="dg-btn" @click="txBegin">开始事务</button>
+          <template v-else>
+            <span>{{ activeTab.tx.count }} 条待提交</span>
+            <button class="dg-btn" @click="txAdd">加入当前 SQL</button>
+            <button class="dg-btn" :disabled="!activeTab.tx.count" @click="txPreview">预览并提交</button>
+            <button class="dg-btn" @click="txDiscard">丢弃草稿</button>
+          </template>
+        </div>
+        <div v-if="activeTab.tx && activeTab.tx.preview" class="dg-confirm">
+          <h4>确认原子提交 {{ activeTab.tx.preview.count }} 条 SQL
+            <span class="lv" :style="{background: lvColor(activeTab.tx.preview.level)}">{{ activeTab.tx.preview.level }}</span></h4>
+          <div class="dg-batch">
+            <div v-for="(sql,i) in activeTab.tx.preview.statements" :key="i" class="dg-batch-item">
+              <div class="hd"><span class="no">#{{ i+1 }}</span></div><code class="sql">{{ sql }}</code>
+            </div>
+          </div>
+          <div class="note">整批在同一数据库事务内执行；任一条失败即回滚。MySQL 草稿只接受 DML。</div>
+          <div v-if="activeTab.tx.preview.prod" class="dg-prod-warn">⚠ 生产环境写操作，请核对所有语句。</div>
+          <div class="acts"><button class="dg-btn ok" @click="txCommit">确认提交</button>
+            <button class="dg-btn" @click="activeTab.tx.preview=null">返回草稿</button></div>
+        </div>
         <div v-if="activeTab.type==='data'" class="dg-toolbar">
           <button class="dg-btn ic" @click="refreshData" title="刷新：按当前条件重新查询（有未提交改动会提醒）">↻</button>
           <span class="tb-sep"></span>

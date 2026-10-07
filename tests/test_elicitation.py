@@ -202,8 +202,8 @@ async def test_export_table_returns_download_link_without_file_content(tmp_path)
     mcp = build_mcp(svc)
     try:
         async with Client(mcp) as c:
-            tools = await c.list_tools()
-            assert {"list_databases", "export_table"} <= {tool.name for tool in tools}
+            names = {item["name"] for item in (await c.call_tool("list_capabilities", {})).data}
+            assert {"list_databases", "export_table"} <= names
             result = await c.call_tool("export_table", {
                 "project": "demo",
                 "connection": "main",

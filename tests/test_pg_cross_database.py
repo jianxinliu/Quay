@@ -162,13 +162,17 @@ async def test_tools_expose_pg_database(tmp_path):
     try:
         async with Client(build_mcp(svc)) as c:
             tools = {t.name: t for t in await c.list_tools()}
-        assert "list_server_databases" in tools
-        for name in ("query", "execute", "sample_rows", "list_databases", "list_tables",
-                     "describe_table", "table_ddl", "export_table", "analysis_import"):
-            assert "pg_database" in tools[name].inputSchema["properties"], name
-        for name in ("sync_table", "sync_table_ddl"):
-            props = tools[name].inputSchema["properties"]
-            assert {"source_pg_database", "target_pg_database"} <= set(props), name
+            names = {item["name"] for item in (await c.call_tool("list_capabilities", {})).data}
+            assert "list_server_databases" in names
+            for name in ("query", "execute", "sample_rows", "list_databases", "list_tables",
+                         "describe_table", "table_ddl", "export_table", "analysis_import"):
+                schema = (tools[name].inputSchema if name in tools else
+                          (await c.call_tool("capability_detail", {"name": name})).data["input_schema"])
+                assert "pg_database" in schema["properties"], name
+            for name in ("sync_table", "sync_table_ddl"):
+                props = (await c.call_tool("capability_detail", {"name": name})).data[
+                    "input_schema"]["properties"]
+                assert {"source_pg_database", "target_pg_database"} <= set(props), name
     finally:
         svc.close()
 

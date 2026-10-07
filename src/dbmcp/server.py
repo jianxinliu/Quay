@@ -1,7 +1,7 @@
 """MCP interface layer: registers DbmService as FastMCP tools.
 
-Tool descriptions go straight into the agent's context, so spelling out the
-constraints reduces the number of walls the agent walks into.
+Only core tool descriptions are listed at connect time. Optional capabilities keep
+their full descriptions behind the on-demand catalog.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
+from contextvars import ContextVar
 from functools import partial
 from typing import Annotated, Literal
 
@@ -26,7 +27,7 @@ from .agent_format import render_agent_result
 from .approvals import STATUS_APPROVED, STATUS_CONSUMED, STATUS_PENDING, ApprovalError
 from .errors import translate_db_error
 from .budget import ResultBudgetExceeded, usage_note
-from .guide import USAGE_GUIDE
+from .guide import FIRST_CALL_GUIDE, USAGE_GUIDE
 from .health import ConnectionUnavailable
 from .i18n import use_locale
 from .service import CallerInfo, DbmService, QueryRejected, change_status_payload
@@ -41,6 +42,20 @@ logger = logging.getLogger(__name__)
 _WAIT_POLL_S = 1.0
 _WAIT_HEARTBEAT_S = 10.0   # report progress every 10s so clients don't time out the long call
 _WAIT_MAX_S = 3600
+
+# A small stable surface is shown to the model at connect time. The remaining tools
+# remain callable through call_capability (and directly by existing MCP clients).
+_CORE_TOOLS = frozenset({
+    "list_projects", "list_connections", "begin_session", "query", "execute",
+    "wait_for_change", "transaction", "list_capabilities", "capability_detail",
+    "call_capability",
+})
+_IN_CAPABILITY_CALL: ContextVar[bool] = ContextVar("dbm_in_capability_call", default=False)
+
+
+class _CoreToolList(Middleware):
+    async def on_list_tools(self, context, call_next):  # noqa: ANN001, ANN201
+        return [tool for tool in await call_next(context) if tool.name in _CORE_TOOLS]
 
 # The elicitation dialog must fit on one screen and be clickable: the client renders the
 # message verbatim in a terminal, and overly long content (typically sync_table's full
@@ -383,6 +398,8 @@ class _FirstCallGuide(Middleware):
     async def on_call_tool(self, context, call_next):  # noqa: ANN001, ANN201
         result = await call_next(context)
         try:
+            if _IN_CAPABILITY_CALL.get():
+                return result
             if not self._enabled():
                 return result
             ctx = context.fastmcp_context
@@ -426,130 +443,116 @@ def build_mcp(service: DbmService) -> FastMCP:
         name="Quay",
         lifespan=_lifespan,
         instructions=(
-            "A governed database access service. Before running SQL, call "
-            "begin_session(title, note) to name this session and describe what it's for — "
-            "afterwards the backend groups every SQL statement this session runs under it, "
-            "so a human can trace it back. "
-            "To review what you did before, use list_sessions (filter by date since/until, "
-            "keyword, project/connection; writes_only=True shows only sessions that changed "
-            "data) to find the session, then session_history(session_id) to see that "
-            "session's operations — write operations carry their change ticket id and the "
-            "rollback_note written at submission time (the value before the change / how to "
-            "roll back), which you can use to build a rollback statement; it returns a "
-            "compact column set by default, ask for fields=\"sql,detail\" explicitly to get "
-            "the raw SQL and error details; add writes_only=True, status=\"ok\" to see only "
-            "changes that actually landed. "
-            "Use list_projects / list_connections to find the target connection, then "
-            "list_tables / describe_table / sample_rows to explore the schema. "
-            "To check whether a database is healthy, use db_checkup: it returns a structured "
-            "diagnostic report in one call (connection usage/cache hit rate/long-running "
-            "queries/lock waits/replication lag/large tables, varying by engine) so you don't "
-            "have to probe it manually across multiple rounds of SQL; each item degrades "
-            "gracefully — items that can't be measured are marked unknown with a reason "
-            "(e.g. the read-only account lacks pg_monitor), and overall reflects the most "
-            "severe item. "
-            "Export data by database, table, columns, and row count with export_table "
-            "(supports CSV/JSON/Markdown/XLSX). "
-            "A PostgreSQL connection can only query one database at a time: use "
-            "list_server_databases to see what databases exist, then pass "
-            "pg_database=<name> to query/execute/list_tables and other tools to operate on "
-            "that database (the `database` parameter means schema for PG). "
-            "When needed, download export_table's returned download_url directly to the "
-            "target location with code — never read the file content into the model's "
-            "context. "
-            "Use query for read-only queries (accepts only SELECT/SHOW/DESCRIBE/EXPLAIN). "
-            "Use execute for data changes (INSERT/UPDATE/DELETE/DDL): **you decide whether "
-            "this change is worth a rollback trail — if so, first use query to read the old "
-            "values and pass them via the rollback_note parameter** (it's stored with the "
-            "approval ticket, visible to the approver, and retrievable later via "
-            "session_history; not required every time — leave it blank for changes that "
-            "don't matter). The first submission generates an approval ticket and the "
-            "server waits for the human decision — give the returned approval_url to the "
-            "user so they can open and approve it; once they approve, this same call "
-            "auto-executes and returns status=executed, without the user needing to come "
-            "back and say \"approved\". "
-            "If the wait times out, status=approval_required is returned; remind the user "
-            "and call wait_for_change(change_id) to keep waiting (don't write your own "
-            "polling loop around get_change_status). "
-            "Use sync_table to sync a table from one connection to another (typically: "
-            "production -> local): it can sync the table structure (built from the source "
-            "table, rewritten into an approximate DDL across engines) and data (a sample "
-            "taken via where/order_by/limit, defaulting to 1000 rows with a server-side hard "
-            "cap — it's for pulling a sample, not full migration); the target cannot be a "
-            "prod connection. Targeting a local/dev connection needs no approval and executes "
-            "directly (still audited); only a staging target goes through the same approval "
-            "flow as execute; use dry_run=True first to preview the plan. "
-            "For cross-source JOINs, large-result aggregation, or multi-step analysis, use "
-            "the analysis workbench (a local DuckDB sandbox): analysis_import snapshots each "
-            "source's query result into a workspace dataset (pulled via the read-only "
-            "account, with a row cap), analysis_sql freely JOINs/aggregates/creates VIEWs "
-            "inside the workspace (no approval needed), bringing back only the small result. "
-            "Finished analyses can be saved as a re-runnable workflow with save_workflow; "
-            "workflows saved by a human or an agent (either a multi-statement script or an "
-            "admin-backend canvas DAG) can be re-run with one call via run_workflow: it "
-            "re-pulls the source data -> executes each step -> returns each step's status and "
-            "output; see analysis_workspaces for the list of available ones. All operations "
-            "are audited."
-            "\n[SQL-writing conventions — follow these]"
-            "1. Time zones: this service does not pin a fixed database session time zone; "
-            "@@session.time_zone inherits whatever each database is set to (could be UTC+8, "
-            "could be UTC, or something else). Whenever you use a time-zone-dependent "
-            "function such as FROM_UNIXTIME / UNIX_TIMESTAMP / NOW / CURDATE / DATE, run "
-            "`SELECT @@session.time_zone` first to confirm it, and never apply an offset on "
-            "top of it — a common trap: the session is already UTC+8 and you also manually "
-            "add +28800, which is +16h, and grouping by day will bleed evening data into the "
-            "next day, splitting one day into two rows."
-            "2. Grouping epoch-second columns by day: prefer pure arithmetic — "
-            "`FLOOR((ts+offset)/86400)` gives day_idx, and the date is derived from it via "
-            "`DATE_ADD('1970-01-01', INTERVAL day_idx DAY)`, sidestepping implicit time-zone "
-            "conversion; day_idx alone determines the date, no need to also put the date in "
-            "GROUP BY."
-            "3. A SELECT on a large table must have a LIMIT or a narrowing WHERE — never pull "
-            "the whole table."
-            "4. Prefer hitting an index: try to make the filter columns in WHERE / JOIN / "
-            "ORDER BY hit an index — check describe_table for available indexes first, or "
-            "run EXPLAIN via query if unsure (access_type=ALL/table means a full table scan). "
-            "Don't wrap an indexed column in a function or arithmetic (e.g. `DATE(ts)`, "
-            "`FROM_UNIXTIME(ts)`, `ts+1` on the left side of a WHERE clause) — that disables "
-            "the index; convert the constant side instead and use a range comparison (e.g. "
-            "`ts >= start AND ts < end`)."
-            "5. execute supports multi-statement batches (semicolon-separated, e.g. an ALTER "
-            "plus a backfill UPDATE migration) — one approval covers the whole batch, "
-            "executed statement by statement in the same transaction."
-            "6. query/sample_rows return **compact TSV text** (not JSON, to save tokens): a "
-            "top `#` metadata line plus a `# types:` column-types line, then a header row "
-            "with column names, then data rows, tab-separated, `\\N`=NULL, big integers as "
-            "strings. Results have **two hard caps**: row count (default 1000) plus a "
-            "character budget (default ~12k tokens); `truncated=true` in the metadata means "
-            "you didn't get everything — **don't re-fetch the full set**, narrow it with "
-            "WHERE/LIMIT/aggregation, or push the computation into the analysis workbench."
-            "\n[How to read errors] Every error carries a bracketed category prefix — use it "
-            "to decide the next step, don't blindly resend the same SQL: "
-            "`[sql_syntax_error]` = syntax error (caught before reaching the database and "
-            "confirmed by the database itself), you must rewrite the SQL; "
-            "`[table_not_found]`/`[column_not_found]` = check the name with list_tables / "
-            "describe_table first; "
-            "`[permission_denied]`/`[readonly_violation]` = the read-only account can't "
-            "write, data changes go through the execute approval flow; "
-            "`[query_timeout]` = narrow the range or switch to aggregation/the analysis "
-            "workbench; "
-            "`[connection_unavailable]` = the connection is temporarily down and the backend "
-            "is auto-reconnecting, retry after the suggested delay; "
-            "`[connection_exhausted]` = repeated reconnect attempts have failed (still "
-            "auto-retrying), ask the user to check the connection on the backend; "
-            "`[result_budget_exceeded]` = this session's cumulative returned data has hit its "
-            "quota — **stop and ask the user** whether to continue these token-costly "
-            "queries, and only after they agree call allow_more_results(reason=...) to "
-            "proceed — don't try to work around it by retrying."
-            "\nThe full usage guide (which tool combination fits which scenario, and where "
-            "the boundaries are) is attached to the result the first time this session calls "
-            "a tool, and can be re-read anytime with usage_guide()."
+            "Quay database access: call begin_session to label your work; use query for "
+            "reads, execute or transaction for changes requiring human approval. "
+            "Only common tools are listed. Discover optional tools with "
+            "list_capabilities, inspect capability_detail, then call_capability. "
+            "Use wait_for_change after an approval wait times out."
         ),
     )
 
     mcp.add_middleware(_AgentLocale())
+    mcp.add_middleware(_CoreToolList())
     mcp.add_middleware(_FirstCallGuide(
-        USAGE_GUIDE, enabled=lambda: service.guide_on_first_call()))
+        FIRST_CALL_GUIDE, enabled=lambda: service.guide_on_first_call()))
+
+    async def _capabilities():
+        return {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+
+    @mcp.tool
+    async def list_capabilities() -> list[dict]:
+        """Discover the optional database, audit, analysis and workflow capabilities."""
+        tools = await _capabilities()
+        return [{"name": name, "summary": (tool.description or "").strip().split("\n")[0]}
+                for name, tool in sorted(tools.items()) if name not in _CORE_TOOLS]
+
+    @mcp.tool
+    async def capability_detail(name: str) -> dict:
+        """Get the full description and input schema for an optional capability."""
+        tool = (await _capabilities()).get(name)
+        if tool is None or name in _CORE_TOOLS:
+            raise ToolError(f"Unknown capability: {name}")
+        return {"name": name, "title": tool.title,
+                "description": tool.description or "",
+                "input_schema": tool.parameters,
+                "output_schema": tool.output_schema}
+
+    @mcp.tool
+    async def call_capability(name: str, arguments: dict | None = None) -> object:
+        """Invoke an optional capability using the arguments shown by capability_detail."""
+        tool = (await _capabilities()).get(name)
+        if tool is None:
+            raise ToolError(f"Unknown capability: {name}")
+        if name in _CORE_TOOLS:
+            raise ToolError(f"Capability {name} cannot be called through this gateway")
+        marker = _IN_CAPABILITY_CALL.set(True)
+        try:
+            result = await mcp.call_tool(name, arguments or {})
+        finally:
+            _IN_CAPABILITY_CALL.reset(marker)
+        if result.is_error:
+            raise ToolError("; ".join(getattr(part, "text", "") for part in result.content))
+        if result.structured_content is not None:
+            if set(result.structured_content) == {"result"}:
+                return result.structured_content["result"]
+            return result.structured_content
+        return "\n".join(getattr(part, "text", "") for part in result.content)
+
+    @mcp.tool
+    async def transaction(
+        action: Literal["begin", "add", "preview", "commit", "rollback"],
+        project: str,
+        connection: str,
+        transaction_id: str | None = None,
+        sql: str | None = None,
+        reason: str = "",
+        rollback_note: str = "",
+        wait_seconds: int | None = None,
+        pg_database: PgDatabase = None,
+        ctx: Context | None = None,
+    ) -> dict:
+        """Stage SQL changes across calls, then approve and execute the frozen batch atomically.
+
+        begin creates a one-hour draft bound to this session and connection; add appends
+        SQL without touching the database; preview shows its count/fingerprint; commit
+        submits the whole batch for one human approval and waits as execute does; rollback
+        discards the draft. Read-only queries run separately through query. MySQL drafts
+        accept DML only because MySQL DDL implicitly commits. Use wait_for_change after a
+        commit approval wait times out.
+        """
+        caller = _caller_from_ctx(ctx)
+        try:
+            if action == "begin":
+                return service.begin_transaction(project, connection, caller,
+                                                 database=pg_database)
+            if not transaction_id:
+                raise QueryRejected("transaction_id is required for this action")
+            if action == "add":
+                return service.add_transaction_sql(transaction_id, sql or "", caller)
+            if action == "preview":
+                return service.preview_transaction(transaction_id, caller)
+            if action == "rollback":
+                return service.rollback_transaction(transaction_id, caller)
+            preview = service.preview_transaction(transaction_id, caller)
+            if (project, connection) != (preview["project"], preview["connection"]):
+                raise QueryRejected("Transaction connection does not match the draft")
+            result = await anyio.to_thread.run_sync(
+                lambda: service.commit_transaction(
+                    transaction_id, caller, reason=reason, rollback_note=rollback_note))
+            if result.get("status") == "approval_required":
+                ticket_sql = service.approvals.get(result["change_id"]).sql
+                run = lambda cid: service.execute(  # noqa: E731
+                    project, connection, ticket_sql, caller, change_id=cid,
+                    database=preview["database"])
+                result = await _maybe_elicit_approval(
+                    service, ctx, project, connection, ticket_sql, caller, result,
+                    resubmit=run)
+                wait_s = service.approval_wait_seconds() if wait_seconds is None else wait_seconds
+                if result.get("status") == "approval_required" and wait_s > 0:
+                    result = await _wait_then_execute(service, result, wait_s, ctx, resubmit=run)
+            return result
+        except Exception as e:  # noqa: BLE001
+            raise agent_error(e) from e
 
     @mcp.tool
     def allow_more_results(
@@ -594,9 +597,8 @@ def build_mcp(service: DbmService) -> FastMCP:
         """The full usage guide and best practices for this service: which tool or
         combination fits which scenario, and where the boundaries are.
 
-        This is already attached to the result the first time this session calls a tool;
-        call it again if you forgot, or want to confirm the recommended approach for a
-        scenario.
+        The first call only carries a short hint. Load this optional guide when you
+        need a scenario-specific workflow or want to review a boundary.
         """
         return USAGE_GUIDE
 

@@ -619,6 +619,39 @@ def mount(ctx: AdminContext) -> None:
             return JSONResponse(error_payload(e))
         return JSONResponse({"ok": True, **out})
 
+    @mcp.custom_route("/admin/sql/transaction", methods=["POST"])
+    @guard
+    async def _sql_transaction(req: Request) -> JSONResponse:
+        """Authenticated SQL editor draft: stage, review, atomically commit or discard."""
+        f = await req.form()
+        action = str(f.get("action") or "")
+        tid = str(f.get("transaction_id") or "")
+        caller = _caller(req)
+        try:
+            project, connection = _resolve_conn(str(f.get("conn") or ""))
+            if action == "begin":
+                out = service.begin_transaction(
+                    project, connection, caller,
+                    schema=str(f.get("schema") or "").strip() or None,
+                    database=str(f.get("db") or "").strip() or None)
+            elif action == "add":
+                out = service.add_transaction_sql(tid, str(f.get("sql") or ""), caller)
+            elif action == "preview":
+                out = await anyio.to_thread.run_sync(
+                    lambda: service.preview_transaction(tid, caller, admin=True))
+            elif action == "rollback":
+                out = service.rollback_transaction(tid, caller)
+            elif action == "commit":
+                out = await anyio.to_thread.run_sync(
+                    lambda: service.commit_transaction(
+                        tid, caller, admin=True,
+                        expect_fingerprint=str(f.get("fingerprint") or "")))
+            else:
+                raise ValueError("Unknown transaction action")
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(error_payload(e))
+        return JSONResponse({"ok": True, **out})
+
     @mcp.custom_route("/admin/sql/run", methods=["POST"])
     @guard
     async def _sql_run(req: Request) -> JSONResponse:

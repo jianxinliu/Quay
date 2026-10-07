@@ -85,6 +85,7 @@ class QueryResult:
     # 结果集估算字节数（见 metrics.estimate_result_bytes）：落进审计供看板统计数据传输量。
     # 写语句无结果集，恒为 0。
     result_bytes: int = 0
+    statement_rows: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -435,16 +436,19 @@ def run_write(
     stmts = split_statements(sql) or [sql]
     start = dt.datetime.now()
     affected = 0
+    statement_rows: list[int] = []
     with engine.begin() as conn:
         if on_start is not None:
             on_start(make_canceller(engine, conn))
         for stmt in stmts:
             result = conn.execute(text(stmt))
             rc = result.rowcount if result.rowcount is not None else -1
+            statement_rows.append(max(rc, 0))
             if rc > 0:
                 affected += rc
     duration_ms = int((dt.datetime.now() - start).total_seconds() * 1000)
-    return QueryResult(columns=[], rows=[], row_count=affected, truncated=False, duration_ms=duration_ms)
+    return QueryResult(columns=[], rows=[], row_count=affected, truncated=False,
+                       duration_ms=duration_ms, statement_rows=statement_rows)
 
 
 def search_tables(engine: SAEngine, engine_kind: str, q: str, limit: int = 50) -> list[dict]:

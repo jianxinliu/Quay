@@ -84,6 +84,29 @@ def test_sql_reconnect_bad_conn_returns_error(client):
     assert r.json()["ok"] is False
 
 
+def test_sql_transaction_endpoint_reviews_and_commits_one_batch(client):
+    tc, svc = client
+    base = {"conn": "demo/main"}
+    begun = tc.post("/admin/sql/transaction", data={**base, "action": "begin"}).json()
+    assert begun["ok"] is True
+    tid = begun["transaction_id"]
+    for i in (10, 11):
+        added = tc.post("/admin/sql/transaction", data={**base, "action": "add",
+            "transaction_id": tid, "sql": f"INSERT INTO users (id,name) VALUES ({i},'u{i}')"}).json()
+        assert added["ok"] is True
+    preview = tc.post("/admin/sql/transaction", data={**base, "action": "preview",
+                                                   "transaction_id": tid}).json()
+    assert preview["kind"] == "confirm" and preview["count"] == 2
+    rejected = tc.post("/admin/sql/transaction", data={**base, "action": "commit",
+        "transaction_id": tid, "fingerprint": "wrong"}).json()
+    assert rejected["ok"] is False
+    committed = tc.post("/admin/sql/transaction", data={**base, "action": "commit",
+        "transaction_id": tid, "fingerprint": preview["fingerprint"]}).json()
+    assert committed["ok"] is True and committed["kind"] == "write"
+    out = svc.query("demo", "main", "SELECT count(*) AS n FROM users WHERE id >= 10", CALLER)
+    assert out["rows"] == [[2]]
+
+
 def test_no_auth_mode_skips_login(tmp_path):
     """--no-auth：跳过认证，本机测试脚手架用；Host 校验仍在。"""
     import sqlite3

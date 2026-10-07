@@ -485,7 +485,8 @@ async def test_tools_over_mcp_protocol(service):
 
     mcp = build_mcp(service)
     async with Client(mcp) as c:
-        assert {"list_sessions", "session_history"} <= {t.name for t in await c.list_tools()}
+        names = {item["name"] for item in (await c.call_tool("list_capabilities", {})).data}
+        assert {"list_sessions", "session_history"} <= names
 
         await c.call_tool("begin_session", {"title": "排查订单重复扣款"})
         r = await c.call_tool("execute", {
