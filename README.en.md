@@ -23,6 +23,8 @@ It's a database workbench that runs on your own machine and manages connections 
 
 The constraint on agents is an approval flow. Read-only SQL runs immediately on a read-only account. A write creates a change request with a risk report, and the original call waits in place for a human (120 seconds by default). You open the link in the conversation, review the report, and approve — the waiting call then executes the SQL stored in the change request. You don't have to go back to the chat and say "approved", and the agent doesn't have to resubmit. If the wait times out, the request stays valid and the agent continues with `wait_for_change`. Change requests expire after 60 minutes and are single-use — concurrent replays of the same request succeed exactly once. There is no path around approval for writes to production.
 
+Related writes don't each need their own approval. `transaction` stages SQL into one draft; the batch becomes a single change request, and approval runs it atomically in one database transaction — any failure rolls the whole batch back. The query console can collect the current SQL into the same kind of draft and commit it after you confirm. On the other side, an agent sees only 10 common tools when it connects. Everything else is discovered on demand, and the full usage guide is no longer pushed into every new session.
+
 Passwords live in the system keyring. Config files hold only `env://` / `keyring://` references, and credentials never appear in logs or tool output.
 
 > The name Quay means a wharf — the place your database connections converge. The Python package is `dbmcp`, the CLI is `dbm`, and the config directory is `~/.config/db-manage-mcp`.
@@ -152,7 +154,7 @@ Add one `@deepseek-ai/dsh-mcp-client` instance per MCP server in `cordis.yml`. T
 
 If a client speaks MCP streamable HTTP, the URL is `http://127.0.0.1:8100/mcp`. It listens on loopback with no auth — do not expose port 8100 on the LAN or the public internet.
 
-Every admin page (dashboard, approvals, audit, settings) shares one theme with the query console: dark by default, switchable to light in Settings. Text shared between the agent and the admin (risk reasons, checkup reports, approval errors) is always English for the agent over MCP, while the admin shows it in the language chosen in Settings (`text_language`, Chinese by default). A fresh dashboard shows a three-step onboarding (add a connection → run a query → connect an agent), and connections that were never reached show as "unprobed" rather than "ok".
+Every admin page (dashboard, approvals, audit, settings) shares one theme with the query console: dark by default, switchable to light in Settings. Text shared between the agent and the admin (risk reasons, checkup reports, approval errors) is always English for the agent over MCP, while the admin shows it in the language chosen in Settings (`text_language`, Chinese by default).
 
 ## How it's organized
 
@@ -160,6 +162,7 @@ Every admin page (dashboard, approvals, audit, settings) shares one theme with t
 flowchart TB
     DB[("MySQL · PostgreSQL · SQLite · ClickHouse · Redis<br/>(internal DBs over multi-hop SSH)")]
     DB --> GOV["Governance layer<br/>connection & credential management · reader/writer accounts<br/>SQL risk audit · reject-and-resubmit approval · full audit log · masking"]
+    GOV --> T0["Dashboard<br/>connections · traffic · who is querying (people)"]
     GOV --> T1["Query console<br/>SQL IDE (people)"]
     GOV --> T2["Redis console<br/>(people)"]
     GOV --> T3["Analysis workbench<br/>DuckDB cross-source (people + agents)"]
@@ -178,7 +181,11 @@ A DataGrip-style SQL IDE in the browser:
 - Results export to CSV / JSON / Markdown / xlsx, or switch to bar, line, pie, and scatter charts with per-column SUM / COUNT / AVG aggregation. Chart config is saved with the workflow and redrawn on re-run.
 - Queries run asynchronously on the server, so switching pages or reloading doesn't interrupt them; you come back and pick up the results. Tabs are preserved, result sets included. A running query can be cancelled — cancellation issues `KILL QUERY` / `pg_cancel_backend` against the database, actually terminating the statement rather than just dropping the client connection.
 
-Running a write statement in the console first shows a risk report — which tables are affected, an estimated row count, whether an index is hit, the execution plan — and only after you confirm does the writer account execute it, with an audit record. This is a bypass for humans; agent writes still go through the approval flow. When connected to a production database, the whole console gets a red border. ClickHouse is read-only analysis for now — there is no writer account on those connections.
+Running a write statement in the console first shows a risk report — which tables are affected, an estimated row count, whether an index is hit, the execution plan — and only after you confirm does the writer account execute it, with an audit record. Several writes can be collected in the transaction-draft bar above the results, reviewed as one batch, and committed in a single database transaction. This is a bypass for humans; agent writes still go through the approval flow. When connected to a production database, the whole console gets a red border. ClickHouse is read-only analysis for now — there is no writer account on those connections.
+
+A PostgreSQL connection binds one database, so each editor tab remembers its own. Switching databases affects only the current tab, and the tree follows it. MySQL sees every database on one connection, so it has no such switch. A dropped connection keeps retrying on backoff and returns to healthy on its own once the database is back; the page can also reconnect immediately.
+
+Right-click a connection in the tree to open Users & privileges (PostgreSQL / MySQL): account grants and a table-by-account matrix. Privilege changes are statements the server generates, and production asks you to retype the connection name. This is not available to agents either.
 
 <details>
 <summary><b>Redis console</b> (expand for a screenshot)</summary>
@@ -211,6 +218,14 @@ The query console and the dedicated workflow page both have a DAG canvas: drag n
 
 </details>
 
+## Dashboard, checkup, audit
+
+The dashboard shows how the system is being used right now: connection health, who is querying, operation counts and bytes read in the selected window, and how much context each agent session has spent. The audit log is written only after an operation finishes, so it cannot answer "who is querying now" — that panel comes from the in-process registry of in-flight work. A fresh install walks through three steps: add a connection, run a query, connect an agent. A connection that was never reached shows as "unprobed", not "ok".
+
+A checkup returns a structured diagnosis in one call — a button in the console, and `db_checkup` for agents. MySQL and PostgreSQL have 16 checks each, ClickHouse 8, SQLite 5: connections, cache, long queries, locks, replication lag, largest tables. A check that cannot be measured is marked `unknown` with the reason, instead of failing the report; missing privileges come with a GRANT you can copy. `db_checkup_all` folds every database on the instance into one report. The report can be handed to the AI for a written diagnosis; that step only analyzes, it does not run SQL.
+
+The audit log records every call: agent, time, connection, SQL, row count, duration, and approval outcome. After an agent calls `begin_session`, that session's SQL is grouped on the audit page. Later it can find its own work again with `list_sessions` / `session_history`. A write can carry a rollback note — the old values and how to undo them — which the approver sees, and which the agent can retrieve later to build the undo statement.
+
 ## AI assistant (optional)
 
 The query console and the DAG canvas have an "✨ AI" entry point: describe what you want in plain language, and the AI generates SQL — or a whole workflow graph — from the table structures you select.
@@ -226,6 +241,10 @@ The query console and the DAG canvas have an "✨ AI" entry point: describe what
 2. A person opens the link in the conversation (or `/admin/approvals`), reviews the risk report, and approves or rejects it. Approval also works in-session via elicitation, or from the CLI (`dbm approvals` / `approve` / `reject`). The backend has **Approve and execute**: one click lands the change immediately.
 3. The waiting call then **runs the SQL stored in the change request** and returns `status=executed`. The user does not have to come back to the chat and say "approved", and the agent does not have to resubmit. The resubmitted text is only fingerprint-checked and rejected on mismatch.
 4. If the wait times out, the call returns `approval_required`. The change request is still valid for 60 minutes; the agent continues with `wait_for_change`. On rejection, the reason is returned so the agent can revise and resubmit.
+
+For several statements, use `transaction` instead: staging does not touch the database, commit creates one change request for the frozen batch, and approval runs it in one database transaction that rolls back on any failure. Drafts expire after one hour. MySQL drafts accept DML only.
+
+`sync_table` copies a table from production to local: the original CREATE TABLE on the same engine, an approximate DDL across engines, and a small filtered slice of rows. A local/dev target runs immediately and is still audited; staging goes through approval; the target cannot be prod. `sync_table_ddl` copies structure only.
 
 New change requests appear in the bell in the admin UI. Bark / WeCom / Feishu can be turned on in system settings. Success is not pushed — a notification is sent only when a person needs to approve.
 
@@ -246,27 +265,39 @@ External channels can also carry a **one-time approval link** (off by default): 
 
 ## MCP tools
 
+Only 10 common entry points are listed by default: `list_projects`, `list_connections`, `begin_session`, `query`, `execute`, `wait_for_change`, `transaction`, plus `list_capabilities`, `capability_detail`, and `call_capability`. The other capabilities are found by name (a one-line summary), inspected for their full description and parameters, then invoked. Clients that already know a tool name can still call it directly. The table below is the full set of main capabilities, not the list shown at connect time.
+
 | Tool | What it does |
 |---|---|
 | `begin_session(title, note?)` | Name the session so later SQL is grouped on the audit page |
 | `list_projects` / `list_connections` | Browse available connections (no credentials; Redis connections are not listed) |
 | `list_databases` | List databases / schemas (call this first when the connection has no default database) |
+| `list_server_databases` | PostgreSQL: list databases on the server. Pass `pg_database` to the other tools to work in that database |
 | `query(project, connection, sql)` | Read-only SQL; anything else is rejected and audited; a missing LIMIT is injected |
 | `export_table(...)` | Export a table as CSV / JSON / Markdown / xlsx; returns a short-lived download URL (file body stays out of context) |
 | `execute(project, connection, sql, reason?, change_id?, wait_seconds?)` | Writes: creates a change request, waits for approval, then runs |
+| `transaction(action, project, connection, transaction_id?, sql?)` | Stage write SQL across calls (`begin` / `add` / `preview` / `commit` / `rollback`). Commit submits the frozen batch for one approval and runs it atomically. MySQL drafts accept DML only |
 | `wait_for_change(change_id)` / `get_change_status(change_id)` | Keep waiting after a timeout / inspect the change request immediately |
-| `sync_table(...)` | Copy a table from one database to another (typically production → local): structure plus a bounded slice of rows; same approval flow as `execute`; the target cannot be prod |
+| `sync_table(...)` | Copy a table from one database to another (typically production → local): structure plus a bounded slice of rows. A local/dev target runs immediately (still audited); staging uses the same approval flow as `execute`. The target cannot be prod |
+| `sync_table_ddl(...)` | Copy structure only, no rows — rebuild empty tables locally from production. Comma-separated table names |
 | `list_tables` / `describe_table` / `sample_rows` | Explore schema |
-| `db_checkup(project, connection, database?, pg_database?)` | Database health check: returns a structured diagnostic report in one call (connections / cache hit ratio / long queries / locks / replication lag / biggest tables…). Each check degrades gracefully — an item that can't be measured is marked `unknown` with the reason instead of failing the report. |
+| `db_checkup` / `db_checkup_all` | Check one database, or fold every database on the instance into one report. Unmeasured items are `unknown`; missing privileges come with a GRANT |
+| `table_ddl(project, connection, table, database?)` | Show the original CREATE TABLE (indexes, partitions, charset, comments). Comma-separated names fetch several at once |
 | `test_connection` | Connectivity check |
 | `analysis_workspaces` / `analysis_import` / `analysis_sql` | DuckDB cross-source analysis (fetches audited and row-capped, computation free in the sandbox) |
 | `save_workflow` / `run_workflow` | Persist an analysis as a re-runnable workflow (script or DAG canvas) |
+| `usage_guide()` | Fetch the full usage guide on demand (through the capability catalog) |
+| `list_sessions` / `session_history` | Find this agent's past sessions and what they did, including rollback notes. SQL text is omitted unless asked for |
+| `allow_more_results(reason)` | After this session's result quota is used up, call this **only once the user has agreed**, to grant one more allowance |
 
 Query results going to agents get several specific treatments:
 
 - Output is compact TSV rather than JSON, which measures out to roughly 25% fewer tokens.
 - Results have two hard caps: rows (1000 by default) and characters (40000 by default, roughly 12k tokens). Past a cap, the result is truncated with a hint to narrow with WHERE or aggregation. The caps are enforced server-side — an agent cannot blow up its own context.
 - Integers beyond JavaScript's safe range (2⁵³−1) are returned as strings, so snowflake IDs and the like keep their precision.
+- The first successful tool call in a session attaches a short hint. The full guide is fetched on demand via `usage_guide`, so a new session does not automatically spend a large chunk of context. The hint can be turned off in settings.
+- **Token counts.** With the optional `tokenizer` extra (tiktoken), the dashboard counts real tokens; otherwise it estimates from character classes and labels the number as an estimate. The gap is large — tabs, numeric ids, and short fields in TSV each become their own tokens, and the heuristic under-reports by nearly half. The vocabulary is cached in the data directory after the first load, then works offline.
+- **Session result quota.** Once a session has returned more than the cap (400,000 characters, about 114k tokens, by default), further fetches are refused until the agent asks you and, with your agreement, calls `allow_more_results`. A per-call cap does not stop "just one more query"; this gate is the whole session. Usage and grants show on the dashboard.
 
 Redis is deliberately not exposed to agents — only people operate it, through the backend console.
 
