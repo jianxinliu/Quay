@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
+本次发布的主线：流程运行在界面上留痕、数据库体检升级（记录 / 选库 / 诊断闭环）、
+agent 侧新增跨调用事务草稿与按需能力发现，以及若干连接健壮性修复。
+
 ### Added
 - **流程运行留痕图**：每次流程运行（agent 触发、手工、定时）完成时把当时画布上的流程图连同拓扑一起存进运行记录，运行详情页直接画出这张图、节点按结果染色（成功/失败/进行中）。以前跑完只剩一份步骤列表，图只在画布上、跑完就看不到「当时是长什么样、哪个节点出的错」。
 - **AI 助手配置：连通性测试 + 模型下拉**：设置页「AI 助手」新增「测试连通性」按钮（CLI 型检查可执行文件，API 型实际请求一次模型接口）；模型名不再手输，改成从服务商拉取的模型列表里选（可下拉刷新，凭据不可用时仍允许手填）。
@@ -118,5 +123,6 @@
 - **Redis 控制台**：对标 Medis 单开一页（库→键前缀树、类型徽章、命令窗口、命令文档面板）。
 - **Agent 侧**：MCP 工具（query/execute/analysis/workflow）；输出改紧凑 TSV + 结果大小双重硬限。
 
-[Unreleased]: https://github.com/jianxinliu/Quay/compare/v0.1.0...main
+[Unreleased]: https://github.com/jianxinliu/Quay/compare/v0.2.0...main
+[0.2.0]: https://github.com/jianxinliu/Quay/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jianxinliu/Quay/releases/tag/v0.1.0

@@ -3,4 +3,4 @@
 包名沿用 dbmcp、CLI 沿用 dbm（品牌名 Quay 只作对外展示）。
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
