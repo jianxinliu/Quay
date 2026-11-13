@@ -61,7 +61,17 @@ def delete_keyring_secret(ref: str) -> None:
         pass
 
 
-def resolve_secret(ref: str) -> str:
+def resolve_secret(ref: str | None) -> str:
+    """把引用解析成密钥。**空引用 = 没有密码**，返回空串而不是报格式错。
+
+    有些连接本来就可以没有密码：Redis 的无认证实例、ClickHouse 的 default 用户
+    （示例配置里明写「可省略」）。空串走「未知的密钥引用格式」那条分支的话，
+    报错指向配置格式、与真实原因毫无关系，用户只会以为配置写错了。
+    裸字符串仍然一律报错（防止明文密码混进配置）——只有「什么都没写」才放行。
+    """
+    if not ref:
+        return ""
+
     if ref.startswith("env://"):
         var = ref.removeprefix("env://")
         value = os.environ.get(var)

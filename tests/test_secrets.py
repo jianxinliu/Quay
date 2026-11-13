@@ -18,6 +18,16 @@ def test_plain_ref():
     assert resolve_secret("plain://hello") == "hello"
 
 
+def test_empty_ref_means_no_password():
+    """省略密码是合法配置（ClickHouse 的 default 用户、无 auth 的本地实例）。
+
+    「没配」必须解析成「没有密码」，不能走「未知的密钥引用格式」那条分支——
+    否则用户看到的是配置格式错误，真实原因是这个连接本来就不需要密码。
+    """
+    assert resolve_secret("") == ""
+    assert resolve_secret(None) == ""
+
+
 def test_bare_string_rejected():
     # 裸字符串（疑似明文密码直接写进配置）必须报错
     with pytest.raises(SecretResolveError, match="未知的密钥引用格式"):
