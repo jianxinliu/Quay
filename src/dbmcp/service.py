@@ -299,6 +299,7 @@ class DbmService:
         self.workflows = None  # WorkflowStore（serve 时注入）
         self.schedules = None  # WorkflowScheduleStore（serve 时注入）
         self.runs = None       # WorkflowRunStore（serve 时注入）
+        self.checkup_records = None  # CheckupRecordStore（serve 时注入；未注入则体检不留痕）
         self._housekeeping_stop: threading.Event | None = None
         self._scheduler_stop: threading.Event | None = None
         # 记录本进程周期内已经为哪一分钟执行过（防止 30s tick 在同一分钟触发两次）
@@ -1823,6 +1824,49 @@ class DbmService:
     def workflow_delete(self, name: str) -> None:
         self._require_workflows().delete(name)
 
+    def _workflow_graph_snap(self, name: str) -> str:
+        """取一个 workflow 当前图的 JSON 快照（运行记录用）；脚本式/取不到返回空串。"""
+        import json
+
+        if self.workflows is None:
+            return ""
+        try:
+            wf = self.workflows.get(name)
+        except Exception:  # noqa: BLE001
+            return ""
+        return json.dumps(wf.graph, ensure_ascii=False) if wf and wf.graph else ""
+
+    def workflow_run_traced(self, name: str, caller: CallerInfo,
+                            triggered_by: str = "agent") -> dict:
+        """运行 workflow 并在运行历史里留痕（agent / 后台手工入口）。
+
+        与调度入口 `_run_scheduled` 的区别：那边自管 run_id（还要产出 xlsx、发通知），
+        这里只负责「起一条记录 → 跑 → 把图快照/各步状态/输出预览写回去」。
+        图快照让运行详情页能画出「这次跑的是哪张图、哪个节点成功」——
+        agent 触发的流程分析因此也能在界面上回溯。
+        运行历史未启用（未 serve / 测试装配）时退化为纯运行，不抛。
+        """
+        if self.runs is None:
+            return self.workflow_run(name, caller)
+        snap = self._workflow_graph_snap(name)
+        run_id = self.runs.start(name, triggered_by=triggered_by)
+        try:
+            out = self.workflow_run(name, caller)
+        except Exception as e:  # noqa: BLE001
+            self.runs.finish(run_id, "failed", error=f"{type(e).__name__}: {e}",
+                             graph_snap=snap)
+            raise
+        ok = out.get("ok") is True
+        steps = out.get("steps") or []
+        err = "" if ok else ((steps[-1].get("error") if steps else "") or "运行失败")
+        op = out.get("output") or None
+        preview = ({"columns": op.get("columns") or [],
+                    "rows": (op.get("rows") or [])[:100],
+                    "row_count": op.get("row_count", 0)} if op else {})
+        self.runs.finish(run_id, "ok" if ok else "failed", steps=steps,
+                         output_preview=preview, error=err, graph_snap=snap)
+        return out
+
     def workflow_run(self, name: str, caller: CallerInfo) -> dict:
         """一键重跑：按 sources 重拉数据 → 逐条执行（脚本语句或 DAG 编译结果）→ 输出。
 
@@ -3074,21 +3118,64 @@ class DbmService:
             raise ValueError(
                 "Redis connections do not support health checks (Redis is not exposed to "
                 "the agent; use the Redis console in the admin backend instead)")
-        scope = schema or cfg.database
-        return self._checkup_one(project, connection, cfg, caller, scope, database).to_dict()
+        # scope 只是「检视范围」的展示值：PG 选了别的库时以那个库名展示（cfg.database
+        # 只是连接默认库）。**schema 过滤值必须单独传**——把库名当 PG 的 schema 传下去，
+        # 大表/膨胀这类按 schema 过滤的检查会落到一个不存在的 schema 上、静默返回空。
+        scope = schema or database or cfg.database
+        report = self._checkup_one(project, connection, cfg, caller, schema, database,
+                                   detail=scope).to_dict()
+        if not report.get("scope"):
+            report["scope"] = scope or ""
+        self._save_checkup_record(project, connection, report)
+        return report
+
+    def _save_checkup_record(self, project: str, connection: str, report: dict,
+                             *, instance_scope: bool = False) -> None:
+        """体检结果落一份历史（后台体检弹窗「记录」页）。
+
+        未注入存储（单测 / 库内直用）或写库失败都不该让体检本身失败——历史是附加价值。
+        instance_scope 由调用方给：报告 dict 里没有这个顶层字段，不能从里面取。
+        """
+        if self.checkup_records is None:
+            return
+        try:
+            self.checkup_records.save(project, connection, report,
+                                      instance_scope=instance_scope)
+        except Exception:  # noqa: BLE001
+            logger.exception("保存体检记录失败：%s", connection)
+
+    def checkup_records_list(self, project: str, connection: str,
+                             limit: int = 50, offset: int = 0) -> list[dict]:
+        """某项目某连接的历史（project 一起过滤：不同项目可以有同名连接）。"""
+        if self.checkup_records is None:
+            return []
+        return self.checkup_records.list(project, connection, limit, offset)
+
+    def checkup_record_get(self, record_id: int) -> dict | None:
+        if self.checkup_records is None:
+            return None
+        return self.checkup_records.get(record_id)
+
+    def checkup_record_delete(self, record_id: int) -> bool:
+        if self.checkup_records is None:
+            return False
+        return self.checkup_records.delete(record_id)
 
     def _checkup_one(
         self, project: str, connection: str, cfg: ConnectionConfig, caller: CallerInfo,
-        scope: str | None, database: str | None = None,
+        scope: str | None, database: str | None = None, detail: str | None = None,
     ) -> "checkup.CheckupReport":
         """单库体检（db_checkup / db_checkup_all 共用）：建引擎 + 审计 + 跑检查项。
 
+        scope 是**过滤值**：MySQL/ClickHouse 的库名、PG 的 schema 名（None = 默认 schema）。
         database 只对 needs_database_layer 的引擎（PG）有意义——一条 PG 连接只绑一个
         库，换库必须另建连接；MySQL/ClickHouse 的 schema 就是库，靠 scope 指定即可。
+        detail 只是审计里记的「检的哪个库」文本，默认跟 scope 一致（PG 选库时两者不同）。
         """
         engine = self.pool.get(project, connection, cfg, database=database)
         return self._audited(
-            project, connection, cfg, "checkup", scope or "", caller,
+            project, connection, cfg, "checkup",
+            detail if detail is not None else (scope or ""), caller,
             lambda: checkup.run_checkup(engine, cfg.engine, scope),
         )
 
@@ -3131,14 +3218,19 @@ class DbmService:
         last_err = ""
         for db in dbs:
             try:
+                # PG 的 db 是库名，不是 schema：别拿它当 schema 过滤值（过滤到不存在的
+                # schema 会让大表/膨胀这类检查静默返回空），让它用各自的 current_schema()
                 reports.append((db, self._checkup_one(
-                    project, connection, cfg, caller, scope=db,
-                    database=db if per_db_engine else None)))
+                    project, connection, cfg, caller,
+                    scope=None if per_db_engine else db,
+                    database=db if per_db_engine else None, detail=db)))
             except Exception as e:  # noqa: BLE001 - 某个库失败不废掉整份报告
                 last_err = f"{db}: {e}"
         if not reports:
             raise QueryRejected(f"Health check failed for every database (last error: {last_err})")
-        return checkup.merge_reports(cfg.engine, reports).to_dict()
+        merged = checkup.merge_reports(cfg.engine, reports).to_dict()
+        self._save_checkup_record(project, connection, merged, instance_scope=True)
+        return merged
 
     def admin_table_sizes(
         self, project: str, connection: str, caller: CallerInfo, schema: str | None = None,
@@ -3336,6 +3428,53 @@ class DbmService:
                                  touch_db=False)
         except ai.AIError as e:
             raise QueryRejected(str(e)) from e
+
+    def ai_probe(self) -> dict:
+        """探测 AI 配置是否可用（设置页「测试连通性」）。只读，不消费 token。
+
+        - claude / codex：只确认 CLI 可执行文件可达（不执行——非 TTY 下可能卡在等输入）；
+        - api：用钥匙串/环境变量里的密钥拉一次 /v1/models，一次验证密钥与端点都通。
+        返回 {ok, detail[, model_count]}，不抛异常（调用方直接展示 detail）。
+        """
+        from . import ai
+
+        s = self.get_settings()
+        provider = str(s.get("ai_provider") or "claude")
+        if provider != "api":
+            return ai.probe_cli(provider, str(s.get("ai_cli_path") or ""))
+        timeout = min(int(s.get("ai_timeout_s") or 60), 30)
+        try:
+            models = ai.list_models(api_base=str(s.get("ai_api_base") or ""),
+                                    api_format=str(s.get("ai_api_format") or "anthropic"),
+                                    api_key_env=str(s.get("ai_api_key_env") or ""),
+                                    timeout=timeout)
+        except ai.AIError as e:
+            return {"ok": False, "detail": str(e)}
+        return {"ok": True, "model_count": len(models),
+                "detail": f"连通，可用模型 {len(models)} 个"}
+
+    def ai_model_list(self) -> dict:
+        """拉取 HTTP API 端点的可用模型（设置页「模型」下拉的数据源）。
+
+        只有 provider=api 有意义；CLI 后端的模型名由其账号决定，无从枚举。
+        失败返回 {ok: False, error}，页面提示后仍允许手动填写模型名。
+        """
+        from . import ai
+
+        s = self.get_settings()
+        provider = str(s.get("ai_provider") or "claude")
+        if provider != "api":
+            return {"ok": False,
+                    "error": "只有 HTTP API 后端支持拉取模型列表；CLI 后端请手动填写模型名"}
+        timeout = min(int(s.get("ai_timeout_s") or 60), 30)
+        try:
+            models = ai.list_models(api_base=str(s.get("ai_api_base") or ""),
+                                    api_format=str(s.get("ai_api_format") or "anthropic"),
+                                    api_key_env=str(s.get("ai_api_key_env") or ""),
+                                    timeout=timeout)
+        except ai.AIError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "models": models}
 
     def ai_generate_workflow(
         self, project: str, connection: str, question: str, caller: CallerInfo,
@@ -3889,7 +4028,7 @@ class DbmService:
         stats = {"engines_reaped": 0, "redis_reaped": 0, "audit_purged": 0,
                  "changes_purged": 0, "notifications_purged": 0,
                  "workflow_runs_purged": 0, "exports_purged": 0,
-                 "transactions_reaped": 0}
+                 "transactions_reaped": 0, "checkup_reports_purged": 0}
         for key, fn in (
             ("engines_reaped", self.pool.reap_idle),
             ("redis_reaped", self.redis_pool.reap_idle),
@@ -3904,6 +4043,10 @@ class DbmService:
             ("workflow_runs_purged", self._purge_workflow_runs),
             # MCP 临时导出：固定一小时 TTL，与审计保留期无关
             ("exports_purged", self.purge_mcp_exports),
+            # 体检历史：与审计同一保留期（历史快照放久了也没参考价值）
+            ("checkup_reports_purged",
+             (lambda: self.checkup_records.purge_older_than(retention_days))
+             if self.checkup_records else (lambda: 0)),
         ):
             try:
                 stats[key] = fn()
@@ -3984,7 +4127,8 @@ class DbmService:
         """手动立即触发一次调度（后台线程跑，不阻塞调用方）。
 
         走完全跟 cron 到点相同的链路：入 workflow_run → 后台跑 → 通知。
-        与用户在流程详情页 ▶ 运行的区别：那个是前台同步、不入 workflow_run 表、不发通知；
+        与用户在流程详情页 ▶ 运行的区别：那个是前台同步、不发通知
+        （但同样入 workflow_run 留痕，见 workflow_run_traced）；
         这个是把「计划本来会自动跑的一次」提前到现在。
         """
         if self.workflows is None or self.workflows.get(name) is None:
@@ -4039,11 +4183,15 @@ class DbmService:
         if self.runs is None or self.workflows is None:
             return
         try:
+            # 同一流程同时只跑一份：手工/agent 触发的运行现在也落 'running' 记录
+            # （见 workflow_run_traced），撞上调度点就跳过本次，避免同一工作区并发跑
             if self.runs.running_for(name):
-                logger.warning("scheduler: workflow %s 上次未完成，跳过本次调度", name)
+                logger.warning("scheduler: workflow %s 已在运行（含手工/agent 触发），跳过本次调度", name)
                 return
             sched = self.schedules.get(name) if self.schedules is not None else None
             run_id = self.runs.start(name, triggered_by="schedule")
+            # 运行时那张图的快照：运行详情页据此画出「哪张图、各节点状态」
+            graph_snap = self._workflow_graph_snap(name)
             # 走既有 workflow_run（此处 caller 用 scheduler；审计记录里区分）
             sched_caller = CallerInfo(agent="scheduler", session_id=f"sched-{run_id}")
             try:
@@ -4066,9 +4214,10 @@ class DbmService:
                                  output_preview=op_saved,
                                  error="" if ok else (
                                      (out.get("steps") or [{}])[-1].get("error", "") or "运行失败"),
-                                 xlsx_path=xlsx_path)
+                                 xlsx_path=xlsx_path, graph_snap=graph_snap)
             except Exception as e:  # noqa: BLE001
-                self.runs.finish(run_id, "failed", error=f"{type(e).__name__}: {e}")
+                self.runs.finish(run_id, "failed", error=f"{type(e).__name__}: {e}",
+                                 graph_snap=graph_snap)
                 ok = False
             # 更新 schedule 元数据
             if self.schedules is not None:
@@ -4212,3 +4361,5 @@ class DbmService:
             self.schedules.close()
         if self.runs is not None:
             self.runs.close()
+        if self.checkup_records is not None:
+            self.checkup_records.close()

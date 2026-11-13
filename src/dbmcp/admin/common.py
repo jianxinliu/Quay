@@ -303,6 +303,17 @@ def _set_section(title: str, desc: str, rows: str, guard: bool = False,
     return f"<section class='{classes}'><header>{head}</header>{rows}</section>"
 
 
+def _set_actions(buttons: str, msg_id: str = "") -> str:
+    """分区内的常驻操作行（测试连通性、刷新模型这类即时动作）。
+
+    **不能放进 `.set-bar`**：那条只有存在未保存改动时才浮出（opacity:0 +
+    pointer-events:none），页面一打开按钮既看不见也点不了，用户得先随手改个字段
+    才能发现它们。动作按钮属于「随时可点」，就近放在它作用的分区里。
+    """
+    msg = f"<span class='msg' id='{msg_id}'></span>" if msg_id else ""
+    return f"<div class='set-actions'>{buttons}{msg}</div>"
+
+
 def _settings_layout(sections: str, active: str, actions: str = "") -> str:
     """表单型设置页的外壳：分区导航 + 表单 + 浮出的改动条。"""
     return ("<div class='set-page'>"

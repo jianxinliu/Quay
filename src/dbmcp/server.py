@@ -1471,7 +1471,7 @@ def build_mcp(service: DbmService) -> FastMCP:
         caller = _caller_from_ctx(ctx)
         try:
             return await anyio.to_thread.run_sync(
-                lambda: service.workflow_run(name, caller))
+                lambda: service.workflow_run_traced(name, caller, triggered_by="agent"))
         except Exception as e:  # noqa: BLE001
             raise agent_error(e) from e
 

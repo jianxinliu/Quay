@@ -247,6 +247,8 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     service.workflows = WorkflowStore(db_path)
     service.schedules = WorkflowScheduleStore(db_path)
     service.runs = WorkflowRunStore(db_path)
+    from .checkup_records import CheckupRecordStore
+    service.checkup_records = CheckupRecordStore(db_path)  # 体检历史（后台弹窗「记录」页）
     service.data_dir = args.data_dir  # xlsx 产物落到 data_dir/workflow_runs/{run_id}/
     public_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     service.base_url = f"http://{public_host}:{args.port}"

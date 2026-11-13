@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
@@ -19,6 +20,7 @@ from .common import (
     _num_setting,
     _plain_settings_page,
     _select_setting,
+    _set_actions,
     _set_row,
     _set_section,
     _settings_layout,
@@ -163,6 +165,48 @@ _AI_PROVIDER_TOGGLE_JS = """<script>
 })();
 </script>"""
 
+# AI 设置页的两个辅助动作：拉模型列表、测连通性。
+# 结果写进分区动作行自己的 .msg（与通知页「发送测试」同一套做法）——
+# 别写进改动条：那条无未保存改动时整条隐藏，结果和按钮会一起消失。
+# 模型列表用 datalist 承载：点开输入框即见下拉，列表拉不到时照常手填。
+_AI_MODEL_JS = """<script>
+(function(){
+  var dl=document.getElementById('ai-model-list');
+  var hint=document.getElementById('ai-model-hint');
+  var msg=document.getElementById('ai-act-msg');
+  var sel=document.querySelector("select[name='ai_provider']");
+  function say(text){ if(msg) msg.textContent=text; }
+  function fill(models){
+    if(!dl) return;
+    dl.innerHTML=(models||[]).map(function(m){
+      return "<option value='"+String(m.id).replace(/'/g,'&#39;')+"'>"
+             +(String(m.name||m.id).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';}))+"</option>";
+    }).join("");
+    if(hint) hint.textContent=(models&&models.length)? ('已拉取 '+models.length+' 个模型，点输入框可选') : '';
+  }
+  function loadModels(){
+    if(!dl) return;
+    fetch('/admin/settings/ai/models').then(function(r){return r.json();}).then(function(d){
+      if(d&&d.ok){ fill(d.models); say('模型列表已刷新（'+d.models.length+' 个）'); }
+      else { say('模型列表拉取失败：'+((d&&d.error)||'未知错误')); }
+    }).catch(function(e){ say('模型列表拉取失败：'+e); });
+  }
+  document.getElementById('ai-model-refresh')?.addEventListener('click', function(e){
+    e.preventDefault(); loadModels();
+  });
+  document.getElementById('ai-test')?.addEventListener('click', function(e){
+    e.preventDefault(); say('测试中…');
+    fetch('/admin/settings/ai/probe', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
+      if(d&&d.ok) say('连通正常：'+(d.detail||''));
+      else say('测试失败：'+((d&&d.detail)||(d&&d.error)||'未知错误'));
+    }).catch(function(e){ say('测试失败：'+e); });
+  });
+  // 进页面时：只有 HTTP API 后端才有模型列表可拉；CLI 后端的模型名由账号决定。
+  if(sel && sel.value==='api') loadModels();
+  sel?.addEventListener('change', function(){ if(sel.value==='api') loadModels(); });
+})();
+</script>"""
+
 
 def _settings_ai_body(s: dict) -> str:
     # provider 的显隐由 _AI_PROVIDER_TOGGLE_JS 在前端做（切后端即时生效，不必回服务端）
@@ -173,6 +217,22 @@ def _settings_ai_body(s: dict) -> str:
         "placeholder='填入以覆盖'>"
         "<label class='clearkey'><input type='checkbox' name='ai_api_key_clear' value='1'>"
         " 清除已存</label>")
+
+    # 模型：输入框 + datalist —— 拍「从当前 API 拉到的模型列表」选，列表拉不到时仍可手填。
+    # 用 datalist 而不是 <select>：手填过的模型名（比如接口新上、列表里还没有）不能在
+    # 保存时被下拉吞掉，datalist 让「选」和「填」共存，字段名与保存语义都不变。
+    cur_model = str(s.get("ai_model") or "claude-sonnet-5")
+    model_ctl = (
+        f"<input type='text' name='ai_model' id='ai_model' value='{_esc(cur_model)}'"
+        f" list='ai-model-list' placeholder='{_esc('claude-sonnet-5')}'>"
+        "<datalist id='ai-model-list'></datalist>"
+        "<span class='read' id='ai-model-hint'></span>")
+
+    # 两个动作按钮放在「AI 后端」分区尾部，不进取改动条（那条无改动时是隐藏的）
+    ai_actions = ("<button type='button' id='ai-model-refresh'"
+                  " title='从当前 API 端点拉取可用模型列表'>刷新模型</button>"
+                  "<button type='button' id='ai-test'"
+                  " title='检查当前 AI 后端是否可用（只读探测，不消耗 token）'>测试连通性</button>")
 
     backend = _set_section(
         "AI 后端", "生成 SQL 与流程图的模型从哪来。产物只回填编辑器，绝不自动执行。",
@@ -188,8 +248,11 @@ def _settings_ai_body(s: dict) -> str:
         + _text_setting("CLI 路径", "ai_cli_path", s, "",
                         "留空用后端默认的二进制名；不在 PATH 里就填绝对路径。")
         + "</div>"
-        + _text_setting("模型", "ai_model", s, "claude-sonnet-5",
-                        "Claude 用 claude-*；CodeX 用其账号支持的模型名；api 用对应厂商模型名。"))
+        + _set_row("ai_model", "模型",
+                   "从「刷新模型」拉到的列表里选；拉不到时手动填写。"
+                   "Claude 用 claude-*；CodeX 用其账号支持的模型名；api 用对应厂商模型名。",
+                   model_ctl, s)
+        + _set_actions(ai_actions, "ai-act-msg"))
 
     api = ("<div class='ai-api-only'>" + _set_section(
         "HTTP API", "直连模型厂商的端点。密钥存进系统钥匙串，绝不写入设置库或日志。",
@@ -220,7 +283,8 @@ def _settings_ai_body(s: dict) -> str:
                    f"<textarea name='ai_workflow_prompt' rows='6'>{_esc(s.get('ai_workflow_prompt', ''))}</textarea>",
                    s, wide=True))
 
-    return _settings_layout(backend + api + advanced, "ai") + _AI_PROVIDER_TOGGLE_JS
+    return (_settings_layout(backend + api + advanced, "ai")
+            + _AI_PROVIDER_TOGGLE_JS + _AI_MODEL_JS)
 
 
 # 通知主渠道切换：按选中的 provider 显隐对应字段块
@@ -293,15 +357,17 @@ def _settings_notify_body(s: dict) -> str:
                         "链接用一次即作废、随审批单一起过期；令牌会经过你选的通知服务商，"
                         "且只有「跳转地址」能从收通知的设备访问时才可用。")
         + _bool_setting("macOS 本地通知", "notify_macos_enabled", s, False,
-                        "开启", "关闭", macos_hint))
+                        "开启", "关闭", macos_hint)
+        + _set_actions("<button type='button' id='notify-test'>发送测试</button>",
+                       "notify-act-msg"))
 
-    test_btn = "<button type='button' class='reset' id='notify-test'>发送测试</button>"
-    return (_settings_layout(channel, "notify", actions=test_btn)
+    # 「发送测试」是随时可点的动作，放分区里而不是改动条（那条无改动时隐藏）
+    return (_settings_layout(channel, "notify")
             + _NOTIFY_PROVIDER_TOGGLE_JS
             + """<script>
 document.getElementById('notify-test')?.addEventListener('click', async function(){
-  var m=document.querySelector('.set-bar .msg'), bar=document.querySelector('.set-bar');
-  bar?.classList.add('on'); if(m)m.textContent='发送中…';
+  var m=document.getElementById('notify-act-msg');
+  if(m)m.textContent='发送中…';
   try{
     var r=await fetch('/admin/notifications/test', {method:'POST'});
     var d=await r.json();
@@ -585,6 +651,26 @@ def mount(ctx: AdminContext) -> None:
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "settings": settings})
+
+    @mcp.custom_route("/admin/settings/ai/probe", methods=["POST"])
+    @guard
+    async def _settings_ai_probe(_req: Request) -> JSONResponse:
+        """测试 AI 后端连通性（只读探测，不消费 token）。CLI 后端只查可执行文件。"""
+        try:
+            out = await anyio.to_thread.run_sync(service.ai_probe)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "detail": str(e)}, status_code=400)
+        return JSONResponse(out)
+
+    @mcp.custom_route("/admin/settings/ai/models", methods=["GET"])
+    @guard
+    async def _settings_ai_models(_req: Request) -> JSONResponse:
+        """拉取当前 HTTP API 端点的可用模型列表（模型输入框的 datalist 数据源）。"""
+        try:
+            out = await anyio.to_thread.run_sync(service.ai_model_list)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse(out)
 
     @mcp.custom_route("/admin/settings", methods=["GET"])
     @guard

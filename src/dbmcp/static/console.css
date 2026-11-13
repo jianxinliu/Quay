@@ -1217,7 +1217,9 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
 .dg-checkup .hd .t { font-weight: 600; color: var(--dg-text); font-size: 13px; }
 .dg-checkup .hd .sub { color: var(--dg-muted); font-size: 11.5px; font-family: var(--dg-mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dg-checkup .hd .x { margin-left: auto; cursor: pointer; color: var(--dg-muted); padding: 0 4px; }
+.dg-checkup .hd .x { margin-left: auto; cursor: pointer; color: var(--dg-muted);
+  padding: 2px 7px; border-radius: 4px; font-size: 14px; line-height: 1; align-self: center; }
+.dg-checkup .hd .x:hover { background: rgba(217,83,79,.14); }
 .dg-checkup .hd .sub.scope {  /* 实例级体检的「全体 N 个库」徽标 */
   color: var(--dg-accent-ink); border: 1px solid var(--dg-accent); border-radius: 10px;
   padding: 1px 8px; font-family: inherit; font-size: 11px; white-space: nowrap; }
@@ -1384,4 +1386,96 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
   border-color: var(--dg-border); color: var(--dg-muted); }
 .dg-checkup .ck-mini.primary { color: var(--dg-text); border-color: var(--dg-accent);
   background: var(--dg-accent-soft); }
+.dg-checkup .ck-mini.danger { color: #ffb3ae; border-color: rgba(217,83,79,.6);
+  background: rgba(217,83,79,.12); }
+.dg-checkup .ck-mini.danger:hover:not(:disabled) { color: #fff; border-color: var(--dg-red); }
+
+/* ---------- 体检弹窗：左列菜单 + 右侧内容页 ----------
+   弹窗只能由 ✕ / 左列「关闭」退出（不响应遮罩与 Esc），左列同时充当页签。 */
+/* 固定高度：换页签、切换内容多少都不跳（内部各自滚动） */
+.dg-checkup .box { width: 920px; height: 84vh; }
+.dg-checkup .ck-dbsel { margin-left: auto; max-width: 220px; background: var(--dg-panel-2);
+  border: 1px solid var(--dg-border); border-radius: 5px; color: var(--dg-text);
+  font-size: 11.5px; padding: 2px 6px; }
+.dg-checkup .ck-dbsel:disabled { opacity: .55; }
+/* 关闭按钮固定在右上角：有库下拉时下拉靠右、✕ 紧随其后；没有下拉时 ✕ 自己占住最右 */
+.dg-checkup .hd .ck-dbsel + .x { margin-left: 8px; }
+.dg-checkup .ck-body { display: flex; flex: 1; min-height: 0; }
+.dg-checkup .ck-left-nav { width: 164px; flex: none; display: flex; flex-direction: column;
+  gap: 2px; padding: 7px 6px; border-right: 1px solid var(--dg-border);
+  background: var(--dg-bg); }
+.dg-checkup .ck-nav { display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 7px 9px; border: 1px solid transparent; border-radius: 5px; cursor: pointer;
+  background: none; color: var(--dg-muted); font-size: 12.5px; text-align: left; }
+.dg-checkup .ck-nav:hover { background: var(--dg-hover); color: var(--dg-text); }
+.dg-checkup .ck-nav.on { background: var(--dg-accent-soft); border-color: rgba(90,130,240,.4);
+  color: var(--dg-text); font-weight: 600; }
+.dg-checkup .ck-nav .cnt { margin-left: auto; font-size: 10.5px; font-family: var(--dg-mono);
+  color: var(--dg-amber); border: 1px solid rgba(217,163,67,.45);
+  background: rgba(217,163,67,.1); border-radius: 3px; padding: 0 6px; }
+.dg-checkup .ck-right { flex: 1; min-width: 0; min-height: 0; display: flex;
+  flex-direction: column; }
+.dg-checkup .ck-page { flex: 1; min-height: 0; display: flex; flex-direction: column;
+  overflow: auto; }
+.dg-checkup .ck-page > .ck-sum, .dg-checkup .ck-page > .ck-priv,
+.dg-checkup .ck-page > .ck-hist, .dg-checkup .ck-recs-hd { flex: none; }
+/* 报告页的历史记录条 */
+.dg-checkup .ck-hist { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+  background: rgba(217,163,67,.08); border-bottom: 1px solid rgba(217,163,67,.35);
+  color: var(--dg-amber); font-size: 11.5px; }
+.dg-checkup .ck-hist button { margin-left: auto; }
+/* 诊断页：首轮入口 */
+.dg-checkup .ck-page-diag .ck-ai-text { flex: none; overflow: visible; padding: 4px 14px 10px; }
+.dg-checkup .ck-ai-hd { padding: 9px 14px 4px; }
+.dg-checkup .ck-diag-start { padding: 26px 18px; display: flex; flex-direction: column;
+  align-items: center; gap: 12px; text-align: center; }
+.dg-checkup .ck-diag-start .hint { color: var(--dg-muted); font-size: 12px; max-width: 520px;
+  line-height: 1.6; }
+/* 建议的排查 SQL：一段一卡，执行结果就地展开 */
+.dg-checkup .ck-sql { flex: none; border-top: 1px solid var(--dg-border); padding: 8px 14px 12px; }
+.dg-checkup .ck-sql-hd { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+  color: var(--dg-text); font-size: 11.5px; font-weight: 600; }
+.dg-checkup .ck-sql-hd .hint { color: var(--dg-faint); font-size: 11px; font-weight: 400; }
+.dg-checkup .ck-sql-item { border: 1px solid var(--dg-border); border-radius: 6px;
+  background: var(--dg-panel-2); margin-bottom: 8px; overflow: hidden; }
+.dg-checkup .ck-sql-item pre { margin: 0; padding: 7px 10px; overflow: auto;
+  font-family: var(--dg-mono); font-size: 11.5px; line-height: 1.5; color: var(--dg-text);
+  white-space: pre-wrap; word-break: break-word; max-height: 200px; }
+.dg-checkup .ck-sql-acts { display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  padding: 0 10px 8px; }
+.dg-checkup .ck-sql-st { font-size: 11px; font-family: var(--dg-mono); }
+.dg-checkup .ck-sql-st.ok { color: var(--dg-green); }
+.dg-checkup .ck-sql-st.warn { color: var(--dg-amber); }
+.dg-checkup .ck-sql-st.err { color: var(--dg-red); }
+.dg-checkup .ck-sql-err { padding: 0 10px 8px; color: var(--dg-red); font-size: 11.5px;
+  font-family: var(--dg-mono); white-space: pre-wrap; word-break: break-word; }
+.dg-checkup .ck-res { border-top: 1px solid var(--dg-border); max-height: 220px; overflow: auto; }
+.dg-checkup .ck-res table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+.dg-checkup .ck-res th { position: sticky; top: 0; text-align: left; font-weight: 600;
+  color: var(--dg-text); background: var(--dg-panel); border-bottom: 1px solid var(--dg-border);
+  padding: 4px 8px; white-space: nowrap; }
+.dg-checkup .ck-res td { padding: 3px 8px; border-bottom: 1px solid var(--dg-border);
+  color: var(--dg-text); white-space: nowrap; max-width: 260px; overflow: hidden;
+  text-overflow: ellipsis; font-family: var(--dg-mono); }
+.dg-checkup .ck-res .nul { color: var(--dg-faint); }
+.dg-checkup .ck-res-meta { padding: 4px 8px; color: var(--dg-faint); font-size: 10.5px; }
+.dg-checkup .ck-sql-foot { display: flex; justify-content: flex-end; }
+/* 记录页 */
+.dg-checkup .ck-page-recs { padding: 0; }
+.dg-checkup .ck-recs-hd { display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border-bottom: 1px solid var(--dg-border); color: var(--dg-text); font-size: 12px; }
+.dg-checkup .ck-recs-hd .hint { color: var(--dg-faint); font-size: 11px; }
+.dg-checkup .ck-recs-hd button { margin-left: auto; }
+.dg-checkup .ck-empty { padding: 26px 14px; color: var(--dg-muted); font-size: 12px;
+  text-align: center; }
+.dg-checkup .ck-rec-list { flex: 1; min-height: 0; overflow: auto; }
+.dg-checkup .ck-rec { display: flex; align-items: center; gap: 9px; padding: 7px 14px;
+  border-bottom: 1px solid var(--dg-border); font-size: 11.5px; }
+.dg-checkup .ck-rec-time { color: var(--dg-text); font-family: var(--dg-mono); flex: none; }
+.dg-checkup .ck-rec-scope { color: var(--dg-muted); font-family: var(--dg-mono); flex: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.dg-checkup .ck-rec-cnt { color: var(--dg-amber); flex: none; }
+.dg-checkup .ck-rec-sum { color: var(--dg-muted); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; min-width: 0; }
+.dg-checkup .ck-rec-acts { display: flex; gap: 6px; flex: none; }
 
