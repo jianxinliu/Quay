@@ -62,9 +62,9 @@ class ClickhouseDriver(DbDriver):
         readonly = role == "reader"
         stmt_timeout_s, _op_timeout_s = role_timeouts(cfg.policy, readonly)
         user, password_ref = resolve_account(cfg, role)
-        # ClickHouse 的 default 用户常常没有密码（本地实例、内网实例），配置里省略
-        # password 是合法写法；别把「没配」当成「配了个空引用」去解析。
-        password = resolve_secret(password_ref) if password_ref else ""
+        # ClickHouse 的 default 用户常常没有密码，配置里省略 password 是合法写法
+        # （空引用由 resolve_secret 统一按「没有密码」处理）
+        password = resolve_secret(password_ref)
 
         # 会话设置走 URL query 参数（clickhouse-driver 在建连时应用）：
         # - max_execution_time 服务端语句超时（秒），与 readonly=1 可共存。

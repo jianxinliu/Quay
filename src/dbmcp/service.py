@@ -3956,8 +3956,9 @@ class DbmService:
 
         password = fields.get("password") or None
         eff_pw = f"plain://{password}" if password else existing_password
-        # sqlite 无账号；redis 允许无认证（本地无 auth 实例）——都不强制填密码
-        if eff_pw is None and fields.get("engine") not in ("sqlite", "redis"):
+        # sqlite 无账号；redis 允许无认证（本地无 auth 实例）；clickhouse 的 default
+        # 用户通常没密码（示例配置里就写着可省略）——都不强制填密码
+        if eff_pw is None and fields.get("engine") not in ("sqlite", "redis", "clickhouse"):
             from .probe import ProbeResult
             return ProbeResult(ok=False, message="请填写密码后再测试")
         cfg = ConnectionConfig(
