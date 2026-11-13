@@ -92,7 +92,8 @@ class TestHousekeepOnce:
         stats = service.housekeep_once(retention_days=30)
         assert set(stats) == {"engines_reaped", "redis_reaped", "audit_purged",
                               "changes_purged", "notifications_purged",
-                              "workflow_runs_purged", "exports_purged", "transactions_reaped"}
+                              "workflow_runs_purged", "exports_purged", "transactions_reaped",
+                              "checkup_reports_purged"}
 
     def test_expired_mcp_exports_are_purged(self, service):
         import os

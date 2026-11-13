@@ -465,6 +465,53 @@ class TestGraph:
         prev = service.analysis_sql("ws1", "SELECT count(*) FROM adults", CALLER)
         assert prev["rows"][0][0] == 2
 
+    def test_run_traced_records_graph_snapshot_and_step_status(self, service, tmp_path):
+        """agent / 后台手工触发的运行也要进运行历史，并存下这次跑的图 + 节点状态。
+
+        以前只有定时触发落 workflow_run，agent 跑完在界面上没有痕迹。
+        """
+        from dbmcp.workflows import WorkflowRunStore, WorkflowStore
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        service.runs = WorkflowRunStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [
+                _node("a", "source", "u", conn="demo/main", sql="SELECT * FROM users"),
+                _node("o", "output", "out")],
+             "edges": [{"from": "a", "to": "o", "port": "in"}]}
+        service.workflow_save("traced", "ws_t", "", CALLER, graph=g)
+
+        out = service.workflow_run_traced("traced", CALLER, triggered_by="agent")
+        assert out["ok"] is True
+
+        runs = service.workflow_runs_list("traced", 10)
+        assert len(runs) == 1
+        run = service.workflow_run_get(runs[0]["id"])
+        assert run["status"] == "ok"
+        assert run["triggered_by"] == "agent"
+        # 图快照：节点与连线都在，跑完还能原样画出 DAG
+        assert [n["id"] for n in run["graph_snap"]["nodes"]] == ["a", "o"]
+        assert run["graph_snap"]["edges"][0]["from"] == "a"
+        # 节点状态来自 steps
+        nodes = {s.get("node") for s in run["steps"]}
+        assert nodes == {"a", "o"}
+        assert all(s["ok"] for s in run["steps"])
+
+    def test_run_traced_marks_failure(self, service, tmp_path):
+        """跑失败也要留痕（error 落在运行记录上，图快照照存）。"""
+        from dbmcp.workflows import WorkflowRunStore, WorkflowStore
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        service.runs = WorkflowRunStore(tmp_path / "wf.sqlite3")
+        g = {"nodes": [_node("a", "source", "bad", conn="demo/main", sql="SELECT * FROM nope")],
+             "edges": []}
+        service.workflow_save("broken", "ws_b", "", CALLER, graph=g)
+
+        out = service.workflow_run_traced("broken", CALLER, triggered_by="manual")
+        assert out["ok"] is False
+        runs = service.workflow_runs_list("broken", 10)
+        run = service.workflow_run_get(runs[0]["id"])
+        assert run["status"] == "failed"
+        assert run["error"]
+        assert run["graph_snap"]["nodes"][0]["id"] == "a"
+
     def test_graph_multi_output_end_to_end(self, service, tmp_path):
         """两个 output 节点：都能物化为视图并独立预览；outputs 列表包含两条结果。"""
         from dbmcp.workflows import WorkflowStore

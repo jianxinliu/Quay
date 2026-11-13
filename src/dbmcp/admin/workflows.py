@@ -120,7 +120,9 @@ def mount(ctx: AdminContext) -> None:
         caller = _caller(req)
 
         def _work_wf(_register, _report=None) -> dict:  # noqa: ANN001
-            return {"kind": "workflow", **service.workflow_run(name, caller)}
+            # 手工运行也落运行历史（图快照 + 节点状态），与 agent 触发同一条路径
+            return {"kind": "workflow",
+                    **service.workflow_run_traced(name, caller, triggered_by="manual")}
 
         job_id = _jobmgr.submit(_solo_key(), _work_wf)
         return JSONResponse({"ok": True, "job_id": job_id})
@@ -366,6 +368,27 @@ def mount(ctx: AdminContext) -> None:
         if run is None:
             return JSONResponse({"ok": False, "error": "运行记录不存在"}, status_code=404)
         return JSONResponse({"ok": True, "run": run})
+
+    @mcp.custom_route("/admin/workflows/runs/{run_id:int}/graph", methods=["GET"])
+    @guard
+    async def _wf_run_graph(req: Request) -> JSONResponse:
+        """一次运行的图快照 + 各步状态（agent 触发的流程分析也在这里留痕）。
+
+        运行详情页直接读 run 的 graph_snap；这个 JSON 端点给需要单独取图的调用方。
+        """
+        try:
+            run_id = int(req.path_params["run_id"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "run_id 非法"}, status_code=400)
+        try:
+            run = await anyio.to_thread.run_sync(service.workflow_run_get, run_id)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        if run is None:
+            return JSONResponse({"ok": False, "error": "运行记录不存在"}, status_code=404)
+        return JSONResponse({"ok": True, "graph_snap": run.get("graph_snap"),
+                             "steps": run.get("steps") or [],
+                             "triggered_by": run.get("triggered_by")})
 
     @mcp.custom_route("/admin/workflows/runs/{run_id:int}", methods=["GET"])
     @guard

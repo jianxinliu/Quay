@@ -96,7 +96,7 @@
   var Blueprint = {
     name: "wf-blueprint",
     // 节点状态由父组件传下来（运行时染色），选中态双向绑定
-    props: ["graph", "conn", "nodeStatus", "selectedNodeId"],
+    props: ["graph", "conn", "nodeStatus", "selectedNodeId", "readonly"],
     emits: ["update:graph", "open-node", "select-node", "run"],
     data: function () {
       return {
@@ -221,6 +221,7 @@
       nodeDown: function (ev, node) {
         var self = this;
         this.sel = node.id;
+        if (this.readonly) return;  // 运行详情页只读：选中可以，拖拽/改图不行
         var start = this.canvasXY(ev), ox = node.x, oy = node.y, moved = false;
         function move(e2) {
           var p = self.canvasXY(e2);
@@ -238,6 +239,7 @@
         ev.preventDefault();
       },
       portDown: function (ev, node) {
+        if (this.readonly) return;  // 运行详情页只读
         var self = this;
         var p = this.canvasXY(ev);
         this.linkDraft = { from: node.id, x: p.x, y: p.y };
@@ -282,7 +284,7 @@
     template:
       '<div class="wf-blueprint">'
       // 顶栏
-      + '<div class="wf-bp-bar">'
+      + '<div class="wf-bp-bar" v-if="!readonly">'
       +   '<button class="dg-btn" @click="addNode(\'source\')" title="从任意连接取数为数据集">＋取数</button>'
       +   '<button class="dg-btn" @click="addNode(\'file\')" title="导入本地 CSV/Parquet/JSON">＋文件</button>'
       +   '<button class="dg-btn" @click="addNode(\'filter\')">＋过滤</button>'
@@ -304,7 +306,7 @@
       +       '<path v-for="(e,i) in graph.edges" :key="i" class="fe" :d="edgePath(e)"/>'
       +       '<path v-if="linkDraft" class="fe draft" :d="draftPath()"/>'
       +     '</svg>'
-      +     '<div v-for="(e,i) in graph.edges" :key="\'x\'+i" class="wf-edge-x"'
+      +     '<div v-if="!readonly" v-for="(e,i) in graph.edges" :key="\'x\'+i" class="wf-edge-x"'
       +       ' :style="{left: edgeMid(e).x + \'px\', top: edgeMid(e).y + \'px\'}"'
       +       ' title="删除连线" @click="delEdge(i)">✕</div>'
       +     '<div v-for="n in graph.nodes" :key="n.id" class="wf-fnode"'
@@ -316,13 +318,13 @@
       +       '<div class="hd"><span class="ty">{{ typeLabel(n.type) }}</span>'
       +         '<span class="nm">{{ n.name }}</span>'
       +         '<span class="st">{{ nodeStatus && nodeStatus[n.id]===\'ok\' ? \'✓\' : nodeStatus && nodeStatus[n.id]===\'err\' ? \'✗\' : nodeStatus && nodeStatus[n.id]===\'running\' ? \'⟳\' : \'\' }}</span>'
-      +         '<span class="x" @mousedown.stop @click.stop="delNode(n.id)">✕</span></div>'
+      +         '<span v-if="!readonly" class="x" @mousedown.stop @click.stop="delNode(n.id)">✕</span></div>'
       +       '<div class="bd">{{ nodeDesc(n) }}</div>'
-      +       '<span v-for="p in nodeInPorts(n)" :key="p" class="port pin"'
+      +       '<span v-if="!readonly" v-for="p in nodeInPorts(n)" :key="p" class="port pin"'
       +         ' :style="{top: (portY(n, p) - n.y - 5) + \'px\'}"'
       +         ' :title="portTitle(n, p)"'
       +         ' @mousedown.stop @mouseup="portUp($event, n, p)"></span>'
-      +       '<span v-if="hasOut(n)" class="port pout" title="拖到下一节点的输入口"'
+      +       '<span v-if="!readonly && hasOut(n)" class="port pout" title="拖到下一节点的输入口"'
       +         ' @mousedown="portDown($event, n)"></span>'
       +     '</div>'
       +     '<div v-if="!graph.nodes.length" class="wf-bp-empty">'
@@ -1338,6 +1340,17 @@
         });
         opts.push({ value: "__new__", label: "＋ 新建工作区…" });
         return opts;
+      },
+      // 运行详情页的图染色：把这次运行的 steps 按 node id 映射成 ok/err
+      runNodeStatus: function () {
+        var ns = {};
+        var run = this.currentRun;
+        if (!run) return ns;
+        (run.steps || []).forEach(function (s) {
+          if (s.node) ns[s.node] = s.ok ? "ok" : "err";
+        });
+        // 图里有、step 里没有的节点（如编译后合并掉的中间节点）不着色
+        return ns;
       }
     },
     methods: {
@@ -2055,6 +2068,12 @@
       +   '<div v-if="currentRunErr" class="wf-err">{{ currentRunErr }}</div>'
       +   '<div v-else-if="!currentRun" class="wf-empty">加载中…</div>'
       +   '<div v-else class="wf-detail-body wf-run-detail">'
+      +     '<div v-if="currentRun.graph_snap && (currentRun.graph_snap.nodes || []).length"'
+      +          ' class="wf-run-graph">'
+      +       '<h3>流程图 <span class="wf-hint">节点颜色 = 本次运行结果</span></h3>'
+      +       '<wf-blueprint :graph="currentRun.graph_snap" :node-status="runNodeStatus"'
+      +         ' :conn="currentRun.name" :readonly="true" />'
+      +     '</div>'
       +     '<div class="wf-run-meta">'
       +       '<div><b>触发方式</b> {{ currentRun.triggered_by }}</div>'
       +       '<div><b>开始</b> {{ fmtTime(currentRun.started_at) }}</div>'

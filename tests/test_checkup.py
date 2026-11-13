@@ -145,6 +145,40 @@ def sqlite_db(tmp_path):
     return str(db)
 
 
+class _StubReport:
+    """替身报告：只验证服务层把哪个值当作 schema 过滤值传下去。"""
+
+    def to_dict(self) -> dict:
+        return {"engine": "postgres", "scope": "", "overall": "ok", "summary": "",
+                "checks": [], "privileges": [], "dimensions": []}
+
+
+def test_pg_database_is_not_used_as_schema_filter(tmp_path):
+    """PG 选了库（database）时 schema 过滤值必须留空——库名不是 schema。
+
+    把库名当 schema 传下去，大表/膨胀这类按 ``schemaname`` 过滤的检查会去查一个
+    不存在的 schema、静默返回空，报告看起来「一切正常」。展示用的 scope 仍取库名。
+    """
+    cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"pg": {
+        "engine": "postgres", "host": "127.0.0.1", "database": "shop",
+        "user": "ro", "password": "plain://x", "environment": "local",
+    }}}}})
+    svc = DbmService(cfg, AuditStore(tmp_path / "audit.sqlite3"))
+    seen: dict = {}
+
+    def fake(project, connection, conn_cfg, caller, scope, database=None, detail=None):
+        seen.update(scope=scope, database=database, detail=detail)
+        return _StubReport()
+
+    svc._checkup_one = fake   # type: ignore[method-assign]
+    try:
+        out = svc.db_checkup("demo", "pg", CALLER, database="reporting")
+    finally:
+        svc.close()
+    assert seen == {"scope": None, "database": "reporting", "detail": "reporting"}
+    assert out["scope"] == "reporting"      # 展示值仍是实际体检的库
+
+
 @pytest.fixture
 def service(sqlite_db, tmp_path):
     cfg = AppConfig.model_validate({

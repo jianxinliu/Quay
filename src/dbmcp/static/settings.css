@@ -104,6 +104,16 @@
 .set-row.wide .ctl input,.set-row.wide .ctl select{max-width:520px}
 .set-row.wide .ctl textarea{max-width:none;width:100%}
 
+/* 分区内的常驻动作行（测试连通性、刷新模型、发送测试）。
+   这些按钮**不属于**改动条：改动条只在有未保存改动时浮出，放那里等于默认隐藏。 */
+.set-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin:16px 0 2px;padding-top:14px;border-top:1px solid var(--line)}
+.set-actions button{border:1px solid var(--border);border-radius:8px;padding:7px 14px;
+  font-size:13px;font-family:var(--sans);background:var(--surface);color:var(--text);
+  cursor:pointer;transition:border-color .12s,color .12s}
+.set-actions button:hover{border-color:var(--accent);color:var(--accent)}
+.set-actions .msg{font-size:12.5px;color:var(--muted);line-height:1.4}
+
 /* 「已改」：治理工具里「我把哪道护栏放松了」必须一眼可见，
    不能只在心里记着或翻 git。 */
 .set-tag{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:1px 6px;

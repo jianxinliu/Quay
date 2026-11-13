@@ -767,7 +767,8 @@ CREATE TABLE IF NOT EXISTS workflow_run (
     steps_json     TEXT NOT NULL DEFAULT '[]',
     output_preview TEXT NOT NULL DEFAULT '',
     error          TEXT NOT NULL DEFAULT '',
-    xlsx_path      TEXT
+    xlsx_path      TEXT,
+    graph_snap     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_run_name_started ON workflow_run (name, started_at DESC);
 """
@@ -861,7 +862,7 @@ def _schedule_row(row: sqlite3.Row) -> dict:
 
 
 class WorkflowRunStore:
-    """workflow 运行历史（含 steps/output_preview/xlsx_path，30 天保留）。"""
+    """workflow 运行历史（含 steps/output_preview/graph_snap/xlsx_path，30 天保留）。"""
 
     def __init__(self, db_path: str | Path):
         db_path = Path(db_path)
@@ -872,6 +873,11 @@ class WorkflowRunStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_RUN_SCHEMA)
+            # 老库升级：运行图快照（哪次运行跑的是哪张图、各节点状态）
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(workflow_run)")}
+            if "graph_snap" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE workflow_run ADD COLUMN graph_snap TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
 
     def start(self, name: str, triggered_by: str = "manual") -> int:
@@ -886,15 +892,16 @@ class WorkflowRunStore:
 
     def finish(self, run_id: int, status: str, steps: list[dict] | None = None,
                output_preview: dict | None = None, error: str = "",
-               xlsx_path: str | None = None) -> None:
+               xlsx_path: str | None = None, graph_snap: str = "") -> None:
+        """收尾一次运行。graph_snap 是运行时那张 DAG 的 JSON 快照（空串 = 脚本式流程）。"""
         now = datetime.now(UTC).isoformat(timespec="seconds")
         with self._lock:
             self._conn.execute(
                 "UPDATE workflow_run SET status = ?, finished_at = ?, steps_json = ?,"
-                " output_preview = ?, error = ?, xlsx_path = ? WHERE id = ?",
+                " output_preview = ?, error = ?, xlsx_path = ?, graph_snap = ? WHERE id = ?",
                 (status, now, json.dumps(steps or [], ensure_ascii=False),
                  json.dumps(output_preview or {}, ensure_ascii=False),
-                 error, xlsx_path, run_id))
+                 error, xlsx_path, graph_snap or "", run_id))
             self._conn.commit()
 
     def get(self, run_id: int) -> dict | None:
@@ -910,14 +917,14 @@ class WorkflowRunStore:
                 "SELECT * FROM workflow_run WHERE name = ?"
                 " ORDER BY started_at DESC, id DESC LIMIT ?",
                 (name, limit)).fetchall()
-        return [_run_row(r) for r in rows]
+        return [_run_row(r, with_graph=False) for r in rows]
 
     def running_for(self, name: str) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM workflow_run WHERE name = ? AND status = 'running'",
                 (name,)).fetchall()
-        return [_run_row(r) for r in rows]
+        return [_run_row(r, with_graph=False) for r in rows]
 
     def list_running(self, triggered_by: str | None = None) -> list[dict]:
         """所有 status=running 的记录，按 started_at DESC；triggered_by 可过滤（schedule/manual/agent）。"""
@@ -931,7 +938,7 @@ class WorkflowRunStore:
                 rows = self._conn.execute(
                     "SELECT * FROM workflow_run WHERE status = 'running'"
                     " ORDER BY started_at DESC, id DESC").fetchall()
-        return [_run_row(r) for r in rows]
+        return [_run_row(r, with_graph=False) for r in rows]
 
     def sweep_stale_running(self, older_than_hours: int = 1) -> int:
         """服务重启清理：把很久前还标 running 的记录标 failed，避免永久阻塞下次调度。"""
@@ -975,10 +982,17 @@ class WorkflowRunStore:
             self._conn.close()
 
 
-def _run_row(row: sqlite3.Row) -> dict:
+def _run_row(row: sqlite3.Row, with_graph: bool = True) -> dict:
+    """一行运行记录 → dict。
+
+    with_graph=False 时不反序列化整张图快照：列表/「正在跑」这类轮询接口只要摘要，
+    每次都把 N 份 DAG JSON 解析一遍纯属浪费（图上百个节点时更明显）。
+    """
+    graph = json.loads(row["graph_snap"]) if with_graph and row["graph_snap"] else None
     return {"id": row["id"], "name": row["name"], "status": row["status"],
             "started_at": row["started_at"], "finished_at": row["finished_at"],
             "triggered_by": row["triggered_by"],
             "steps": json.loads(row["steps_json"] or "[]"),
             "output_preview": json.loads(row["output_preview"] or "{}"),
-            "error": row["error"], "xlsx_path": row["xlsx_path"]}
+            "error": row["error"], "xlsx_path": row["xlsx_path"],
+            "graph_snap": graph}

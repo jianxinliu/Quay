@@ -573,6 +573,57 @@ def mount(ctx: AdminContext) -> None:
             return JSONResponse(error_payload(e), status_code=400)
         return JSONResponse({"ok": True, **out})
 
+    @mcp.custom_route("/admin/sql/checkup/records", methods=["GET"])
+    @guard
+    async def _sql_checkup_records(req: Request) -> JSONResponse:
+        """体检历史（某连接的最近 N 条）。?conn=&limit=&offset="""
+        try:
+            project, connection = _resolve_conn(req.query_params.get("conn", ""))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        try:
+            limit = min(max(int(req.query_params.get("limit") or "50"), 1), 200)
+            offset = max(int(req.query_params.get("offset") or "0"), 0)
+        except ValueError:
+            limit, offset = 50, 0
+        try:
+            recs = await anyio.to_thread.run_sync(
+                partial(service.checkup_records_list, project, connection, limit, offset))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": True, "records": recs})
+
+    @mcp.custom_route("/admin/sql/checkup/records/{rid:int}", methods=["GET"])
+    @guard
+    async def _sql_checkup_record(req: Request) -> JSONResponse:
+        """单条体检记录（含完整 report，可原样重新渲染）。"""
+        try:
+            rid = int(req.path_params["rid"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "记录 id 非法"}, status_code=400)
+        try:
+            rec = await anyio.to_thread.run_sync(service.checkup_record_get, rid)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        if rec is None:
+            return JSONResponse({"ok": False, "error": "记录不存在"}, status_code=404)
+        return JSONResponse({"ok": True, "record": rec})
+
+    @mcp.custom_route("/admin/sql/checkup/records/{rid:int}/delete", methods=["POST"])
+    @guard
+    async def _sql_checkup_record_delete(req: Request) -> JSONResponse:
+        try:
+            rid = int(req.path_params["rid"])
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "记录 id 非法"}, status_code=400)
+        try:
+            deleted = await anyio.to_thread.run_sync(service.checkup_record_delete, rid)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        if not deleted:
+            return JSONResponse({"ok": False, "error": "记录不存在"}, status_code=404)
+        return JSONResponse({"ok": True})
+
     @mcp.custom_route("/admin/sql/reconnect", methods=["POST"])
     @guard
     async def _sql_reconnect(req: Request) -> JSONResponse:

@@ -376,6 +376,17 @@
   margin-bottom: 14px; font-size: 12px; color: var(--dg-text);
 }
 .wf-run-meta b { color: var(--dg-muted); margin-right: 6px; font-weight: normal; font-size: 11px; }
+/* 运行时的图快照：只读画布 + 节点状态染色（复用 Blueprint，不给编辑工具条） */
+.wf-run-graph {
+  border: 1px solid var(--dg-border); border-radius: 6px; background: var(--dg-panel);
+  margin-bottom: 14px; overflow: hidden;
+}
+.wf-run-graph h3 {
+  font-size: 13px; margin: 0; padding: 10px 14px; color: var(--dg-text);
+  border-bottom: 1px solid var(--dg-border);
+}
+.wf-run-graph .wf-blueprint { height: 420px; }
+.wf-run-graph .wf-hint { color: var(--dg-faint); font-size: 11px; font-weight: normal; margin-left: 6px; }
 .wf-run-steps h3, .wf-run-preview h3 { font-size: 13px; margin: 0 0 10px; color: var(--dg-text); }
 .wf-run-step {
   display: flex; align-items: center; gap: 10px; padding: 6px 12px;

@@ -430,6 +430,73 @@ def _proxy_hint() -> str:
     return "（若在受限网络访问 Anthropic/OpenAI 常需代理；macOS 可在系统设置里开启代理，dbm-serve.sh 会自动继承）"
 
 
+def _models_request(key_env: str, base: str, fmt: str, timeout: int) -> list[dict]:
+    """拉模型列表：Anthropic 与 OpenAI 都是 GET {base}/v1/models，只是鉴权头不同。
+
+    密钥从 keyring/env 读，绝不落库/日志；返回 [{"id","name"}]，按 id 去重排序。
+    """
+    import httpx  # 惰性导入
+
+    key = _resolve_api_key(key_env)
+    if not key:
+        raise AIError(f"未配置 API key：请在后台系统设置填写并保存，或设置环境变量 "
+                      f"{key_env or 'DBM_AI_API_KEY'}")
+    base = (base or "https://api.anthropic.com").rstrip("/")
+    if fmt == "openai":
+        headers = {"Authorization": f"Bearer {key}"}
+    else:  # anthropic
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    try:
+        resp = httpx.get(base + "/v1/models", headers=headers, timeout=timeout)
+    except httpx.HTTPError as e:
+        raise AIError(f"请求模型列表失败：{e}{_proxy_hint()}") from e
+    if resp.status_code in (401, 403):
+        raise AIError(f"API 返回 {resp.status_code}：{resp.text[:200]}{_proxy_hint()}")
+    if resp.status_code != 200:
+        raise AIError(f"API 返回 {resp.status_code}：{resp.text[:200]}")
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise AIError(f"模型列表不是合法 JSON：{resp.text[:200]}") from e
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise AIError(f"模型列表格式不符合预期：{json.dumps(data)[:200] if isinstance(data, dict) else resp.text[:200]}")
+    seen: dict[str, dict] = {}
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        if not mid:
+            continue
+        # Anthropic 带 display_name，OpenAI 只有 id；没有可读名就用 id
+        name = str(m.get("display_name") or m.get("name") or mid)
+        seen.setdefault(mid, {"id": mid, "name": name})
+    return sorted(seen.values(), key=lambda m: m["id"])
+
+
+def list_models(*, api_base: str = "", api_format: str = "anthropic",
+                api_key_env: str = "", timeout: int = 20) -> list[dict]:
+    """拉取 HTTP API 端点的可用模型（设置页下拉数据源）。失败抛 AIError。"""
+    return _models_request(api_key_env, api_base, api_format, timeout)
+
+
+def probe_cli(provider: str, cli_path: str = "") -> dict:
+    """确认 CLI 后端可达。只查可执行文件，不真正执行——非 TTY 下 CLI 可能卡在等输入。
+
+    返回 {ok, detail}；裸二进制名走 PATH 查找，带路径的按绝对路径校验。
+    """
+    import shutil  # 惰性导入
+
+    cli = (cli_path or "").strip() or _DEFAULT_CLI.get(provider, "")
+    if not cli:
+        return {"ok": False, "detail": f"不支持的 AI 后端：{provider!r}（支持 claude / codex / api）"}
+    found = cli if os.sep in cli else (shutil.which(cli) or "")
+    if not found or not os.path.isfile(found) or not os.access(found, os.X_OK):
+        return {"ok": False,
+                "detail": f"未找到可执行的 {cli}，请确认已安装并在 PATH 中，或在设置里指定绝对路径"}
+    return {"ok": True, "detail": f"已找到 {found}"}
+
+
 def _run_api(prompt: str, *, model: str, timeout: int, session_id: str | None,
              base: str, fmt: str, key_env: str) -> tuple[str, str]:
     """直连 HTTP API（Anthropic Messages / OpenAI Chat）。密钥从 keyring/env 读，绝不落库/日志。
