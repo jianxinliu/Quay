@@ -252,7 +252,8 @@ def _settings_ai_body(s: dict) -> str:
                    "从「刷新模型」拉到的列表里选；拉不到时手动填写。"
                    "Claude 用 claude-*；CodeX 用其账号支持的模型名；api 用对应厂商模型名。",
                    model_ctl, s)
-        + _set_actions(ai_actions, "ai-act-msg"))
+        + _set_actions(ai_actions, "ai-act-msg",
+                       hint="测试与刷新用的是已保存的设置；改了上面的字段请先保存再点"))
 
     api = ("<div class='ai-api-only'>" + _set_section(
         "HTTP API", "直连模型厂商的端点。密钥存进系统钥匙串，绝不写入设置库或日志。",

@@ -302,6 +302,8 @@ class DbmService:
         self.checkup_records = None  # CheckupRecordStore（serve 时注入；未注入则体检不留痕）
         self._housekeeping_stop: threading.Event | None = None
         self._scheduler_stop: threading.Event | None = None
+        # 流程「单飞」的检查+建记录要原子：手工/agent 两个入口可能同时到
+        self._wf_start_lock = threading.Lock()
         # 记录本进程周期内已经为哪一分钟执行过（防止 30s tick 在同一分钟触发两次）
         self._sched_ticked_minute: set[tuple[str, str]] = set()  # {(name, "YYYY-MM-DD HH:MM")}
         self.data_dir = None   # serve 时注入，供 xlsx 产物落盘
@@ -1848,8 +1850,17 @@ class DbmService:
         """
         if self.runs is None:
             return self.workflow_run(name, caller)
-        snap = self._workflow_graph_snap(name)
-        run_id = self.runs.start(name, triggered_by=triggered_by)
+        # 名字先校验：拼错/已改名的流程不该先插一条 running 再失败，
+        # 留下一条「运行失败」的幽灵记录（还会短暂挡住同名流程的调度）
+        self._require_workflows().get(name)
+        # 同一流程同时只跑一份：手工/agent 两个入口都在这里，调度入口另有同样的判断。
+        # 两条运行同时操作同一个 DuckDB 工作区会互相覆盖同名数据集。
+        with self._wf_start_lock:
+            if self.runs.running_for(name):
+                raise QueryRejected(
+                    "该流程正在运行中（可能由 agent 或定时触发），请等本次结束再试")
+            snap = self._workflow_graph_snap(name)
+            run_id = self.runs.start(name, triggered_by=triggered_by)
         try:
             out = self.workflow_run(name, caller)
         except Exception as e:  # noqa: BLE001
@@ -3373,7 +3384,7 @@ class DbmService:
         *,
         report: dict | None = None, schema: str | None = None,
         database: str | None = None, session_id: str | None = None,
-        all_dbs: bool = False,
+        all_dbs: bool = False, results: list[dict] | None = None,
     ) -> dict:
         """让 AI 根据体检报告 + 连接信息给出诊断建议（只读分析、不执行任何 SQL）。
 
@@ -3409,6 +3420,10 @@ class DbmService:
         }
         report_md = checkup.report_to_markdown(rep)
         question = (question or "").strip()
+        # 「把排查结果喂回 AI」：结果行由前端原样送来，**脱敏在服务端做**——
+        # 前端不认识连接的脱敏策略，让它拼文本等于绕过 masking（这些行会被发到外部模型）
+        if results:
+            question = (question + "\n\n" + self._diag_results_text(cfg, results)).strip()
 
         def _run() -> dict:
             text, new_sid = ai.generate_diagnosis(
@@ -3428,6 +3443,38 @@ class DbmService:
                                  touch_db=False)
         except ai.AIError as e:
             raise QueryRejected(str(e)) from e
+
+    def _diag_results_text(self, cfg: ConnectionConfig, results: list[dict],
+                           *, max_sets: int = 10, max_rows: int = 30,
+                           max_cell: int = 200) -> str:
+        """把后台执行过的排查 SQL 结果拼成给 AI 的文本（**先按连接策略脱敏**）。
+
+        结果行来自查询台读路径（mask=False，本来就是给人看真值的），而这里要出进程、
+        发给外部模型——必须在拼文本之前套用该连接的脱敏策略，否则「一键喂回 AI」
+        就成了把敏感列原文外发的旁路。行数/单元格/结果集都设上限，避免撑爆 prompt。
+        """
+        patterns = self.mask_default_patterns(cfg)
+        parts: list[str] = []
+        for item in results[:max_sets]:
+            if not isinstance(item, dict):
+                continue
+            cols = [str(c) for c in (item.get("columns") or [])]
+            rows = [list(r) for r in (item.get("rows") or []) if isinstance(r, (list, tuple))]
+            if not cols or not rows:
+                continue
+            rows, masked = apply_mask(cols, rows, cfg.policy, patterns)
+            lines = ["\t".join(cols)]
+            for row in rows[:max_rows]:
+                cells = []
+                for v in row:
+                    s = "" if v is None else str(v)
+                    cells.append(s[:max_cell] + "…" if len(s) > max_cell else s)
+                lines.append("\t".join(cells))
+            head = f"SQL:\n{str(item.get('sql') or '').strip()}\n结果（最多 {max_rows} 行）:"
+            if masked:
+                head += f"\n（以下列已脱敏：{', '.join(masked)}）"
+            parts.append(head + "\n" + "\n".join(lines))
+        return "\n\n".join(parts)
 
     def ai_probe(self) -> dict:
         """探测 AI 配置是否可用（设置页「测试连通性」）。只读，不消费 token。
@@ -4185,14 +4232,16 @@ class DbmService:
             return
         try:
             # 同一流程同时只跑一份：手工/agent 触发的运行现在也落 'running' 记录
-            # （见 workflow_run_traced），撞上调度点就跳过本次，避免同一工作区并发跑
-            if self.runs.running_for(name):
-                logger.warning("scheduler: workflow %s 已在运行（含手工/agent 触发），跳过本次调度", name)
-                return
+            # （见 workflow_run_traced），撞上调度点就跳过本次，避免同一工作区并发跑。
+            # 与手工/agent 入口共用同一把锁——check 和 start 之间留缝，两边就都能通过检查。
+            with self._wf_start_lock:
+                if self.runs.running_for(name):
+                    logger.warning("scheduler: workflow %s 已在运行（含手工/agent 触发），跳过本次调度", name)
+                    return
+                run_id = self.runs.start(name, triggered_by="schedule")
+                # 运行时那张图的快照：运行详情页据此画出「哪张图、各节点状态」
+                graph_snap = self._workflow_graph_snap(name)
             sched = self.schedules.get(name) if self.schedules is not None else None
-            run_id = self.runs.start(name, triggered_by="schedule")
-            # 运行时那张图的快照：运行详情页据此画出「哪张图、各节点状态」
-            graph_snap = self._workflow_graph_snap(name)
             # 走既有 workflow_run（此处 caller 用 scheduler；审计记录里区分）
             sched_caller = CallerInfo(agent="scheduler", session_id=f"sched-{run_id}")
             try:

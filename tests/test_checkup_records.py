@@ -113,9 +113,13 @@ class TestStore:
 def client(tmp_path):
     db_file = tmp_path / "biz.sqlite3"
     sqlite3.connect(db_file).close()
-    cfg = AppConfig.model_validate({"projects": {"demo": {"connections": {"main": {
-        "engine": "sqlite", "database": str(db_file), "environment": "local",
-    }}}}})
+    # 两个项目各有一条同名连接 main：记录必须按「项目 + 连接」隔离
+    cfg = AppConfig.model_validate({"projects": {
+        "demo": {"connections": {"main": {
+            "engine": "sqlite", "database": str(db_file), "environment": "local"}}},
+        "other": {"connections": {"main": {
+            "engine": "sqlite", "database": str(db_file), "environment": "local"}}},
+    }})
     svc = DbmService(cfg, AuditStore(tmp_path / "a.sqlite3"),
                      ApprovalStore(tmp_path / "a.sqlite3"))
     svc.checkup_records = CheckupRecordStore(tmp_path / "dbm.sqlite3")
@@ -140,19 +144,41 @@ class TestRoutes:
         rec = body["records"][0]
         assert rec["engine"] == "sqlite"
 
-        one = tc.get(f"/admin/sql/checkup/records/{rec['id']}")
+        one = tc.get(f"/admin/sql/checkup/records/{rec['id']}", params={"conn": "demo/main"})
         assert one.json()["record"]["report"]["checks"]
 
-        gone = tc.post(f"/admin/sql/checkup/records/{rec['id']}/delete")
+        gone = tc.post(f"/admin/sql/checkup/records/{rec['id']}/delete",
+                       data={"conn": "demo/main"})
         assert gone.json()["ok"] is True
         assert tc.get("/admin/sql/checkup/records",
                       params={"conn": "demo/main"}).json()["records"] == []
         # 再删一次 → 404
-        assert tc.post(f"/admin/sql/checkup/records/{rec['id']}/delete").status_code == 404
+        assert tc.post(f"/admin/sql/checkup/records/{rec['id']}/delete",
+                       data={"conn": "demo/main"}).status_code == 404
+
+    def test_record_belongs_to_its_connection(self, client):
+        """id 是全局自增的：不带 conn / 带别的项目的同名连接，都不能读或删这条记录。"""
+        tc, _ = client
+        tc.get("/admin/sql/checkup", params={"conn": "demo/main"})
+        rec = tc.get("/admin/sql/checkup/records",
+                     params={"conn": "demo/main"}).json()["records"][0]
+        rid = rec["id"]
+
+        # 不带 conn：拒绝（否则任何人凭 id 就能读）
+        assert tc.get(f"/admin/sql/checkup/records/{rid}").status_code == 400
+        # 别的项目的同名连接：看不到、也删不掉
+        assert tc.get(f"/admin/sql/checkup/records/{rid}",
+                      params={"conn": "other/main"}).status_code == 404
+        assert tc.post(f"/admin/sql/checkup/records/{rid}/delete",
+                       data={"conn": "other/main"}).status_code == 404
+        # 记录还在
+        assert len(tc.get("/admin/sql/checkup/records",
+                          params={"conn": "demo/main"}).json()["records"]) == 1
 
     def test_missing_record_is_404(self, client):
         tc, _ = client
-        assert tc.get("/admin/sql/checkup/records/424242").status_code == 404
+        assert tc.get("/admin/sql/checkup/records/424242",
+                      params={"conn": "demo/main"}).status_code == 404
 
     def test_store_absent_does_not_break_checkup(self, client):
         """未注入存储（单测/库内直用）时体检照常返回，只是不落历史。"""

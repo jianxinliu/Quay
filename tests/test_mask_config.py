@@ -103,3 +103,37 @@ class TestConsoleAlwaysReal:
             service.save_settings({"mask_sensitive_columns": value})
             out = service.admin_run_sql("demo", "main", "SELECT password FROM accounts", CALLER)
             assert out["rows"][0][0] == "p@ss"
+
+
+class TestDiagResultsToAi:
+    """排查结果喂回 AI：这些行要出进程发给外部模型，必须先按连接策略脱敏。"""
+
+    def test_sensitive_columns_are_masked_before_leaving(self, service):
+        text = service._diag_results_text(service.config.get_connection("demo", "main"), [
+            {"sql": "SELECT id, password, note FROM accounts",
+             "columns": ["id", "password", "note"], "rows": [[1, "p@ss", "ok"]]},
+        ])
+        assert "p@ss" not in text
+        assert MASK in text
+        assert "password" in text          # 列名保留：AI 需要知道这列叫什么
+        assert "ok" in text and "SELECT id" in text
+
+    def test_connection_override_is_respected(self, service):
+        """连接级关掉了按词猜 → 这里也照实发（与 agent 查询路径同一套判定）。"""
+        service.config.get_connection("demo", "main").policy.mask_default_patterns = False
+        text = service._diag_results_text(service.config.get_connection("demo", "main"), [
+            {"sql": "SELECT password FROM accounts",
+             "columns": ["password"], "rows": [["p@ss"]]},
+        ])
+        assert "p@ss" in text
+
+    def test_bounds_and_skips_empty_sets(self, service):
+        cfg = service.config.get_connection("demo", "main")
+        results = [{"sql": f"SELECT {i}", "columns": ["n"],
+                    "rows": [[i]] * 50} for i in range(20)]
+        results.append({"sql": "SELECT empty_set", "columns": [], "rows": []})
+        results.append("不是字典")
+        text = service._diag_results_text(cfg, results)
+        assert text.count("SQL:") == 10          # max_sets
+        assert "\t50" not in text                # 每集最多 30 行
+        assert "empty_set" not in text           # 空结果集跳过

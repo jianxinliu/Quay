@@ -113,6 +113,7 @@
   cursor:pointer;transition:border-color .12s,color .12s}
 .set-actions button:hover{border-color:var(--accent);color:var(--accent)}
 .set-actions .msg{font-size:12.5px;color:var(--muted);line-height:1.4}
+.set-actions .hint{font-size:12px;color:var(--faint);line-height:1.4}
 
 /* 「已改」：治理工具里「我把哪道护栏放松了」必须一眼可见，
    不能只在心里记着或翻 git。 */

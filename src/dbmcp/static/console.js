@@ -2498,7 +2498,10 @@
         var dbs = [];
         if (eng === "postgres") dbs = (this.serverDbs || []).slice();
         else if (eng === "mysql" || eng === "clickhouse") dbs = (this.databases || []).slice();
-        var sel = t.schema || "";
+        // 默认选当前 tab 的库：MySQL/CH 的 schema 就是库；PG 的 tab.schema 是 schema 名
+        // （如 public），拿它当 database 会连到一个不存在的库、体检整份失败
+        var sel = eng === "postgres" ? (t.db || this.pgDb || "") : (t.schema || "");
+        if (sel && dbs.length && dbs.indexOf(sel) < 0) sel = "";   // 不在下拉里的值一律按实例级
         this.checkup = { status: "loading", report: null, error: "", connLabel: t.conn,
                          all: !sel, dbSel: sel, dbs: dbs, engine: eng };
         this.ckPage = "report"; this.ckRecView = null;
@@ -2583,13 +2586,19 @@
       // 打开一条历史记录：直接用它重绘报告页（报告结构原样存下来，渲染路径完全一致）
       viewCheckupRecord: function (id) {
         var self = this;
-        apiGet("/admin/sql/checkup/records/" + id).then(function (d) {
+        var t = this.activeTab;
+        // 带上连接：接口按「记录属于这个连接」校验，别的项目的同名连接读不到/删不掉
+        apiGet("/admin/sql/checkup/records/" + id
+               + "?conn=" + encodeURIComponent((t && t.conn) || "")).then(function (d) {
           if (!d || !d.ok || !d.record || !d.record.report) {
             self.flash((d && d.error) || "记录不存在或已损坏"); return;
           }
           var rec = d.record;
           // 作废在途的实时体检回包（见 _fetchCheckup 里的 seq 说明）
           self._ckSeq = (self._ckSeq || 0) + 1;
+          // 诊断与排查结果属于「刚才那份实时报告」：换了报告就一起清掉，
+          // 否则会拿着旧诊断、在旧库上跑 SQL，看起来却像是这条记录的排查结果
+          self.checkupDiag = null; self.diagRuns = {}; self.diagQuestion = "";
           self.checkup = Object.assign({}, self.checkup, {
             status: "report", report: rec.report, error: "" });
           self.ckRecView = rec;
@@ -2600,7 +2609,9 @@
         // 历史记录删了就没了（不做软删）；用浏览器确认框兜一次误点
         if (!window.confirm("删除这条体检记录？删除后不能恢复。")) return;
         var self = this;
-        apiPost("/admin/sql/checkup/records/" + id + "/delete", {}).then(function (d) {
+        var t = this.activeTab;
+        apiPost("/admin/sql/checkup/records/" + id + "/delete",
+                { conn: (t && t.conn) || "" }).then(function (d) {
           if (!d || !d.ok) { self.flash((d && d.error) || "删除失败"); return; }
           if (self.ckRecView && self.ckRecView.id === id) self.ckRecView = null;
           self.loadCheckupRecs();
@@ -2669,6 +2680,11 @@
       // 失败后**不**自动重试——错误页上本来就有「重试」按钮，切页签就重发一次
       // 等于隐式重复调 AI（慢接口时还会互相覆盖状态）
       toDiagPage: function () {
+        // 没开 AI 就别发注定 403 的请求，页面本身有「去设置里打开」的空态
+        if (!this.aiEnabled) { this.ckPage = "diag"; return; }
+        // 体检还没出报告（loading/error）时只切页：带空报告请求会让服务端现场重跑
+        // 一次体检，等于按一下按钮多跑一次全量检查、还多存一条历史
+        if (!this.checkup || this.checkup.status !== "report") { this.ckPage = "diag"; return; }
         this.ckPage = "diag";
         if (!this.checkupDiag) this.aiDiagnose();
       },
@@ -2679,13 +2695,15 @@
         if (sid && !q) { this.flash("请输入追问内容"); return; }
         this._aiDiagnose(q);
       },
-      _aiDiagnose: function (question) {
+      _aiDiagnose: function (question, results) {
         var t = this.activeTab, self = this;
         if (!t || !t.conn) { this.flash("请先选择连接"); return; }
         if (this.checkupDiag && this.checkupDiag.status === "loading") return;  // 防重复点击
         var sid = (this.checkupDiag && this.checkupDiag.sessionId) || "";
         var tg = this.diagTarget();
         var body = { conn: t.conn, question: question || "" };
+        // 排查结果按结构化数据送，由服务端按连接策略脱敏后再拼进 prompt
+        if (results && results.length) body.results = JSON.stringify(results);
         // 没有报告时服务端会现场重跑体检：范围必须跟弹窗里选的一致，不能取 tab 的库
         if (tg.schema) body.schema = tg.schema;
         if (tg.db) body.db = tg.db;
@@ -2764,27 +2782,23 @@
                       sql: sql, title: "排查 SQL" });
         this.flash("已在查询台新开一个 tab");
       },
-      // 把执行过的排查结果汇总成一段文本，续接 AI 会话继续分析
+      // 把执行过的排查结果送给 AI 继续分析。
+      // **只送结构化的行列数据，不做本地拼文本**：结果可能会命中敏感列（手机号、
+      // 口令…），脱敏必须在服务端按该连接的脱敏策略做——前端不认识策略，拼成文本
+      // 再发出去就绕过了 masking。行数/单元格长度同样由服务端截断。
       aiAnalyzeResults: function () {
-        var runs = this.diagRuns || {}, parts = [];
+        var runs = this.diagRuns || {}, results = [];
         Object.keys(runs).forEach(function (sql) {
           var r = runs[sql];
           if (!r || r.status !== "ok" || !(r.columns || []).length) return;
-          var lines = [(r.columns || []).join("\t")];
-          (r.rows || []).slice(0, 30).forEach(function (row) {
-            lines.push(row.map(function (v) {
-              var s = v == null ? "" : String(v);
-              return s.length > 200 ? s.slice(0, 200) + "…" : s;
-            }).join("\t"));
-          });
-          parts.push("SQL:\n" + sql + "\n结果（最多 30 行）:\n" + lines.join("\n"));
+          results.push({ sql: sql, columns: r.columns, rows: (r.rows || []).slice(0, 30) });
         });
-        if (!parts.length) { this.flash("先执行至少一条有结果的排查 SQL"); return; }
+        if (!results.length) { this.flash("先执行至少一条有结果的排查 SQL"); return; }
         if (!this.checkupDiag || !this.checkupDiag.sessionId) {
           this.flash("先点「AI 诊断」建立会话，再执行排查 SQL"); return;
         }
-        this._aiDiagnose("我刚执行了你建议的排查 SQL，结果如下，请据此继续分析"
-                         + "（说明结论、还需要做什么）：\n\n" + parts.join("\n\n"));
+        this._aiDiagnose("我刚执行了你建议的排查 SQL，请据此继续分析（说明结论、还需要做什么）：",
+                         results);
       },
       // 选中多条执行：先整批评估，含写操作就只确认一次，确认后逐条执行不再询问。
       // 语法错误在这一步整批拦下——不能前几条已经写进去了才发现后面有一条写错。
@@ -5305,7 +5319,7 @@
     </div>
   </div>
 
-  <!-- 体检弹窗：只能由右上 ✕ 或左列「关闭」退出（点遮罩/按 Esc 都不关，避免误关丢结果）。
+  <!-- 体检弹窗：只能由右上 ✕ 退出（点遮罩/按 Esc 都不关，避免误关丢结果）。
        左列为菜单，右侧是当前页（报告 / AI 诊断 / 记录）。 -->
   <div v-if="checkup" class="dg-checkup">
     <div class="box">
