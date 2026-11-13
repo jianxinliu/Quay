@@ -521,8 +521,9 @@ def _settings_info_body(service: "DbmService", req: "Request") -> str:
     try:
         from importlib.metadata import version as _pkgver
         ver = _pkgver("db-manage-mcp")
-    except Exception:  # noqa: BLE001
-        ver = "0.1.0"
+    except Exception:  # noqa: BLE001 - 未安装成包（源码目录直跑）时用包内版本号
+        from .. import __version__
+        ver = __version__
 
     def _size(p: object) -> str | None:
         try:

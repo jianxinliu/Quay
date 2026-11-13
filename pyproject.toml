@@ -1,6 +1,6 @@
 [project]
 name = "db-manage-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Quay — a local database workbench with governed access for humans and AI agents: SQL IDE, Redis console, cross-source analysis, and MCP over one connection & security layer (SQL audit, human approval, full operation trail)."
 readme = "README.md"
 requires-python = ">=3.12"
