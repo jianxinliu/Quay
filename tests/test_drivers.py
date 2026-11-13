@@ -63,6 +63,23 @@ def test_builtin_capability_defaults():
         assert d.icon, f"{e} 缺品牌图标"
 
 
+def test_clickhouse_engine_can_be_built_without_a_password():
+    """ClickHouse 的 default 用户常常没有密码，配置里省略 password 是合法写法。
+
+    原先把「没配」当成「配了个空引用」交给 resolve_secret，直接抛
+    「未知的密钥引用格式: ''」——连都连不上，且提示与真实原因无关。
+    """
+    from dbmcp.config import ConnectionConfig
+
+    cfg = ConnectionConfig(engine="clickhouse", environment="local",
+                           host="127.0.0.1", port=9000, user="default")
+    eng = get_driver("clickhouse").build_engine(cfg, "reader", "127.0.0.1", 9000)
+    try:
+        assert eng.url.password == ""
+    finally:
+        eng.dispose()
+
+
 def test_registering_a_driver_flows_through_every_engine_list(registry_snapshot):
     """加一个驱动：表单下拉、同步源/目标、方言、端口、图标全部自动跟上。"""
     register(_FakeDriver)
