@@ -303,7 +303,7 @@ def _set_section(title: str, desc: str, rows: str, guard: bool = False,
     return f"<section class='{classes}'><header>{head}</header>{rows}</section>"
 
 
-def _set_actions(buttons: str, msg_id: str = "") -> str:
+def _set_actions(buttons: str, msg_id: str = "", hint: str = "") -> str:
     """分区内的常驻操作行（测试连通性、刷新模型这类即时动作）。
 
     **不能放进 `.set-bar`**：那条只有存在未保存改动时才浮出（opacity:0 +
@@ -311,7 +311,8 @@ def _set_actions(buttons: str, msg_id: str = "") -> str:
     才能发现它们。动作按钮属于「随时可点」，就近放在它作用的分区里。
     """
     msg = f"<span class='msg' id='{msg_id}'></span>" if msg_id else ""
-    return f"<div class='set-actions'>{buttons}{msg}</div>"
+    note = f"<span class='hint'>{_esc(hint)}</span>" if hint else ""
+    return f"<div class='set-actions'>{buttons}{msg}{note}</div>"
 
 
 def _settings_layout(sections: str, active: str, actions: str = "") -> str:

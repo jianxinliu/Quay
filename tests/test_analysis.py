@@ -512,6 +512,34 @@ class TestGraph:
         assert run["error"]
         assert run["graph_snap"]["nodes"][0]["id"] == "a"
 
+    def test_run_traced_is_single_flight_per_workflow(self, service, tmp_path):
+        """同一流程同时只跑一份——手工与 agent 两个入口都在 workflow_run_traced。
+
+        两边都会操作同一个 DuckDB 工作区（同名数据集会互相覆盖），
+        调度侧的判断管不到这两个入口。
+        """
+        from dbmcp.service import QueryRejected
+        from dbmcp.workflows import WorkflowRunStore, WorkflowStore
+
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        service.workflows.save("busy", "ws_sf", "SELECT 1", [])
+        service.runs = WorkflowRunStore(tmp_path / "wf.sqlite3")
+        service.runs.start("busy", triggered_by="manual")   # 模拟另一个入口正在跑
+        with pytest.raises(QueryRejected, match="正在运行"):
+            service.workflow_run_traced("busy", CALLER)
+        # 被挡下的这次不该留下第二条记录
+        assert len(service.workflow_runs_list("busy", 10)) == 1
+
+    def test_run_traced_does_not_leave_ghost_record_for_unknown_name(self, service, tmp_path):
+        """流程名拼错时不该先插一条 running 再失败：那会留下「运行失败」的幽灵记录。"""
+        from dbmcp.workflows import WorkflowError, WorkflowRunStore, WorkflowStore
+
+        service.workflows = WorkflowStore(tmp_path / "wf.sqlite3")
+        service.runs = WorkflowRunStore(tmp_path / "wf.sqlite3")
+        with pytest.raises(WorkflowError):
+            service.workflow_run_traced("no-such-workflow", CALLER)
+        assert service.workflow_runs_list("no-such-workflow", 10) == []
+
     def test_graph_multi_output_end_to_end(self, service, tmp_path):
         """两个 output 节点：都能物化为视图并独立预览；outputs 列表包含两条结果。"""
         from dbmcp.workflows import WorkflowStore

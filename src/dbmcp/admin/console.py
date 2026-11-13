@@ -561,12 +561,21 @@ def mount(ctx: AdminContext) -> None:
                 report = obj if isinstance(obj, dict) else None
             except (ValueError, TypeError):
                 return JSONResponse({"ok": False, "error": "体检报告 JSON 解析失败"}, status_code=400)
+        # 「把排查结果喂回 AI」用：结构化行列数据，脱敏由服务端按连接策略做
+        results = None
+        raw_res = str(f.get("results") or "").strip()
+        if raw_res:
+            try:
+                obj = json.loads(raw_res)
+            except (ValueError, TypeError):
+                return JSONResponse({"ok": False, "error": "排查结果 JSON 解析失败"}, status_code=400)
+            results = obj if isinstance(obj, list) else None
         try:
             out = await anyio.to_thread.run_sync(
                 lambda: service.ai_diagnose_checkup(
                     project, connection, question, _caller(req),
                     report=report, schema=schema, database=database, session_id=session_id,
-                    all_dbs=all_dbs))
+                    all_dbs=all_dbs, results=results))
         except (QueryRejected, KeyError, ValueError) as e:
             return JSONResponse({"ok": False, "error": str(e)})
         except Exception as e:  # noqa: BLE001
@@ -593,19 +602,37 @@ def mount(ctx: AdminContext) -> None:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "records": recs})
 
+    def _record_owned(rec: dict, conn_param: str) -> bool:
+        """记录是否属于这个连接。
+
+        id 是全局自增的：光凭 id 就能读/删别的项目下同名连接的体检历史。
+        前端总是带着当前连接的 `conn` 来，接口层也要求它——多项目共用一个后台时，
+        一次手滑的 id 不该删掉别人的历史快照。
+        """
+        if not conn_param:
+            return False
+        try:
+            project, connection = _resolve_conn(conn_param)
+        except Exception:  # noqa: BLE001 - 连接名非法 = 不属于
+            return False
+        return rec.get("project") == project and rec.get("connection") == connection
+
     @mcp.custom_route("/admin/sql/checkup/records/{rid:int}", methods=["GET"])
     @guard
     async def _sql_checkup_record(req: Request) -> JSONResponse:
-        """单条体检记录（含完整 report，可原样重新渲染）。"""
+        """单条体检记录（含完整 report，可原样重新渲染）。必须带 ?conn= 校验归属。"""
         try:
             rid = int(req.path_params["rid"])
         except (TypeError, ValueError):
             return JSONResponse({"ok": False, "error": "记录 id 非法"}, status_code=400)
+        conn = req.query_params.get("conn", "")
+        if not conn:
+            return JSONResponse({"ok": False, "error": "缺少 conn 参数"}, status_code=400)
         try:
             rec = await anyio.to_thread.run_sync(service.checkup_record_get, rid)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-        if rec is None:
+        if rec is None or not _record_owned(rec, conn):
             return JSONResponse({"ok": False, "error": "记录不存在"}, status_code=404)
         return JSONResponse({"ok": True, "record": rec})
 
@@ -616,7 +643,14 @@ def mount(ctx: AdminContext) -> None:
             rid = int(req.path_params["rid"])
         except (TypeError, ValueError):
             return JSONResponse({"ok": False, "error": "记录 id 非法"}, status_code=400)
+        f = await req.form()
+        conn = str(f.get("conn") or "")
+        if not conn:
+            return JSONResponse({"ok": False, "error": "缺少 conn 参数"}, status_code=400)
         try:
+            rec = await anyio.to_thread.run_sync(service.checkup_record_get, rid)
+            if rec is None or not _record_owned(rec, conn):
+                return JSONResponse({"ok": False, "error": "记录不存在"}, status_code=404)
             deleted = await anyio.to_thread.run_sync(service.checkup_record_delete, rid)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
