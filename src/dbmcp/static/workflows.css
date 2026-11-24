@@ -101,7 +101,7 @@
 
 .wf-edge-x {
   position: absolute; transform: translate(-50%, -50%); width: 14px; height: 14px;
-  line-height: 13px; text-align: center; font-size: 9px; border-radius: 50%;
+  line-height: 13px; text-align: center; font-size: 10px; border-radius: 50%;
   background: var(--dg-panel); border: 1px solid var(--dg-border); color: var(--dg-muted);
   cursor: pointer; opacity: 0; transition: opacity .12s; z-index: 3;
 }
@@ -109,9 +109,9 @@
 .wf-edge-x:hover { color: #fff; background: var(--dg-red); border-color: var(--dg-red); opacity: 1; }
 
 .wf-fnode {
-  position: absolute; width: 150px; height: 40px; box-sizing: border-box; z-index: 2;
+  position: absolute; width: 180px; height: 40px; box-sizing: border-box; z-index: 2;
   background: var(--dg-panel); border: 1px solid var(--dg-border); border-radius: 6px;
-  cursor: grab; user-select: none; font-size: 11px;
+  cursor: grab; user-select: none; font-size: 12px;
 }
 .wf-fnode.sel { border-color: var(--dg-accent); box-shadow: 0 0 0 1px var(--dg-accent); }
 .wf-fnode.ok { border-color: var(--dg-green); }
@@ -119,12 +119,12 @@
 .wf-fnode.running { border-color: var(--dg-amber); }
 .wf-fnode .hd { display: flex; align-items: center; gap: 5px; padding: 3px 7px 0; }
 .wf-fnode .ty {
-  flex: none; font-size: 9px; padding: 0 4px; border-radius: 3px; line-height: 14px;
-  background: var(--dg-accent-soft); color: #cfe0ff;
+  flex: none; font-size: 10.5px; font-weight: 600; padding: 0 5px; border-radius: 3px; line-height: 16px;
+  background: var(--dg-accent-soft); color: var(--dg-text);
   white-space: nowrap;                   /* 中文双字徽章别被挤成竖排 */
 }
-.wf-fnode.source .ty, .wf-fnode.file .ty { background: #1e3a2f; color: #7ee2a8; }
-.wf-fnode.output .ty { background: #3a2c1e; color: #e8c07a; }
+.wf-fnode.source .ty, .wf-fnode.file .ty { background: rgba(34,197,94,.18); color: var(--dg-green); }
+.wf-fnode.output .ty { background: rgba(245,158,11,.18); color: var(--dg-amber); }
 .wf-fnode .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--dg-text); font-family: var(--dg-mono); }
 .wf-fnode .st { flex: none; font-size: 10px; color: var(--dg-muted); }
@@ -134,7 +134,7 @@
 .wf-fnode .x { flex: none; cursor: pointer; color: var(--dg-faint); padding: 0 2px; }
 .wf-fnode .x:hover { color: var(--dg-red); }
 .wf-fnode .bd {
-  padding: 1px 7px; color: var(--dg-muted); font-size: 10px; font-family: var(--dg-mono);
+  padding: 1px 7px; color: var(--dg-muted); font-size: 11px; font-family: var(--dg-mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .wf-fnode .port {
@@ -191,11 +191,11 @@
 .wf-mod-hd:hover { background: var(--dg-hover); }
 .wf-mod-step {
   flex: none; width: 22px; height: 22px; line-height: 22px; text-align: center;
-  background: var(--dg-accent-soft); color: #cfe0ff; border-radius: 50%; font-size: 11px; font-weight: 600;
+  background: var(--dg-accent-soft); color: var(--dg-text); border-radius: 50%; font-size: 11px; font-weight: 600;
 }
 .wf-mod-ty {
-  flex: none; font-size: 10px; padding: 1px 7px; border-radius: 3px;
-  background: var(--dg-accent-soft); color: #cfe0ff;
+  flex: none; font-size: 11px; padding: 1px 7px; border-radius: 3px;
+  background: var(--dg-accent-soft); color: var(--dg-text);
 }
 .wf-mod-nm { flex: 1; font-family: var(--dg-mono); color: var(--dg-text); font-size: 13px; }
 .wf-mod-caret { flex: none; color: var(--dg-muted); font-size: 12px; width: 14px; text-align: center; }
@@ -436,7 +436,7 @@
 }
 .wf-drawer-ty {
   flex: none; font-size: 11px; padding: 2px 8px; border-radius: 3px;
-  background: var(--dg-accent-soft); color: #cfe0ff;
+  background: var(--dg-accent-soft); color: var(--dg-text);
 }
 .wf-drawer-name {
   flex: 1; background: transparent; border: 1px solid transparent; color: var(--dg-text);

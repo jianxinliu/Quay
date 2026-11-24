@@ -13,7 +13,7 @@
   "use strict";
   var API = "/admin/workflows";
   var JOIN_MAX_PORTS = 8;
-  var NODE_W = 150, NODE_H = 40;
+  var NODE_W = 180, NODE_H = 40;
 
   function apiGet(url) {
     return fetch(url, { headers: { Accept: "application/json" } })
