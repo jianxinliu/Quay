@@ -3,7 +3,7 @@
   // 侧栏高亮当前页
   var p = location.pathname;
   document.querySelectorAll('.side nav a').forEach(function (a) {
-    if (p.indexOf(a.getAttribute('href')) === 0) a.classList.add('active');
+    if (p.indexOf(a.getAttribute('href')) === 0) { a.classList.add('active'); a.setAttribute('aria-current', 'page'); }
   });
 })();
 
@@ -13,7 +13,7 @@ function dbmConfirm(form) {
   if (form.dataset.armed === '1') return true;
   form.dataset.armed = '1';
   btn.dataset.old = btn.textContent;
-  btn.textContent = '确认删除？';
+  btn.textContent = btn.dataset.confirm || '确认删除？';
   btn.style.filter = 'brightness(1.25)';
   setTimeout(function () {
     form.dataset.armed = '';
@@ -44,16 +44,25 @@ function dbmConfirm(form) {
   bell.className = 'dbm-bell';
   bell.type = 'button';
   bell.title = '通知';
+  bell.setAttribute('aria-label', '通知');
+  bell.setAttribute('aria-haspopup', 'dialog');
+  bell.setAttribute('aria-expanded', 'false');
   bell.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none">' +
     '<path d="M8 1.5c-2 0-3.5 1.7-3.5 3.7v2.3L3 10h10L11.5 7.5V5.2C11.5 3.2 10 1.5 8 1.5Z" ' +
       'stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>' +
     '<path d="M6.5 11.5c0 .8.7 1.5 1.5 1.5s1.5-.7 1.5-1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
     '</svg>' +
-    '<span class="dbm-badge">0</span>';
-  document.body.appendChild(bell);
+    '<span class="dbm-badge" aria-live="polite">0</span>';
+  // 放进侧栏底部（不再 fixed 盖住各页右上角工具栏）；没有侧栏时退回 fixed
+  var foot = document.querySelector('.side .foot');
+  if (foot) { bell.classList.add('in-side'); foot.insertBefore(bell, foot.firstChild); }
+  else document.body.appendChild(bell);
 
   var panel = document.createElement('div');
-  panel.className = 'dbm-panel';
+  panel.className = 'dbm-panel' + (foot ? ' from-side' : '');
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', '通知');
+  panel.tabIndex = -1;
   panel.innerHTML =
     '<div class="dbm-panel-hd"><b>通知</b>' +
       '<button type="button" class="dbm-clear">全部已读</button></div>' +
@@ -101,7 +110,7 @@ function dbmConfirm(form) {
       var title = escapeHtml(n.title || '');
       var body = escapeHtml(n.body || '');
       var href = deeplink ? ' data-href="' + escapeHtml(deeplink) + '"' : '';
-      return '<div class="' + cls + '" data-id="' + n.id + '"' + href + '>' +
+      return '<div role="button" tabindex="0" class="' + cls + '" data-id="' + n.id + '"' + href + '>' +
         '<div class="dbm-item-title">' + title + '</div>' +
         '<div class="dbm-item-body">' + body + '</div>' +
         '<div class="dbm-item-time">' + escapeHtml(fmtTime(n.created_at)) + '</div>' +
@@ -151,13 +160,20 @@ function dbmConfirm(form) {
   // 打开/关闭面板
   bell.addEventListener('click', function (e) {
     e.stopPropagation();
-    var open = panel.classList.toggle('open');
-    if (open) fetchList();
+    setOpen(!panel.classList.contains('open'));
+  });
+  function setOpen(open) {
+    panel.classList.toggle('open', open);
+    bell.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) { fetchList(); panel.focus(); }
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && panel.classList.contains('open')) { setOpen(false); bell.focus(); }
   });
   document.addEventListener('click', function (e) {
     if (!panel.classList.contains('open')) return;
     if (panel.contains(e.target) || bell.contains(e.target)) return;
-    panel.classList.remove('open');
+    setOpen(false);
   });
   clearBtn.addEventListener('click', function () {
     markRead('*');
@@ -181,6 +197,10 @@ function dbmConfirm(form) {
       // 相对路径直接跳（同源）；绝对路径也允许
       window.location.href = href;
     }
+  });
+
+  listEl.addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.closest('.dbm-item')) { e.preventDefault(); e.target.click(); }
   });
 
   // 首屏 & SSE

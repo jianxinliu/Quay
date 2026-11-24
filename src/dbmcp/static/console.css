@@ -36,11 +36,11 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .side .foot a { padding: 9px 2px !important; text-align: center; font-size: 11px; letter-spacing: .02em; }
 
 :root {
-  --dg-bg: #1e1f22; --dg-panel: #2b2d30; --dg-panel-2: #26282b; --dg-border: #393b40;
-  --dg-text: #bcbec4; --dg-muted: #7a7e85; --dg-faint: #5a5d63;
-  --dg-accent: #3574f0; --dg-accent-soft: #2e436e; --dg-hover: #34373b;
-  --dg-accent-strong: #4c8af5;  /* 实心按钮 hover 加亮 */
-  --dg-accent-ink: #9ec2ff;     /* 强调正文（深底上的亮蓝字） */
+  --dg-bg: #1e1f22; --dg-panel: #2b2d30; --dg-panel-2: #26282b; --dg-border: #3b3e43;
+  --dg-text: #c9ccd1; --dg-muted: #9296a0; --dg-faint: #80848d;
+  --dg-accent: #0d9488; --dg-accent-soft: rgba(20,184,166,.24); --dg-hover: #34373b;
+  --dg-accent-strong: #14b8a6;  /* 实心按钮 hover 加亮 */
+  --dg-accent-ink: #5eead4;     /* 强调正文（深底上的亮蓝字） */
   --dg-green: #57965c; --dg-red: #d9534f; --dg-amber: #d9a343;
   --dg-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
@@ -50,9 +50,9 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-root.theme-light, .rd-root.theme-light, .pv-root.theme-light {
   --dg-bg: #ffffff; --dg-panel: #f2f4f7; --dg-panel-2: #e9ecf1; --dg-border: #d4d8df;
   --dg-text: #1f2530; --dg-muted: #5b6270; --dg-faint: #838a97;
-  --dg-accent: #2563eb; --dg-accent-soft: #d6e2fb; --dg-hover: #eef1f6;
-  --dg-accent-strong: #1d4ed8;  /* 实心按钮 hover 加深 */
-  --dg-accent-ink: #1e4fa8;     /* 强调正文（浅底上的深蓝字） */
+  --dg-accent: #0d9488; --dg-accent-soft: #ccfbf1; --dg-hover: #eef1f6;
+  --dg-accent-strong: #0f766e;  /* 实心按钮 hover 加深 */
+  --dg-accent-ink: #0b7268;     /* 强调正文（浅底上的深蓝字） */
   --dg-green: #1f7a30; --dg-red: #c02a26; --dg-amber: #a9750f;
   /* 树图标在浅底上要压深，否则中性灰会糊掉、琥珀会发白 */
   --tree-ico: #6b7280; --tree-ico-table: #a9750f;
@@ -1062,7 +1062,7 @@ table.dg-rt tr.delrow td.gut { color: var(--dg-red); text-decoration: none; }
 table.dg-rt th .ctype { display: inline-block; width: 15px; margin-right: 5px; text-align: center;
   font-family: var(--dg-mono); font-size: 10px; font-weight: 700; border-radius: 3px;
   color: var(--dg-bg); line-height: 14px; vertical-align: baseline; }
-.ct-number { background: #3574f0; }
+.ct-number { background: var(--dg-accent); }
 .ct-string { background: #57965c; }
 .ct-datetime, .ct-date, .ct-time { background: #d9a343; }
 .ct-json { background: #bc8cff; }

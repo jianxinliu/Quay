@@ -27,6 +27,10 @@
   --chart-ok:#0d9488; --chart-ok-2:#0f766e; --chart-blocked:#4f7bd9; --chart-blocked-2:#3d6fd1;
   --chart-err:#c0392b; --chart-err-2:#a5281c;
   --chart-area-0:rgba(13,148,136,.28); --chart-area-1:rgba(13,148,136,.02);
+  --badge:#dc2626; --badge-ink:#fff; --focus:#14b8a6;
+  /* 实心底上的白字 / 批准·拒绝按钮 / 状态点 / 深色操作条（侧栏同色系） */
+  --on-solid:#fff; --approve:#16794f; --reject:#c0392b; --st-warn:#d97706;
+  --bar-ink:#e6e8ec; --bar-muted:#9aa1ac; --bar-hl:#5eead4; --knob:#fff;
   --mono:ui-monospace,'SF Mono',Menlo,Monaco,'Cascadia Code',monospace;
   --sans:-apple-system,'SF Pro Text',system-ui,'PingFang SC',sans-serif;
 }
@@ -34,7 +38,7 @@
    读起来是同一个产品；强调色仍是侧栏那一支青绿。 */
 html.theme-dark{
   --paper:#1e1f22; --surface:#2b2d30; --border:#3b3e43; --line:#34373b;
-  --text:#c9ccd1; --muted:#9296a0; --faint:#6c7079;
+  --text:#c9ccd1; --muted:#9296a0; --faint:#80848d;
   --accent:#14b8a6; --accent-ink:#5eead4; --accent-soft:rgba(20,184,166,.14); --accent-soft-2:rgba(20,184,166,.24);
   --code-bg:#1e1f22; --code-ink:#c9ccd1; --row-hover:#323539; --chip:#35383d; --chip-hover:#3d4046;
   --input-bg:#1e1f22; --switch-off:#4a4e55; --shadow:rgba(0,0,0,.5);
@@ -54,7 +58,8 @@ html.theme-dark{
 *{box-sizing:border-box}
 body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
   -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.5}
-.shell{display:grid;grid-template-columns:236px 1fr;min-height:100vh}
+.shell{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh}
+.shell>main{min-width:0}
 /* 侧栏 */
 .side{background:var(--ink);color:#c7cdd6;display:flex;flex-direction:column;padding:20px 14px;
   position:sticky;top:0;height:100vh}
@@ -90,7 +95,7 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 .nico-approve{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 1.9 13.4 3.8v3.8c0 3.1-2.2 5.6-5.4 6.7-3.2-1.1-5.4-3.6-5.4-6.7V3.8Z'/><path d='m5.6 7.8 1.8 1.8 3.3-3.5'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M8 1.9 13.4 3.8v3.8c0 3.1-2.2 5.6-5.4 6.7-3.2-1.1-5.4-3.6-5.4-6.7V3.8Z'/><path d='m5.6 7.8 1.8 1.8 3.3-3.5'/></svg>")}
 .nico-audit{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.3 3.7h7.9M2.3 8h5.3M2.3 12.3h4.3'/><circle cx='11.6' cy='10.6' r='2.9'/><path d='M11.6 9.2v1.6l1.2.8'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.3 3.7h7.9M2.3 8h5.3M2.3 12.3h4.3'/><circle cx='11.6' cy='10.6' r='2.9'/><path d='M11.6 9.2v1.6l1.2.8'/></svg>")}
 .nico-settings{-webkit-mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h3.9M9.7 4.6h3.9M2.4 11.4h5.9M11.7 11.4h1.9'/><circle cx='8' cy='4.6' r='1.7'/><circle cx='10' cy='11.4' r='1.7'/></svg>");mask-image:url("data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2.4 4.6h3.9M9.7 4.6h3.9M2.4 11.4h5.9M11.7 11.4h1.9'/><circle cx='8' cy='4.6' r='1.7'/><circle cx='10' cy='11.4' r='1.7'/></svg>")}
-.nav-count{margin-left:auto;background:#e5484d;color:#fff;font-size:11px;font-weight:700;
+.nav-count{margin-left:auto;background:var(--badge);color:var(--badge-ink);font-size:11px;font-weight:700;
   min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;
   box-shadow:0 0 0 2px var(--ink)}
 .pending-banner{display:block;background:var(--danger-bg);border:1px solid var(--danger-border);color:var(--danger-ink);
@@ -101,12 +106,19 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
   transition:background .14s,color .14s}
 .side .foot a:hover{color:var(--nav-hover);background:rgba(255,255,255,.055);text-decoration:none}
 @media (max-width:720px){
-  .shell{grid-template-columns:1fr}
-  .side{position:static;height:auto;flex-direction:row;align-items:center;padding:12px 16px;gap:8px;overflow-x:auto}
+  .shell{grid-template-columns:minmax(0,1fr)}
+  .side{position:sticky;z-index:50;height:auto;flex-direction:row;align-items:center;padding:12px 16px;gap:8px;overflow-x:auto}
   .side .brand{padding:0 8px 0 0} .side .brand span{display:none}
-  .side nav{flex-direction:row;margin:0} .side .foot{margin:0 0 0 auto;border:none;padding:0}
+  .side nav{flex-direction:row;margin:0;overflow-x:auto;scrollbar-width:none;flex:1;min-width:0}
+  .side nav::-webkit-scrollbar{display:none}
+  /* 窄屏只留图标，title 由 JS 补齐 */
+  .side nav a{padding:9px 10px} .side nav a .nlabel{display:none} .side nav a.active::before{display:none}
+  .side .foot{margin:0 0 0 auto;border:none;padding:0;display:flex;align-items:center;gap:6px}
 }
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
+/* 键盘焦点：全站统一可见焦点环 */
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.side nav a:focus-visible,.side .foot a:focus-visible{outline-offset:-2px}
 
 /* -------- 全站铃铛（fixed，不占文档流 → SPA/服务端渲染页共用） -------- */
 .dbm-bell{position:fixed;top:14px;right:20px;z-index:9999;
@@ -115,7 +127,7 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
   color:var(--text);font-size:16px;line-height:1;user-select:none;transition:background .12s}
 .dbm-bell:hover{background:var(--paper)}
 .dbm-bell .dbm-badge{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;padding:0 4px;
-  background:#dc2626;color:#fff;font-size:10px;font-weight:700;border-radius:10px;
+  background:var(--badge);color:var(--badge-ink);font-size:10px;font-weight:700;border-radius:10px;
   display:none;align-items:center;justify-content:center;border:2px solid var(--paper)}
 .dbm-bell.has-unread .dbm-badge{display:inline-flex}
 .dbm-bell.new-pulse{animation:dbm-bell-pulse .6s ease-out}
@@ -123,8 +135,6 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
   0%{transform:scale(1)} 30%{transform:scale(1.2)} 60%{transform:scale(.94)} 100%{transform:scale(1)}
 }
 
-/* SPA 页面主题变量可能未定义（Monaco 世界）→ 提供 fallback */
-.dbm-bell[data-fallback]{background:#fff;border-color:#e6e8ec;color:#1a1f28}
 
 .dbm-panel{position:fixed;top:56px;right:20px;z-index:9998;width:380px;max-height:70vh;
   background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 6px 24px var(--shadow);
@@ -149,7 +159,15 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 .dbm-item-body{font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-word;
   max-height:36px;overflow:hidden;line-height:1.4}
 .dbm-item-time{font-size:11px;color:var(--faint);margin-top:4px;font-family:var(--mono)}
+/* 侧栏内的铃铛：与「退出登录」同排，不再遮挡内容 */
+.dbm-bell.in-side{position:relative;top:auto;right:auto;width:30px;height:30px;margin:0 0 8px 8px;
+  background:transparent;border-color:rgba(255,255,255,.12);color:var(--nav-idle);box-shadow:none}
+.dbm-bell.in-side:hover{background:rgba(255,255,255,.055);color:var(--nav-hover)}
+.dbm-bell.in-side .dbm-badge{border-color:var(--ink)}
+.dbm-panel.from-side{top:auto;bottom:16px;right:auto;left:250px;max-height:min(70vh,560px)}
 @media (max-width:720px){
   .dbm-bell{top:10px;right:12px}
+  .dbm-bell.in-side{margin:0}
+  .dbm-panel.from-side{top:64px;bottom:auto;left:12px;right:12px}
   .dbm-panel{top:52px;right:12px;left:12px;width:auto}
 }

@@ -131,7 +131,7 @@
 .sw .track{width:38px;height:22px;border-radius:11px;background:var(--switch-off);flex:none;
   transition:background .16s;position:relative}
 .sw .track::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;
-  border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(15,20,27,.25);
+  border-radius:50%;background:var(--knob);box-shadow:0 1px 3px rgba(15,20,27,.25);
   transition:transform .16s}
 .sw input:checked+.track{background:var(--accent)}
 .sw input:checked+.track::after{transform:translateX(16px)}
@@ -168,20 +168,20 @@
 /* 保存按钮原来钉在十几行表单的最下面，改完上面第二项还得滚到底。
    改动条只在真有改动时浮出来，并说清楚「改了几项」。 */
 .set-bar{position:sticky;bottom:18px;margin-top:20px;display:flex;align-items:center;gap:14px;
-  padding:12px 16px;border-radius:12px;background:var(--ink);color:#e6e8ec;
+  padding:12px 16px;border-radius:12px;background:var(--ink);color:var(--bar-ink);
   box-shadow:0 10px 30px rgba(15,20,27,.22);
   opacity:0;transform:translateY(10px);pointer-events:none;transition:opacity .18s,transform .18s}
 .set-bar.on{opacity:1;transform:none;pointer-events:auto}
 .set-bar .n{font-size:13.5px}
-.set-bar .n b{color:#5eead4}
+.set-bar .n b{color:var(--bar-hl)}
 .set-bar .spacer{flex:1}
-.set-bar .msg{font-size:12.5px;color:#9aa1ac}
+.set-bar .msg{font-size:12.5px;color:var(--bar-muted)}
 .set-bar button{border:none;border-radius:8px;padding:8px 16px;font-size:13.5px;cursor:pointer;
   font-family:var(--sans)}
-.set-bar .save{background:var(--accent);color:#fff;font-weight:500}
+.set-bar .save{background:var(--accent);color:var(--on-solid);font-weight:500}
 .set-bar .save:hover{filter:brightness(1.12)}
-.set-bar .reset{background:transparent;color:#9aa1ac}
-.set-bar .reset:hover{color:#e6e8ec}
+.set-bar .reset{background:transparent;color:var(--bar-muted)}
+.set-bar .reset:hover{color:var(--bar-ink)}
 @media (prefers-reduced-motion:reduce){
   .set-bar,.sw .track,.sw .track::after{transition:none}
 }
