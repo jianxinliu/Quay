@@ -173,4 +173,4 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
 }
 
 /* 审批表 SQL 列：短 SQL 一行显示，长的折行 */
-td.sqlcell{min-width:260px}
+td.sqlcell{min-width:200px}
