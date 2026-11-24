@@ -34,10 +34,11 @@
 
 /* 分组的分区条：八个 tab 平铺成一行读不出关系，按「偏好 / 能力 / 资源 / 系统」分组，
    组间一根发丝竖线。分组本身就是信息。 */
-.set-nav{display:flex;align-items:center;gap:3px;flex-wrap:wrap;
+.set-nav{display:flex;align-items:center;gap:3px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;
   border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:22px}
-.set-nav .grp{display:flex;gap:3px}
-.set-nav .sep{width:1px;height:16px;background:var(--border);margin:0 9px}
+.set-nav::-webkit-scrollbar{display:none}
+.set-nav .grp{display:flex;gap:3px;flex:none}
+.set-nav .sep{flex:none;width:1px;height:16px;background:var(--border);margin:0 9px}
 .set-nav a{padding:6px 12px;border-radius:8px;color:var(--muted);font-size:13.5px;
   text-decoration:none;transition:background .12s,color .12s;white-space:nowrap}
 .set-nav a:hover{background:var(--chip);color:var(--text);text-decoration:none}
