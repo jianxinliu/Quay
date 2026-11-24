@@ -38,6 +38,7 @@ def mount(ctx: AdminContext) -> None:
                 '<script src="/admin/static/echarts.min.js"></script>'
                 '<script src="/admin/static/vue.global.prod.js"></script>'
                 '<script src="/admin/static/dg-select.js"></script>'
+                '<script src="/admin/static/workflows-chart.js"></script>'
                 '<script src="/admin/static/workflows.js"></script>')
         return _shell("流程", body, doc=False)
 
@@ -399,6 +400,7 @@ def mount(ctx: AdminContext) -> None:
                 '<script src="/admin/static/echarts.min.js"></script>'
                 '<script src="/admin/static/vue.global.prod.js"></script>'
                 '<script src="/admin/static/dg-select.js"></script>'
+                '<script src="/admin/static/workflows-chart.js"></script>'
                 '<script src="/admin/static/workflows.js"></script>')
         return _shell("运行详情", body, doc=False)
 

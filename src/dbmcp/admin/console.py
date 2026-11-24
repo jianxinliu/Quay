@@ -109,6 +109,7 @@ def _console_body() -> str:
         # 「用户与权限」弹窗组件（左树右键菜单打开），同样须先于 console.js
         '<link rel="stylesheet" href="/admin/static/privileges.css">'
         '<script src="/admin/static/privileges.js"></script>'
+        '<script src="/admin/static/console-md.js"></script>'
         '<script src="/admin/static/console.js"></script>'
     )
 
