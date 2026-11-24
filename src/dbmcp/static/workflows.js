@@ -1040,6 +1040,7 @@
       return {
         route: parseHash(),
         wfs: [],
+        runningCards: {},
         wsList: [],
         loading: false,
         err: "",
@@ -1329,6 +1330,29 @@
           hit.graph.edges = hit.graph.edges || [];
           self.current = hit;
         });
+      },
+      runStLabel: function (s) {
+        return ({ ok: "成功", done: "成功", success: "成功", running: "运行中", error: "失败", err: "失败", failed: "失败" })[s] || s;
+      },
+      openRunHist: function (w) { if (w.last_run && w.last_run.id) location.href = "/admin/workflows/runs/" + w.last_run.id; },
+      reloadCards: function () {
+        var self = this;
+        apiGet(API + "/list").then(function (d) { if (d && d.ok) self.wfs = d.workflows || []; });
+      },
+      runCard: function (w) {
+        var self = this, name = w.name;
+        self.runningCards = Object.assign({}, self.runningCards, { [name]: true });
+        var done = function () { var m = Object.assign({}, self.runningCards); delete m[name]; self.runningCards = m; self.reloadCards(); };
+        apiPost(API + "/run", { name: name }).then(function (d) {
+          if (!d || !d.ok) { alert("启动失败：" + ((d && d.error) || "")); done(); return; }
+          self.reloadCards();
+          var t = setInterval(function () {
+            apiGet("/admin/sql/job?id=" + encodeURIComponent(d.job_id)).then(function (j) {
+              if (!j || !j.ok || j.status === "running" || j.status === "queued") return;
+              clearInterval(t); done();
+            });
+          }, 1500);
+        }).catch(done);
       },
       openDetail: function (name) { location.hash = "#name=" + encodeURIComponent(name); },
       openNew: function () { location.hash = "#new"; },
@@ -1648,9 +1672,16 @@
       +         '<span>{{ (w.graph && w.graph.nodes || []).length }} 个节点</span>'
       +         '<span>更新 {{ fmtTime(w.updated_at) }}</span>'
       +       '</div>'
+      +       '<div class="wf-card-run">'
+      +         '<template v-if="w.last_run"><span class="wf-st" :class="\'st-\' + w.last_run.status">{{ runStLabel(w.last_run.status) }}</span>'
+      +         '<a href="#" @click.stop.prevent="openRunHist(w)">{{ fmtTime(w.last_run.started_at) }}</a></template>'
+      +         '<span v-else class="wf-st st-none">从未运行</span>'
+      +       '</div>'
       +       '<div class="wf-card-acts" @click.stop>'
-      +         '<button class="dg-btn sm" @click="openDetail(w.name)">编辑</button>'
-      +         '<button class="dg-btn sm danger" @click="del(w.name)">删除</button>'
+      +         '<button class="dg-btn sm primary" @click="openDetail(w.name)">打开</button>'
+      +         '<button class="dg-btn sm" :disabled="runningCards[w.name]" @click="runCard(w)">{{ runningCards[w.name] ? "运行中…" : "▶ 运行" }}</button>'
+      +         '<span class="wf-card-sp"></span>'
+      +         '<button class="wf-card-del" @click="del(w.name)" title="删除流程" aria-label="删除流程">删除</button>'
       +       '</div>'
       +     '</div>'
       +   '</div>'

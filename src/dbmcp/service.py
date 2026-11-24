@@ -1821,7 +1821,14 @@ class DbmService:
     def workflow_list(self) -> list[dict]:
         if self.workflows is None:
             return []
-        return [w.to_dict() for w in self.workflows.list()]
+        out = []
+        for w in self.workflows.list():
+            d = w.to_dict()
+            last = self.runs.list_by_name(w.name, 1) if self.runs is not None else []
+            d["last_run"] = ({k: last[0].get(k) for k in ("id", "status", "started_at", "finished_at", "triggered_by")}
+                             if last else None)
+            out.append(d)
+        return out
 
     def workflow_delete(self, name: str) -> None:
         self._require_workflows().delete(name)

@@ -11,7 +11,7 @@
 }
 
 /* ---------- 列表页 ---------- */
-.wf-list { padding: var(--wf-pad); max-width: 1200px; }
+.wf-list { padding: var(--wf-pad); max-width: 1200px; margin: 0 auto; }
 .wf-list-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .wf-list-hd h2 { margin: 0; font-size: 20px; font-weight: 600; color: var(--dg-text); }
 .wf-err { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c;
@@ -27,7 +27,13 @@
 .wf-ws { color: var(--dg-muted); font-size: 11px; padding: 2px 6px; background: var(--dg-panel-2); border-radius: 3px; }
 .wf-card-meta { display: flex; justify-content: space-between; color: var(--dg-muted); font-size: 11px; margin-bottom: 10px; }
 .wf-card-acts { display: flex; gap: 6px; }
-.wf-card-acts .dg-btn { flex: 1; }
+.wf-card-acts { align-items: center; }
+.wf-card-sp { flex: 1; }
+/* 删除降级为文字按钮：悬停才显红，避免与主操作同权重、误点 */
+.wf-card-del { background: none; border: 0; padding: 4px 6px; border-radius: 4px; font: inherit; font-size: 12px;
+  color: var(--dg-muted); cursor: pointer; opacity: .7; }
+.wf-card:hover .wf-card-del { opacity: 1; }
+.wf-card-del:hover, .wf-card-del:focus-visible { color: var(--dg-red); background: var(--dg-hover); }
 
 /* ---------- 新建页 ---------- */
 .wf-new { padding: var(--wf-pad); max-width: 600px; }
@@ -692,3 +698,15 @@
 .dg-sel-item .dg-sdot { margin-right: 6px; }
 .dg-sdot.pulse { animation: dg-pulse 1.4s ease-in-out infinite; }
 @keyframes dg-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+
+/* 卡片：最近一次运行 */
+.wf-card-run { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--dg-muted); margin-bottom: 10px; }
+.wf-card-run a { color: var(--dg-muted); text-decoration: none; }
+.wf-card-run a:hover { color: var(--dg-text); text-decoration: underline; }
+.wf-st { display: inline-flex; align-items: center; gap: 5px; font-weight: 500; }
+.wf-st::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dg-faint); }
+.wf-st.st-ok::before, .wf-st.st-done::before, .wf-st.st-success::before { background: var(--dg-green); }
+.wf-st.st-error::before, .wf-st.st-err::before, .wf-st.st-failed::before { background: var(--dg-red); }
+.wf-st.st-running::before { background: var(--dg-amber); animation: wf-pulse 1s ease-in-out infinite; }
+.wf-st.st-none { font-weight: 400; color: var(--dg-faint); }
+@keyframes wf-pulse { 50% { opacity: .35; } }
