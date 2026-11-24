@@ -485,7 +485,7 @@
           + `${esc(meta.join(" · ") || "—")}</span></td>`
           + `<td class="eng">${engineCell(i.engine)}</td>`
           + `<td>${esc(i.environment || "—")}</td>`
-          + `<td><span class="dot dot-${esc(state)}"></span>${esc(stateText[state] || state)}</td>`
+          + `<td class="nowrap"><span class="dot dot-${esc(state)}"></span>${esc(stateText[state] || state)}</td>`
           + `<td class="num">${num(i.engines)}</td>`
           + `<td class="num">${i.checked_out == null
               ? '<span class="muted" title="这类连接池不报占用数">—</span>'

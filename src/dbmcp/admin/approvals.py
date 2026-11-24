@@ -170,7 +170,7 @@ def mount(ctx: AdminContext) -> None:
     @mcp.custom_route("/admin/approvals", methods=["GET"])
     @guard
     async def _approvals(_req: Request) -> HTMLResponse:
-        pending = service.list_changes("pending")
+        pending = [c for c in service.list_changes("pending") if c.effective_status() == "pending"]  # 存的是 pending 但已超时的算 expired，归到已决策
         pending.sort(key=lambda c: (not _is_hot(c), c.id))  # 高风险优先
         recent = [c for c in service.list_changes() if c.effective_status() != "pending"][:30]
 
@@ -184,9 +184,9 @@ def mount(ctx: AdminContext) -> None:
                     f"<tr class='row-link{' row-hot' if st == 'pending' and _is_hot(c) else ''}' data-href='/admin/approvals/{c.id}' tabindex='0'><td><a href='/admin/approvals/{c.id}'>#{c.id}</a></td>"
                     f"<td>{_esc(c.project)}/{_esc(c.connection)}{_db_suffix(c)}<br><span class='muted'>{_esc(c.environment)}</span></td>"
                     f"<td>{_badge(c.risk_level, _LEVEL_COLOR)}</td>"
-                    f"<td><code>{_esc(c.sql[:80])}</code></td>"
+                    f"<td class='sqlcell'><code title='{_esc(c.sql)}'>{_esc(c.sql[:80])}</code></td>"
                     f"<td>{_badge(st, _STATUS_COLOR)}</td>"
-                    f"<td class='muted mono ts'>{''.join(f'<span>{p}</span> ' for p in _esc(_fmt_ts(c.created_at)).split(' ')).strip()}</td></tr>"
+                    f"<td class='muted mono ts' style='white-space:nowrap'>{_esc(_fmt_ts(c.created_at))}</td></tr>"
                 )
             return "".join(out)
 

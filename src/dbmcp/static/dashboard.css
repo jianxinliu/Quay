@@ -94,3 +94,5 @@ th.sortable:hover .sarrow{border-bottom-color:var(--faint)}
 /* 引擎列用品牌图标：一列文字全是同一个形状，扫视时分不出哪条是 MySQL */
 .eng-ico{width:17px;height:17px;vertical-align:middle;display:inline-block}
 td.eng{text-align:center}
+
+td.nowrap{white-space:nowrap}

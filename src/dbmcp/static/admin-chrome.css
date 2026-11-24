@@ -171,3 +171,6 @@ body{font-family:var(--sans);margin:0;background:var(--paper);color:var(--text);
   .dbm-panel.from-side{top:64px;bottom:auto;left:12px;right:12px}
   .dbm-panel{top:52px;right:12px;left:12px;width:auto}
 }
+
+/* 审批表 SQL 列：短 SQL 一行显示，长的折行 */
+td.sqlcell{min-width:260px}
