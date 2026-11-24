@@ -174,6 +174,16 @@ _FAVICON_HREF = "data:image/svg+xml;base64," + base64.b64encode(_FAVICON_SVG.enc
 _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
+_THEME_JS = (
+    "<script>(function(){var mq=window.matchMedia&&matchMedia('(prefers-color-scheme: light)');"
+    "window.dbmTheme=function(v){return v==='system'?(mq&&mq.matches?'light':'dark'):(v==='light'?'light':'dark')};"
+    "var h=document.documentElement,pref=h.dataset.themePref;"
+    "function apply(){var t=window.dbmTheme(pref);h.classList.toggle('theme-light',t==='light');"
+    "h.classList.toggle('theme-dark',t!=='light');window.dispatchEvent(new CustomEvent('dbm-theme',{detail:t}))}"
+    "if(pref==='system'){apply();mq&&mq.addEventListener&&mq.addEventListener('change',apply)}})();</script>"
+)
+
+
 def _page(title: str, body: str, pending: int = 0, doc: bool = True,
           font_size: int | None = None, extra_head: str = "", theme: str = "dark") -> str:
     nav_badge = f"<span class='nav-count'>{pending}</span>" if pending else ""
@@ -185,8 +195,8 @@ def _page(title: str, body: str, pending: int = 0, doc: bool = True,
     font_css = f"<style>body{{font-size:{font_size}px}}</style>" if font_size else ""
     theme_cls = "theme-light" if theme == "light" else "theme-dark"
     return f"""<!doctype html>
-<html lang="zh" class="{theme_cls}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh" class="{theme_cls}" data-theme-pref="{theme}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">{_THEME_JS}
 <title>{_esc(title)} · Quay</title>
 {_FAVICON_LINK}
 <link rel="stylesheet" href="/admin/static/admin-chrome.css">{doc_css}{font_css}{extra_head}</head><body>

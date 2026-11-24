@@ -189,7 +189,8 @@ def _coerce(value: str, default: object) -> object:
 def _validate(key: str, raw: object) -> str:
     default = DEFAULTS[key]
     if key == "theme":
-        return "light" if str(raw) == "light" else "dark"
+        v = str(raw)
+        return v if v in ("light", "system") else "dark"
     if key == "text_language":
         return "en" if str(raw).strip().lower() == "en" else "zh"
     if key == "ai_provider":

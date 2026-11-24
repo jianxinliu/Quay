@@ -333,7 +333,9 @@
         var self = this;
         return apiGet("/admin/settings/get").then(function (d) {
           if (d && d.ok && d.settings) {
-            self.theme = d.settings.theme || "dark";
+            self.theme = window.dbmTheme ? window.dbmTheme(d.settings.theme) : (d.settings.theme === "light" ? "light" : "dark");
+            self.themePref = d.settings.theme;
+            if (!self._themeBound) { self._themeBound = true; window.addEventListener("dbm-theme", function (e) { if (self.themePref === "system") self.theme = e.detail; }); }
             self.pageSize = d.settings.redis_page_size || 100;
           }
         }).catch(function () { /* 用默认 */ });
