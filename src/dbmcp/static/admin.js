@@ -162,7 +162,26 @@ function dbmConfirm(form) {
     e.stopPropagation();
     setOpen(!panel.classList.contains('open'));
   });
+  // 面板贴着铃铛弹出：按铃铛实际位置算（宽侧栏 / 查询台窄图标栏 / 窄屏顶栏都适用）
+  function place() {
+    if (!foot) return;
+    var r = bell.getBoundingClientRect(), vw = window.innerWidth, vh = window.innerHeight, gap = 8;
+    var w = Math.min(380, vw - 24);
+    panel.style.width = w + 'px';
+    if (vw <= 720) {  // 窄屏：铃铛在顶栏，面板放在铃铛下方
+      panel.style.top = (r.bottom + gap) + 'px'; panel.style.bottom = 'auto';
+      panel.style.left = Math.max(12, Math.min(r.right - w, vw - w - 12)) + 'px'; panel.style.right = 'auto';
+      return;
+    }
+    var left = r.right + gap;
+    if (left + w > vw - 12) left = Math.max(12, r.left - w - gap);
+    panel.style.left = left + 'px'; panel.style.right = 'auto';
+    panel.style.top = 'auto';
+    panel.style.bottom = Math.max(12, vh - r.bottom) + 'px';  // 底边与铃铛底对齐，向上展开
+  }
+  window.addEventListener('resize', function () { if (panel.classList.contains('open')) place(); });
   function setOpen(open) {
+    if (open) place();
     panel.classList.toggle('open', open);
     bell.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (open) { fetchList(); panel.focus(); }
