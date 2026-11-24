@@ -131,7 +131,17 @@
   }
 
   // ---------------------------------------------------------------- 取数
+  async function loadPending() {
+    const box = document.getElementById("dash-pend");
+    if (!box) return;
+    try {
+      const r = await fetch("/admin/dashboard/pending", { credentials: "same-origin" });
+      if (r.ok) { const html = await r.text(); if (box.innerHTML !== html) box.innerHTML = html; }
+    } catch (_) { /* 下次轮询再试 */ }
+  }
+
   async function load() {
+    loadPending();
     if (loading) return;
     loading = true;
     try {

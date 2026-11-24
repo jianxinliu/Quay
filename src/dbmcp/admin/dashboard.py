@@ -25,7 +25,7 @@ def _dashboard_body(pending_html: str = "") -> str:
   传输量为结果集体积的估算值（按返回给使用者的单元格内容计），不含协议开销。</div>
 </div>
 <div id="dash">
-""" + pending_html + """
+<div id="dash-pend">""" + pending_html + """</div>
  <div class="dash-bar">
   <div class="dash-win" id="dash-win"></div>
   <span class="dash-live-dot" id="dash-dot"></span>
@@ -111,6 +111,12 @@ def mount(ctx: AdminContext) -> None:
                 '<script src="/admin/static/echarts.min.js"></script>'
                 '<script defer src="/admin/static/dashboard.js"></script>')
         return _shell("看板", _dashboard_body(_pending_card(service)), extra_head=head)
+
+    @mcp.custom_route("/admin/dashboard/pending", methods=["GET"])
+    @guard
+    async def _dashboard_pending(_req: Request) -> HTMLResponse:
+        """看板待审批卡片片段，dashboard.js 轮询时替换 #dash-pend（别处批准后卡片随之消失）。"""
+        return HTMLResponse(_pending_card(service))
 
     @mcp.custom_route("/admin/dashboard/data", methods=["GET"])
     @guard

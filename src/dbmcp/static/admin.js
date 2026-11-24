@@ -168,7 +168,11 @@ function dbmConfirm(form) {
     if (open) { fetchList(); panel.focus(); }
   }
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && panel.classList.contains('open')) { setOpen(false); bell.focus(); }
+    if (e.key !== 'Escape' || e.defaultPrevented || !panel.classList.contains('open')) return;
+    // 只在焦点位于通知面板/铃铛时处理，避免抢走其他弹窗的 Esc
+    var a = document.activeElement;
+    if (a !== bell && !panel.contains(a)) return;
+    e.preventDefault(); setOpen(false); bell.focus();
   });
   document.addEventListener('click', function (e) {
     if (!panel.classList.contains('open')) return;
