@@ -191,3 +191,17 @@
 
   dirtyCheck();
 })();
+
+// 主题即改即生效：不走保存条，直接保存并切换当前页
+(function () {
+  const sel = document.querySelector('select[name="theme"]');
+  if (!sel) return;
+  sel.addEventListener('change', async (e) => {
+    e.stopImmediatePropagation();
+    if (window.dbmSetTheme) window.dbmSetTheme(sel.value);
+    const fd = new FormData(); fd.append('theme', sel.value);
+    try { await fetch('/admin/settings/save', { method: 'POST', body: fd }); } catch (_) {}
+    sel.defaultValue = sel.value;
+    [...sel.options].forEach(o => { o.defaultSelected = o.value === sel.value; });
+  }, true);
+})();

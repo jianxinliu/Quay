@@ -335,7 +335,7 @@
           if (d && d.ok && d.settings) {
             self.theme = window.dbmTheme ? window.dbmTheme(d.settings.theme) : (d.settings.theme === "light" ? "light" : "dark");
             self.themePref = d.settings.theme;
-            if (!self._themeBound) { self._themeBound = true; window.addEventListener("dbm-theme", function (e) { if (self.themePref === "system") self.theme = e.detail; }); }
+            if (!self._themeBound) { self._themeBound = true; window.addEventListener("dbm-theme", function (e) { self.theme = e.detail; }); }
             self.pageSize = d.settings.redis_page_size || 100;
           }
         }).catch(function () { /* 用默认 */ });

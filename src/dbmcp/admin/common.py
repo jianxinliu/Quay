@@ -175,12 +175,14 @@ _FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{_FAVICON_HREF}">'
 
 
 _THEME_JS = (
-    "<script>(function(){var mq=window.matchMedia&&matchMedia('(prefers-color-scheme: light)');"
+    "<script>(function(){var mq=window.matchMedia?matchMedia('(prefers-color-scheme: light)'):null;"
     "window.dbmTheme=function(v){return v==='system'?(mq&&mq.matches?'light':'dark'):(v==='light'?'light':'dark')};"
-    "var h=document.documentElement,pref=h.dataset.themePref;"
-    "function apply(){var t=window.dbmTheme(pref);h.classList.toggle('theme-light',t==='light');"
-    "h.classList.toggle('theme-dark',t!=='light');window.dispatchEvent(new CustomEvent('dbm-theme',{detail:t}))}"
-    "if(pref==='system'){apply();mq&&mq.addEventListener&&mq.addEventListener('change',apply)}})();</script>"
+    "var h=document.documentElement,cur=null;"
+    "function apply(){var t=window.dbmTheme(h.dataset.themePref);h.classList.toggle('theme-light',t==='light');"
+    "h.classList.toggle('theme-dark',t!=='light');if(t!==cur){cur=t;window.dispatchEvent(new CustomEvent('dbm-theme',{detail:t}))}}"
+    "window.dbmSetTheme=function(p){h.dataset.themePref=p;apply()};apply();"
+    "if(mq){if(mq.addEventListener)mq.addEventListener('change',apply);else if(mq.addListener)mq.addListener(apply)}"
+    "window.addEventListener('focus',apply);document.addEventListener('visibilitychange',apply)})();</script>"
 )
 
 

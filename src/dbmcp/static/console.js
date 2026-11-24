@@ -4290,7 +4290,7 @@
         if (d && d.ok && d.settings) {
           self.theme = window.dbmTheme ? window.dbmTheme(d.settings.theme) : (d.settings.theme === "light" ? "light" : "dark");
           self.themePref = d.settings.theme;
-          if (!self._themeBound) { self._themeBound = true; window.addEventListener("dbm-theme", function (e) { if (self.themePref === "system") self.theme = e.detail; }); }
+          if (!self._themeBound) { self._themeBound = true; window.addEventListener("dbm-theme", function (e) { self.theme = e.detail; }); }
           self.minimapOn = d.settings.sql_minimap !== false;  // 缺省视为开启
           if (d.settings.sql_font_size) self.editorFontSize = +d.settings.sql_font_size;
           self.editorWordWrap = !!d.settings.sql_word_wrap;

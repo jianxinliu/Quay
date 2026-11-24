@@ -17,7 +17,7 @@ from .ai import DEFAULT_WORKFLOW_PROMPT as _AI_WF_PROMPT_DEFAULT
 # 已知设置项及默认值。get_all 始终返回全部键（缺失回落默认），前端无需兜底。
 DEFAULTS: dict[str, object] = {
     # ——整体
-    "theme": "dark",             # 界面主题：dark / light，全站
+    "theme": "system",           # 界面主题：system（跟随系统，默认）/ dark / light，全站
     # 后台里与 agent 共享的那类文案（风险判定理由、审批单错误、体检报告…）的语言：zh / en。
     # 界面本身仍是中文；agent 通过 MCP 看到的恒为英文，不受此项影响（见 i18n.py）
     "text_language": "zh",

@@ -73,7 +73,7 @@ def build_context(mcp: "FastMCP", service: "DbmService", admin_token: str,
         """系统设置里的主题（dark / light），全站页面外壳共用；读不到按默认深色。"""
         try:
             t = service.get_settings().get("theme")
-            return t if t in ("light", "system") else "dark"
+            return t if t in ("light", "dark", "system") else "system"
         except Exception:
             return "dark"
 
