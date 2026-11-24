@@ -10,7 +10,7 @@ STATIC = Path(__file__).resolve().parents[1] / "src" / "dbmcp" / "static"
 _HEX_IN_VALUE = re.compile(r"\{[^}]*#[0-9a-fA-F]{3,8}\b[^}]*\}")
 
 
-@pytest.mark.parametrize("name", ["settings.css", "dashboard.css"])
+@pytest.mark.parametrize("name", ["admin-doc.css", "settings.css", "dashboard.css"])
 def test_no_bare_hex_colors(name: str) -> None:
     css = re.sub(r"/\*.*?\*/", "", (STATIC / name).read_text(), flags=re.S)
     bad = [m.group(0) for m in _HEX_IN_VALUE.finditer(css)]

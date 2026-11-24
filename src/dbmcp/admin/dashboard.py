@@ -12,7 +12,7 @@ from .common import error_payload
 from .context import AdminContext
 
 
-def _dashboard_body() -> str:
+def _dashboard_body(pending_html: str = "") -> str:
     """看板页骨架。内容全部由 dashboard.js 拉 /admin/dashboard/data 填充——
 
     这一页每几秒就要整体换一遍数，服务端渲染出来立刻就会被 JS 覆盖掉，
@@ -25,6 +25,7 @@ def _dashboard_body() -> str:
   传输量为结果集体积的估算值（按返回给使用者的单元格内容计），不含协议开销。</div>
 </div>
 <div id="dash">
+""" + pending_html + """
  <div class="dash-bar">
   <div class="dash-win" id="dash-win"></div>
   <span class="dash-live-dot" id="dash-dot"></span>
@@ -62,6 +63,33 @@ def _dashboard_body() -> str:
 </div>"""
 
 
+def _pending_card(service) -> str:  # noqa: ANN001
+    """看板首屏：待审批单逐条列出，可直接批准/拒绝（核心路径前置）。无待办时不占位。"""
+    from .approvals import _LEVEL_COLOR, _is_hot  # noqa: PLC0415
+    from .common import _badge, _env_badge, _esc  # noqa: PLC0415
+    try:
+        items = [c for c in service.list_changes("pending") if c.effective_status() == "pending"]
+    except Exception:  # noqa: BLE001
+        return ""
+    if not items:
+        return ""
+    items.sort(key=lambda c: (not _is_hot(c), c.id))  # 高风险优先，其次按提交先后
+    rows = []
+    for c in items[:5]:
+        rows.append(
+            f"<div class='pend-item{' hot' if _is_hot(c) else ''}'>"
+            f"<a href='/admin/approvals/{c.id}'>#{c.id}</a>{_env_badge(c.environment)}{_badge(c.risk_level, _LEVEL_COLOR)}"
+            f"<code title='{_esc(c.sql)}'>{_esc(c.sql[:120])}</code>"
+            + ("" if _is_hot(c) else  # 高风险单不给首屏一键批准，必须进详情页看风险报告
+               f"<form method='post' action='/admin/approvals/{c.id}/approve' onsubmit='return dbmConfirm(this)'>"
+               f"<button class='btn' type='submit' data-confirm='确认批准？'>批准</button></form>")
+            + f"<a class='btn btn-reject' href='/admin/approvals/{c.id}'>{'审阅' if _is_hot(c) else '审阅/拒绝'}</a></div>")
+    more = (f"<div class='muted' style='margin-top:8px'><a href='/admin/approvals'>还有 {len(items) - 5} 条 →</a></div>"
+            if len(items) > 5 else "")
+    return (f"<div class='card pend-card'><h2>待审批 <span class='muted'>({len(items)})</span></h2>"
+            + "".join(rows) + more + "</div>")
+
+
 def mount(ctx: AdminContext) -> None:
     mcp = ctx.mcp
     service = ctx.service
@@ -82,7 +110,7 @@ def mount(ctx: AdminContext) -> None:
         head = ('<link rel="stylesheet" href="/admin/static/dashboard.css">'
                 '<script src="/admin/static/echarts.min.js"></script>'
                 '<script defer src="/admin/static/dashboard.js"></script>')
-        return _shell("看板", _dashboard_body(), extra_head=head)
+        return _shell("看板", _dashboard_body(_pending_card(service)), extra_head=head)
 
     @mcp.custom_route("/admin/dashboard/data", methods=["GET"])
     @guard

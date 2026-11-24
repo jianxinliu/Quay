@@ -37,7 +37,7 @@ td code{font-size:12.5px;color:var(--code-ink);background:var(--code-bg);padding
 .btn.pg{padding:6px 13px;font-size:13px}
 .btn.disabled{opacity:.4;pointer-events:none}
 /* 徽章 / pill / tag */
-.badge{display:inline-block;padding:2px 9px;border-radius:6px;color:#fff;font-size:11.5px;font-weight:600;
+.badge{display:inline-block;padding:2px 9px;border-radius:6px;color:var(--on-solid);font-size:11.5px;font-weight:600;
   font-family:var(--mono);letter-spacing:.3px}
 .pill{display:inline-block;padding:1px 10px;border-radius:6px;font-size:12px;font-weight:600;font-family:var(--mono)}
 .pill-yes{background:var(--ok-bg);color:var(--ok-ink)} .pill-no{background:var(--chip);color:var(--muted)}
@@ -55,9 +55,9 @@ pre{background:var(--pre-bg);color:var(--pre-ink);padding:14px 16px;border-radiu
 /* 按钮 */
 .btn{display:inline-block;padding:9px 17px;border-radius:8px;border:1px solid transparent;
   font-size:13.5px;font-weight:500;cursor:pointer;text-decoration:none;transition:filter .12s,transform .04s;
-  background:var(--ink);color:#fff;font-family:var(--sans)}
+  background:var(--ink);color:var(--on-solid);font-family:var(--sans)}
 .btn:hover{filter:brightness(1.15);text-decoration:none} .btn:active{transform:translateY(1px)}
-.btn-primary{background:var(--accent)} .btn-approve{background:#16794f} .btn-reject{background:#c0392b}
+.btn-primary{background:var(--accent)} .btn-approve{background:var(--approve)} .btn-reject{background:var(--reject)}
 .btn-ghost{background:var(--surface);color:var(--text);border-color:var(--border)}
 .btn-ghost:hover{background:var(--chip);filter:none}
 /* 表单（去原生观感：下拉自绘箭头、checkbox 主题色） */
@@ -98,3 +98,24 @@ label{font-size:12.5px;color:var(--muted);display:block;margin:12px 0 5px;font-w
 @media (max-width:720px){
   main{padding:22px 18px}
 }
+
+/* 审批：风险摘要条 + 高风险行 */
+.risk-strip{display:flex;flex-wrap:wrap;gap:0;background:var(--surface);border:1px solid var(--border);
+  border-radius:10px;margin-bottom:16px;overflow:hidden}
+.risk-strip.hot{border-color:var(--danger-border);box-shadow:inset 4px 0 0 var(--danger-ink)}
+.rs-cell{flex:1 1 0;min-width:96px;padding:10px 14px;border-right:1px solid var(--line)}
+.rs-cell:last-child{border-right:none}
+.rs-cell>span{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+.rs-cell b{font-size:16px}
+.risk-bad{color:var(--danger-ink);font-weight:600}
+tr.row-hot td{background:var(--danger-bg)}
+tr.row-hot td:first-child{box-shadow:inset 3px 0 0 var(--danger-ink)}
+.pend-card .pend-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.pend-card .pend-item:last-child{border-bottom:none}
+.pend-card .pend-item.hot{background:var(--danger-bg);margin:0 -12px;padding:8px 12px;border-radius:6px}
+.pend-card code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pend-card form{display:inline;margin:0}
+.pend-card .btn{padding:4px 10px;font-size:12px}
+@media (max-width:720px){.rs-cell{flex:1 1 45%;border-bottom:1px solid var(--line)}}
+table th{white-space:nowrap}
+td.ts span{white-space:nowrap;display:inline-block}

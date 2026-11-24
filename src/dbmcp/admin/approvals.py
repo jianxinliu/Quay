@@ -18,6 +18,7 @@ from .common import (
     _fmt_ts,
     _local_request_ok,
     _page,
+    _THEME_JS,
     _pagehead,
 )
 from .context import AdminContext
@@ -32,8 +33,8 @@ def _act_page(title: str, inner: str, theme: str) -> str:
     只有一张卡片；样式复用后台的 chrome/doc 两份 CSS 与主题。"""
     theme_cls = "theme-light" if theme == "light" else "theme-dark"
     return f"""<!doctype html>
-<html lang="zh" class="{theme_cls}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh" class="{theme_cls}" data-theme-pref="{theme}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">{_THEME_JS}
 <title>{_esc(title)} · Quay</title>{_FAVICON_LINK}
 <link rel="stylesheet" href="/admin/static/admin-chrome.css">
 <link rel="stylesheet" href="/admin/static/admin-doc.css">
@@ -102,6 +103,30 @@ def _impact_html(risk: dict) -> str:
     )
 
 
+
+def _is_hot(c) -> bool:  # noqa: ANN001
+    """高风险单：生产环境，或风险等级 HIGH/CRITICAL。列表与看板据此单独标红。"""
+    return (c.environment or "").lower() == "prod" or str(c.risk_level).upper() in ("HIGH", "CRITICAL")
+
+
+def _risk_strip(c) -> str:  # noqa: ANN001
+    """审批详情页头：环境 / 风险 / 预估影响行数 / 涉及表 / WHERE，审批人 3 秒内判断风险。"""
+    risk = c.risk_report or {}
+    tables = risk.get("tables") or []
+    tbl = "、".join(_esc(t) for t in tables[:4]) + (f" 等 {len(tables)} 张" if len(tables) > 4 else "") or "—"
+    where = risk.get("has_where")
+    where_txt = "有" if where else ("无 WHERE" if where is False else "—")
+    cells = [
+        ("环境", _env_badge(c.environment)),
+        ("风险", _badge(c.risk_level, _LEVEL_COLOR)),
+        ("预估影响行数", f"<b>{_num(risk.get('affected_estimate'), unknown='未知')}</b>"),
+        ("涉及表", tbl),
+        ("WHERE", f"<span class='{'risk-bad' if where is False else ''}'>{where_txt}</span>"),
+    ]
+    inner = "".join(f"<div class='rs-cell'><span>{k}</span><div>{v}</div></div>" for k, v in cells)
+    return f"<div class='risk-strip{' hot' if _is_hot(c) else ''}' role='region' aria-label='风险摘要'>{inner}</div>"
+
+
 # MySQL 对单行主键更新等语句的无信息量输出，转成人话
 _PLAN_NO_INFO = "not executable by iterator executor"
 _PLAN_NO_INFO_HTML = ('<div class="sec-title">执行计划</div>'
@@ -146,6 +171,7 @@ def mount(ctx: AdminContext) -> None:
     @guard
     async def _approvals(_req: Request) -> HTMLResponse:
         pending = service.list_changes("pending")
+        pending.sort(key=lambda c: (not _is_hot(c), c.id))  # 高风险优先
         recent = [c for c in service.list_changes() if c.effective_status() != "pending"][:30]
 
         def _rows(changes: list) -> str:
@@ -155,12 +181,12 @@ def mount(ctx: AdminContext) -> None:
             for c in changes:
                 st = c.effective_status()
                 out.append(
-                    f"<tr><td><a href='/admin/approvals/{c.id}'>#{c.id}</a></td>"
+                    f"<tr class='{'row-hot' if st == 'pending' and _is_hot(c) else ''}'><td><a href='/admin/approvals/{c.id}'>#{c.id}</a></td>"
                     f"<td>{_esc(c.project)}/{_esc(c.connection)}{_db_suffix(c)}<br><span class='muted'>{_esc(c.environment)}</span></td>"
                     f"<td>{_badge(c.risk_level, _LEVEL_COLOR)}</td>"
                     f"<td><code>{_esc(c.sql[:80])}</code></td>"
                     f"<td>{_badge(st, _STATUS_COLOR)}</td>"
-                    f"<td class='muted mono'>{_esc(_fmt_ts(c.created_at))}</td></tr>"
+                    f"<td class='muted mono ts'>{''.join(f'<span>{p}</span> ' for p in _esc(_fmt_ts(c.created_at)).split(' ')).strip()}</td></tr>"
                 )
             return "".join(out)
 
@@ -231,6 +257,7 @@ def mount(ctx: AdminContext) -> None:
 
         body = f"""
 {_pagehead("Change #" + str(c.id), f"审批单 #{c.id}")}
+{_risk_strip(c)}
 <div class='card'>
  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">{_badge(st, _STATUS_COLOR)} {_badge(c.risk_level, _LEVEL_COLOR)} <span class="tag">{_esc(c.engine)}</span></div>
  <dl class="kv">
