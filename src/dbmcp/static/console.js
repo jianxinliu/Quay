@@ -4994,7 +4994,11 @@
               <td v-for="c in loadingCols" :key="c"><span class="dg-skel"></span></td></tr></tbody>
           </table></div>
         </div>
-        <div v-else class="dg-res-empty">{{ activeTab.type==='data' ? "加载中…" : "运行查询查看结果（⌘/Ctrl+Enter）。" }}</div>
+        <div v-else-if="activeTab.type==='data'" class="dg-res-empty">加载中…</div>
+        <div v-else class="dg-res-empty dg-res-guide">
+          <div class="g-t">写好 SQL 后运行，结果显示在这里</div>
+          <div class="g-k"><span><kbd>⌘/Ctrl</kbd>+<kbd>Enter</kbd> 运行当前语句</span><span><kbd>⌘/Ctrl</kbd>+<kbd>B</kbd> 加书签</span><span>左侧双击表名 查看数据</span></div>
+        </div>
       </template>
     </div>
   </section>

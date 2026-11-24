@@ -47,7 +47,8 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 
 /* 浅色主题：把 --dg-* 覆盖为浅色一套（作用于查询台 .dg-root / Redis .rd-root / 权限页 .pv-root）。
    系统设置里选择，服务端持久化，两个 IDE 页共用。侧栏保持深色（如 VS Code 浅色主题的活动栏）。 */
-.dg-root.theme-light, .rd-root.theme-light, .pv-root.theme-light {
+.dg-root.theme-light, .rd-root.theme-light, .pv-root.theme-light,
+html.theme-light .dg-root, html.theme-light .rd-root, html.theme-light .pv-root, html.theme-light .wf-root {
   --dg-bg: #ffffff; --dg-panel: #f2f4f7; --dg-panel-2: #e9ecf1; --dg-border: #d4d8df;
   --dg-text: #1f2530; --dg-muted: #5b6270; --dg-faint: #838a97;
   --dg-accent: #0d9488; --dg-accent-soft: #ccfbf1; --dg-hover: #eef1f6;
@@ -140,7 +141,7 @@ main { padding: 0 !important; max-width: none !important; height: 100vh; overflo
 .dg-acc .acc-hd .acc-acts { margin-left: auto; display: flex; align-items: center; gap: 2px;
   text-transform: none; letter-spacing: 0; }
 .dg-acc .acc-body { overflow: auto; }
-.dg-acc .acc-body.grow { flex: 1 1 auto; min-height: 80px; }          /* 库/表：占据剩余空间、内部滚动 */
+.dg-acc .acc-body.grow { flex: 0 1 auto; min-height: 80px; }   /* 库/表：按内容高度，表多时收缩并内部滚动；其余面板紧随其后 */          /* 库/表：占据剩余空间、内部滚动 */
 .dg-acc .acc-body.cap { flex: 0 0 auto; max-height: 30vh; }           /* 工作流/历史/片段：有界、贴底、内部滚动 */
 .dg-sec-hd {
   display: flex; align-items: center; justify-content: space-between;
@@ -1479,3 +1480,14 @@ table.dg-rt th .disp-badge { margin-left: 4px; font-size: 11px; opacity: .85; }
   white-space: nowrap; flex: 1; min-width: 0; }
 .dg-checkup .ck-rec-acts { display: flex; gap: 6px; flex: none; }
 
+
+/* 结果区空状态：居中引导 + 快捷键 */
+.dg-res-guide { display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding-top: 56px; text-align: center; justify-content: flex-start; }
+.dg-res-guide .g-t { color: var(--dg-muted); font-size: 13px; }
+.dg-res-guide .g-k { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 18px; font-size: 11.5px; }
+.dg-res-guide kbd { font-family: var(--dg-mono, ui-monospace, monospace); font-size: 10.5px; padding: 1px 5px;
+  border: 1px solid var(--dg-border); border-bottom-width: 2px; border-radius: 4px; background: var(--dg-panel); color: var(--dg-text); }
+/* ✨AI 浮钮降噪：平时半透明小号，悬停/聚焦才完整显示，不再抢编辑器视线 */
+.dg-ai-fab { opacity: .55; font-size: 11.5px; padding: 3px 9px; transition: opacity .15s; }
+.dg-ai-fab:hover, .dg-ai-fab:focus-visible { opacity: 1; }
