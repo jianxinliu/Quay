@@ -186,7 +186,7 @@ def mount(ctx: AdminContext) -> None:
                     f"<td>{_badge(c.risk_level, _LEVEL_COLOR)}</td>"
                     f"<td class='sqlcell'><code title='{_esc(c.sql)}'>{_esc(c.sql[:80])}</code></td>"
                     f"<td>{_badge(st, _STATUS_COLOR)}</td>"
-                    f"<td class='muted mono ts' style='white-space:nowrap'>{_esc(_fmt_ts(c.created_at))}</td></tr>"
+                    f"<td class='muted mono ts' style='white-space:nowrap'>{'<br>'.join(_esc(_fmt_ts(c.created_at)).split(' ', 1))}</td></tr>"
                 )
             return "".join(out)
 
