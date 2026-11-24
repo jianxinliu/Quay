@@ -181,7 +181,7 @@ def mount(ctx: AdminContext) -> None:
             for c in changes:
                 st = c.effective_status()
                 out.append(
-                    f"<tr class='{'row-hot' if st == 'pending' and _is_hot(c) else ''}'><td><a href='/admin/approvals/{c.id}'>#{c.id}</a></td>"
+                    f"<tr class='row-link{' row-hot' if st == 'pending' and _is_hot(c) else ''}' data-href='/admin/approvals/{c.id}' tabindex='0'><td><a href='/admin/approvals/{c.id}'>#{c.id}</a></td>"
                     f"<td>{_esc(c.project)}/{_esc(c.connection)}{_db_suffix(c)}<br><span class='muted'>{_esc(c.environment)}</span></td>"
                     f"<td>{_badge(c.risk_level, _LEVEL_COLOR)}</td>"
                     f"<td><code>{_esc(c.sql[:80])}</code></td>"

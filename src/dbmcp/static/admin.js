@@ -248,3 +248,16 @@ function dbmConfirm(form) {
   }
   connectSSE();
 })();
+
+// 表格整行可点：tr.row-link[data-href]；点到行内链接/按钮/表单时不拦截
+(function () {
+  function go(e) {
+    var tr = e.target.closest && e.target.closest('tr.row-link[data-href]');
+    if (!tr || e.target.closest('a,button,input,select,textarea,form')) return;
+    if (e.type === 'keydown' && e.key !== 'Enter') return;
+    var url = tr.getAttribute('data-href');
+    if (e.metaKey || e.ctrlKey) window.open(url, '_blank'); else location.href = url;
+  }
+  document.addEventListener('click', go);
+  document.addEventListener('keydown', go);
+})();

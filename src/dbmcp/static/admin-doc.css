@@ -119,3 +119,5 @@ tr.row-hot td:first-child{box-shadow:inset 3px 0 0 var(--danger-ink)}
 @media (max-width:720px){.rs-cell{flex:1 1 45%;border-bottom:1px solid var(--line)}}
 table th{white-space:nowrap}
 td.ts span{white-space:nowrap;display:inline-block}
+tr.row-link{cursor:pointer}
+tr.row-link:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
